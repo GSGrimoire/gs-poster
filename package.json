@@ -1,0 +1,34 @@
+{
+  "name": "gs-poster",
+  "version": "0.1.0",
+  "description": "GS Grimoire Facebook poster: MCP server where Claude drafts and Gus approves",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "deploy:prepare": "node scripts/prepare-deploy.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GSGrimoire/gs-poster.git"
+  },
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/GSGrimoire/gs-poster/issues"
+  },
+  "homepage": "https://github.com/GSGrimoire/gs-poster#readme",
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.3",
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "0.28.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261014.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.151.0"
+  },
+  "private": true,
+  "type": "module"
+}

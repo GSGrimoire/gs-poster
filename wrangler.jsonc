@@ -1,0 +1,20 @@
+// gs-poster: GS Grimoire Facebook poster.
+// The KV and D1 ids are filled in at deploy time by scripts/prepare-deploy.mjs,
+// which writes wrangler.generated.jsonc. Locally, `wrangler dev` uses local storage.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gs-poster",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-oauth-kv" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "gs-poster-db", "database_id": "local-gs-poster-db" }],
+  "vars": {
+    // GitHub accounts allowed to sign in. Comma-separated, case-insensitive.
+    "ALLOWED_GITHUB_LOGINS": "GSGrimoire",
+    "GRAPH_VERSION": "v24.0",
+    "TIMEZONE": "Europe/Copenhagen"
+  }
+}
