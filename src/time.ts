@@ -63,6 +63,11 @@ export function toLocalInput(date: Date, tz: string): string {
   return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
 }
 
+/** Day heading: "Thu 16 Oct". */
+export function dayLabel(date: Date, tz: string): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: tz, weekday: "short", day: "numeric", month: "short" }).format(date);
+}
+
 /** Human form: "Thu 16 Oct, 19:00". */
 export function formatLocal(date: Date, tz: string): string {
   return new Intl.DateTimeFormat("en-GB", {

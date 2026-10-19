@@ -175,6 +175,11 @@ export async function recentAudit(db: D1Database, limit = 30): Promise<AuditRow[
   return results;
 }
 
+export async function lastAudit(db: D1Database, action: string): Promise<AuditRow | null> {
+  await ensureSchema(db);
+  return db.prepare(`SELECT * FROM audit WHERE action = ? ORDER BY ts DESC LIMIT 1`).bind(action).first<AuditRow>();
+}
+
 // --- PIN lockout: 5 wrong PINs in an hour locks approvals for that hour.
 
 const PIN_WINDOW_MS = 60 * 60 * 1000;

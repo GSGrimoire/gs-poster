@@ -46,6 +46,13 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
   return (await getPost(db, id))!;
 }
 
+/** Gus's edits to a draft, kept without approving it. Nothing goes to Facebook. */
+export async function saveEdits(env: Env, id: string, input: ApproveInput): Promise<boolean> {
+  const ok = await updatePost(env.DB, id, { message: input.message, scheduled_at: input.scheduledAt?.toISOString() ?? null }, ["draft"]);
+  if (ok) await audit(env.DB, input.actor, "edited", id);
+  return ok;
+}
+
 export async function rejectPost(env: Env, id: string, reason: string, actor: string): Promise<boolean> {
   const ok = await updatePost(env.DB, id, { status: "rejected", note: reason || null }, ["draft"]);
   if (ok) await audit(env.DB, actor, "rejected", id, reason || undefined);

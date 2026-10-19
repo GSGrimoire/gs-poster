@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkMessage, checkWhen, APPROVE_MIN_LEAD_MS, DRAFT_MIN_LEAD_MS } from "../src/validate.ts";
-import { localToUtc, parseWhen, toLocalInput, formatLocal } from "../src/time.ts";
+import { dayLabel, localToUtc, parseWhen, toLocalInput, formatLocal } from "../src/time.ts";
 import { parseGitHubUrl, checkImageUrl } from "../src/media.ts";
 
 const TZ = "Europe/Copenhagen";
@@ -36,6 +36,12 @@ test("Copenhagen local time converts across DST", () => {
   assert.equal(toLocalInput(new Date("2026-07-01T17:00:00Z"), TZ), "2026-07-01T19:00");
   assert.equal(parseWhen("2026-07-01T19:00:00+02:00", TZ).toISOString(), "2026-07-01T17:00:00.000Z");
   assert.match(formatLocal(new Date("2026-07-01T17:00:00Z"), TZ), /19:00/);
+});
+
+test("day headings follow Copenhagen, not UTC", () => {
+  // 23:30 UTC on 24 Oct is already Sunday 25 Oct in Copenhagen (CEST, +2).
+  assert.equal(dayLabel(new Date("2026-10-24T23:30:00Z"), TZ), "Sun 25 Oct");
+  assert.equal(dayLabel(new Date("2026-10-24T21:30:00Z"), TZ), "Sat 24 Oct");
 });
 
 test("schedule window", () => {

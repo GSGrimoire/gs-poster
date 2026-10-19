@@ -32,7 +32,7 @@ You only do this once. Roughly 20 minutes, plus the Meta part.
 
 ### 2. GitHub repo (this one)
 1. **Settings → Secrets and variables → Actions → New repository secret**: `CLOUDFLARE_API_TOKEN` = the token from step 1.2.
-2. **Settings → Environments → New environment** `production`. Tick **Required reviewers** and add yourself. From then on every deploy waits for your click, so no code change goes live without you seeing it. (If GitHub doesn't offer required reviewers on this private repo, see "Deploy gate" below.)
+2. **Settings → Environments → New environment** `production`. Tick **Required reviewers** and add yourself. From then on every deploy waits for your click, so no code change goes live without you seeing it. GitHub only offers required reviewers on private repos with an Enterprise plan; see "Deploy gate" below.
 3. **Actions → Deploy → Run workflow**. Approve it when it asks. The run summary shows the site URL, e.g. `https://gs-poster.<you>.workers.dev`.
 
 ### 3. GitHub sign-in app
@@ -44,7 +44,7 @@ You only do this once. Roughly 20 minutes, plus the Meta part.
 Create it, then **Generate a new client secret**. Keep the Client ID and the secret for the next step.
 
 ### 4. Worker secrets
-Cloudflare dashboard → **Workers & Pages → gs-poster → Settings → Variables and Secrets → Add**, type **Secret**:
+Cloudflare dashboard → **Workers & Pages → gs-poster → Settings → Variables and Secrets → Add**, type **Secret** (not Text: Text values are wiped by the next deploy):
 
 | Name | Value |
 |---|---|
@@ -59,26 +59,29 @@ Cloudflare dashboard → **Workers & Pages → gs-poster → Settings → Variab
 `COOKIE_SECRET` is created automatically on the first deploy. Never put any of these in the repo or in a chat.
 
 ### 5. Meta (Facebook)
-In your Meta app (Development mode is fine, since only your own Page is used):
+In your Meta app:
 - Permissions for the poster's token: `pages_manage_posts`, `pages_read_engagement`, `pages_show_list`.
 - Get a long-lived user token, then read `/me/accounts`. The Page token it returns does not expire on a timer. It stops working if you change your Facebook password or lose admin on the Page.
 - Keep the analytics dashboard on a **separate, read-only** token.
-- Recommended: turn on **Require app secret** in the app's advanced settings and add `FB_APP_SECRET` above. A leaked token alone is then useless.
+- Recommended: turn on **Require app secret** in the app's advanced settings and add `FB_APP_SECRET` above. A leaked token alone is then useless. Add the secret to Cloudflare first, and note it also applies to anything else using the same Meta app.
+- **Switch the app to Live.** Posts made by an app in Development mode are shown only to people with a role on the app, so fans would not see them (or would see them without images). Going Live asks for a privacy policy URL and data deletion instructions: use the site URL + `/privacy` for both. For your own Page, standard access should be enough; if Meta asks for App Review, stop and check what it wants.
 
 ### 6. Connect Claude
 1. Open the site URL and sign in with GitHub once.
 2. claude.ai → **Settings → Connectors → Add custom connector**, URL = site URL + `/mcp`. Connect, sign in, **Allow**.
-3. Ask Claude to run **check_setup**. It reports anything missing and whether the Page token works.
+3. Ask Claude to run **check_setup**. It reports anything missing and whether the Page token works. The site's **setup** page (site URL + `/setup`) shows the same, plus whether Claude has connected.
 
 ## Day to day
 1. After a Release Schedule session, Claude drafts the Facebook posts with their times.
-2. You open the site (it works on a phone), check each draft, edit if needed, enter the PIN and approve. Or reject it with a note. Claude sees the note and revises.
+2. You open the site (it works on a phone). Drafts are listed by day; each one shows a preview laid out like the Facebook feed. Edit the caption or time and **Save changes** (no PIN), or enter the PIN and approve. Or reject it with a note: Claude sees the note and revises, and the note stays on the revised draft so you can compare.
 3. Facebook publishes at the set time. You can cancel from the site or in Business Suite.
 
 Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB, at most 10 per post.
 
 ## Deploy gate
-Whoever can change this code controls what the server does. That's why deploys wait for your approval in the `production` environment. Claude's GitHub access in these sessions cannot approve deployments. If required reviewers are not available for this private repo on your GitHub plan, either make the repo public (it contains no secrets) or deploy only by running the workflow yourself.
+Whoever can change this code controls what the server does. That's why deploys are meant to wait for your approval in the `production` environment. Claude's GitHub access in these sessions cannot approve deployments.
+
+On a private repo, GitHub only offers required reviewers with an Enterprise plan. Without them the `production` environment does not pause, and every push to `main` deploys straight away. The options are to make the repo public (it contains no secrets) and then add yourself as a required reviewer, or to change the workflow so pushes to `main` only run checks and deploys happen only when you run the workflow by hand.
 
 ## Development
 ```
