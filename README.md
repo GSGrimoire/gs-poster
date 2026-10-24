@@ -32,8 +32,7 @@ You only do this once. Roughly 20 minutes, plus the Meta part.
 
 ### 2. GitHub repo (this one)
 1. **Settings → Secrets and variables → Actions → New repository secret**: `CLOUDFLARE_API_TOKEN` = the token from step 1.2.
-2. **Settings → Environments → New environment** `production`. Tick **Required reviewers** and add yourself. From then on every deploy waits for your click, so no code change goes live without you seeing it. (If GitHub doesn't offer required reviewers on this private repo, see "Deploy gate" below.)
-3. **Actions → Deploy → Run workflow**. Approve it when it asks. The run summary shows the site URL, e.g. `https://gs-poster.<you>.workers.dev`.
+2. **Actions → Deploy → Run workflow**. The run summary shows the site URL, e.g. `https://gs-poster.<you>.workers.dev`.
 
 ### 3. GitHub sign-in app
 [github.com/settings/developers](https://github.com/settings/developers) → **OAuth Apps → New OAuth App**
@@ -44,7 +43,7 @@ You only do this once. Roughly 20 minutes, plus the Meta part.
 Create it, then **Generate a new client secret**. Keep the Client ID and the secret for the next step.
 
 ### 4. Worker secrets
-Cloudflare dashboard → **Workers & Pages → gs-poster → Settings → Variables and Secrets → Add**, type **Secret**:
+In [dash.cloudflare.com](https://dash.cloudflare.com): left sidebar **Compute (Workers) → Workers & Pages** → click **gs-poster** → **Settings** tab → **Variables and Secrets** → **+ Add**. Set Type to **Secret**, enter the name exactly, paste the value, then **Deploy**. These go in Cloudflare, not in GitHub's repo secrets (only `CLOUDFLARE_API_TOKEN` lives there).
 
 | Name | Value |
 |---|---|
@@ -77,8 +76,10 @@ In your Meta app (Development mode is fine, since only your own Page is used):
 
 Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB, at most 10 per post.
 
-## Deploy gate
-Whoever can change this code controls what the server does. That's why deploys wait for your approval in the `production` environment. Claude's GitHub access in these sessions cannot approve deployments. If required reviewers are not available for this private repo on your GitHub plan, either make the repo public (it contains no secrets) or deploy only by running the workflow yourself.
+## Who reviews changes
+Whoever can change this code controls what the server does, so changes go through a second pair of eyes. As in gs-scribe, Gus does not review code: Claude works on a branch and opens a pull request, ChatGPT reviews it against the checklist in `CLAUDE.md` and merges, and merging to `main` deploys. Claude never pushes to `main` or merges its own pull requests.
+
+This is a working agreement between the two assistants. GitHub only enforces review rules on private repos on paid plans, so nothing technically stops a direct push. The approval PIN still guards every post at runtime.
 
 ## Development
 ```
