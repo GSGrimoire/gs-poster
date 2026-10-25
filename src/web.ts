@@ -23,6 +23,7 @@ import {
   sha256,
   type Session,
 } from "./session.ts";
+import { isSameOrigin } from "./origin.ts";
 import { formatLocal, localToUtc, toLocalInput } from "./time.ts";
 import { APPROVE_MIN_LEAD_MS, checkMessage, checkWhen } from "./validate.ts";
 
@@ -38,12 +39,7 @@ function safeNext(next: string | null): string {
 }
 
 function sameOrigin(req: Request): boolean {
-  const self = new URL(req.url).origin;
-  const origin = req.headers.get("Origin");
-  if (origin && origin !== self) return false;
-  const site = req.headers.get("Sec-Fetch-Site");
-  if (site && site !== "same-origin" && site !== "none") return false;
-  return true;
+  return isSameOrigin(new URL(req.url).origin, req.headers.get("Origin"), req.headers.get("Sec-Fetch-Site"));
 }
 
 async function requireSession(env: Env, req: Request): Promise<Session | Response> {
