@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_IMAGES, FACEBOOK_IMAGE_BATCH_SIZE } from "../src/validate.ts";
+import { MAX_IMAGES, FACEBOOK_IMAGE_BATCH_SIZE, nextFacebookImageBatch } from "../src/validate.ts";
 import { checkBluesky, publishBluesky } from "../src/bluesky.ts";
-import { nextFacebookImageBatch } from "../src/facebook-queue.ts";
 import { checkVideoUrl, fetchVideo, INITIAL_VIDEO_MAX_BYTES } from "../src/video.ts";
 import type { Env } from "../src/env.ts";
 
