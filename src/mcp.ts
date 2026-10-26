@@ -110,7 +110,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     {
       title: "Draft a GS Poster post",
       description:
-        "Save a post for the GS Grimoire Facebook Page as a DRAFT for Gus to review. Nothing is published: Gus approves it on the review page (returned as review_url), and only then does it go to Facebook. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
+        "Save a Facebook, Bluesky or combined GS Grimoire DRAFT for approval. Nothing is published until Gus approves the target(s) on the review page with his PIN. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
       inputSchema: z.object({
         message: z.string().max(63206).describe("Facebook caption or shared descriptive caption."),
         facebook_enabled: z.boolean().default(true).describe("Whether to publish to Facebook. False requires a Bluesky target."),
@@ -124,10 +124,11 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ message, images = [], link, publish_at, label, release, facebook_enabled, bluesky }) => {
-      const checks = checkMessage(message, { hasImages: images.length > 0 });
+      const checks = checkMessage(message, { hasImages: images.length > 0 || (!facebook_enabled && !!bluesky) });
       const time = readWhen(env, publish_at);
       const imgErrors = await checkImages(env, images);
-      const bsErrors = bluesky ? [...checkBluesky(bluesky), ...(await checkImages(env, bluesky.images.map((i) => i.url)))] : [];
+      const bsHouse = bluesky ? checkMessage(bluesky.caption, { hasImages: bluesky.images.length > 0 }) : null;
+      const bsErrors = bluesky ? [...checkBluesky(bluesky), ...bsHouse!.errors, ...(await checkImages(env, bluesky.images.map((i) => i.url)))] : [];
       const errors = [...checks.errors, ...(time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
       if (!facebook_enabled && !bluesky) errors.push("Select Facebook, Bluesky or both.");
       if (errors.length) return fail("Draft not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
@@ -143,7 +144,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         bluesky: bluesky ?? null,
       });
       await audit(env.DB, actor(), "drafted", p.id, label);
-      return ok({ saved: true, note: "Waiting for Gus to approve. Not published.", warnings: checks.warnings, post: view(env, origin, p) });
+      return ok({ saved: true, note: "Waiting for Gus to approve. Not published.", warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, p) });
     },
   );
 
@@ -172,12 +173,13 @@ export function buildServer(env: Env, origin: string): McpServer {
       if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
       const nextMessage = message ?? cur.message;
       const nextImages = images ?? cur.images;
-      const checks = checkMessage(nextMessage, { hasImages: nextImages.length > 0 });
       const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
       const imgErrors = images ? await checkImages(env, images) : [];
       const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
-      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
+      const checks = checkMessage(nextMessage, { hasImages: nextImages.length > 0 || (!fbNext && !!bsNext) });
+      const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
+      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors, ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
       if (!fbNext && !bsNext) errors.push("Select Facebook, Bluesky or both.");
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
@@ -201,7 +203,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         if (!(await saveBlueskyDraft(env.DB, id, bsNext, fbNext))) return fail("Could not save the Bluesky target.");
       }
       await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id);
-      return ok({ saved: true, warnings: checks.warnings, post: view(env, origin, (await getPost(env.DB, id))!) });
+      return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
     },
   );
 
