@@ -11,7 +11,8 @@ export interface CheckResult {
 }
 
 const FB_MAX_MESSAGE = 63_206;
-export const MAX_IMAGES = 10;
+export const MAX_IMAGES = 80;
+export const FACEBOOK_IMAGE_BATCH_SIZE = 8;
 
 /** Facebook: a scheduled post must be 10 minutes to 30 days out. */
 export const FB_MIN_LEAD_MS = 10 * 60 * 1000;
