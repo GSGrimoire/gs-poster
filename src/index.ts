@@ -9,6 +9,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import type { Env } from "./env.ts";
 import { buildServer } from "./mcp.ts";
 import { handleWeb } from "./web.ts";
+import { publishDueBluesky } from "./publish.ts";
 
 const providers = new Map<string, OAuthProvider<Env>>();
 
@@ -42,6 +43,9 @@ function providerFor(origin: string): OAuthProvider<Env> {
 }
 
 export default {
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await publishDueBluesky(env);
+  },
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response {
     const origin = new URL(request.url).origin;
     if (env.PUBLIC_ORIGIN && origin !== env.PUBLIC_ORIGIN) return new Response("Not found", { status: 404 });
