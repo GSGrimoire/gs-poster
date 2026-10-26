@@ -227,7 +227,7 @@ export async function saveBlueskyDraft(
       caption = excluded.caption, images = excluded.images,
       patreon = excluded.patreon, facebook_enabled = excluded.facebook_enabled,
       status = 'draft', uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL
-    WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND status IN ('draft','rejected')`)
+    WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND status IN ('draft','rejected'))`)
     .bind(id, draft.caption, JSON.stringify(draft.images),
       draft.patreon ? JSON.stringify(draft.patreon) : null, facebookEnabled ? 1 : 0, id, id).run();
   return (result.meta.changes ?? 0) > 0;
