@@ -15,6 +15,14 @@ import { FACEBOOK_IMAGE_BATCH_SIZE } from "./validate.ts";
 export const BULK_FACEBOOK_THRESHOLD = 10;
 export const BULK_SCHEDULE_MIN_LEAD_MS = 30 * 60 * 1000;
 
+/** Ordered, non-overlapping per-run upload boundaries. */
+export function nextFacebookImageBatch(start: number, total: number): { start: number; end: number } {
+  if (!Number.isInteger(start) || !Number.isInteger(total) || start < 0 || total < 0 || start > total || total > 80) {
+    throw new Error("Invalid Facebook upload checkpoint or image count.");
+  }
+  return { start, end: Math.min(start + FACEBOOK_IMAGE_BATCH_SIZE, total) };
+}
+
 interface Job {
   post_id: string;
   media_ids: string;
@@ -85,7 +93,7 @@ export async function processFacebookUploadBatch(env: Env): Promise<void> {
   if (!job) return;
   const post = await getPost(env.DB, job.post_id);
   if (!post || !post.facebook_enabled || !post.approved_at || post.fb_post_id) return;
-  const end = Math.min(job.next_index + FACEBOOK_IMAGE_BATCH_SIZE, post.images.length);
+  const { end } = nextFacebookImageBatch(job.next_index, post.images.length);
   const scheduledUnix = post.scheduled_at ? Math.floor(Date.parse(post.scheduled_at) / 1000) : undefined;
   try {
     let index = job.next_index;
