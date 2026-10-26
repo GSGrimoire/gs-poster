@@ -7,7 +7,7 @@ import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBluesky
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
-import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload, processFacebookUploadBatch } from "./facebook-queue.ts";
+import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload } from "./facebook-queue.ts";
 
 export interface ApproveInput {
   message: string;
