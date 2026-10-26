@@ -257,7 +257,7 @@ export async function claimDueBluesky(db: D1Database, id: string, now: string): 
   const result = await db.prepare(`UPDATE bluesky_targets SET status = 'publishing', started_at = ?
     WHERE post_id = ? AND status = 'scheduled'
     AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND approved_at IS NOT NULL
-      AND scheduled_at IS NOT NULL AND scheduled_at <= ? AND status = 'scheduled')`)
+      AND scheduled_at IS NOT NULL AND scheduled_at <= ? AND status IN ('scheduled','published','failed'))`)
     .bind(now, id, id, now).run();
   return (result.meta.changes ?? 0) > 0;
 }
@@ -267,7 +267,7 @@ export async function dueBlueskyIds(db: D1Database, now: string): Promise<string
   const result = await db.prepare(`SELECT p.id AS id FROM posts p
     JOIN bluesky_targets b ON b.post_id = p.id
     WHERE b.status = 'scheduled' AND p.status = 'scheduled' AND p.approved_at IS NOT NULL
-      AND p.scheduled_at IS NOT NULL AND p.scheduled_at <= ?
+      AND p.scheduled_at IS NOT NULL AND p.scheduled_at <= ? AND p.status IN ('scheduled','published','failed')
     ORDER BY p.scheduled_at LIMIT 20`).bind(now).all<{ id: string }>();
   return result.results.map((r) => r.id);
 }
