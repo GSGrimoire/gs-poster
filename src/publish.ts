@@ -7,6 +7,7 @@ import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBluesky
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
+import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload, processFacebookUploadBatch } from "./facebook-queue.ts";
 
 export interface ApproveInput {
   message: string;
@@ -23,10 +24,14 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
   const scheduledUnix = input.scheduledAt ? Math.floor(input.scheduledAt.getTime() / 1000) : undefined;
   await updatePost(db, id, { approved_at: new Date().toISOString() }, ["publishing"]);
 
-  let fbStatus: "scheduled" | "published" | "failed" = "failed";
+  let fbStatus: "scheduled" | "published" | "failed" | "publishing" = "failed";
   let fbError: string | null = null;
   if (post.facebook_enabled) {
     try {
+      if (post.images.length > BULK_FACEBOOK_THRESHOLD) {
+        await enqueueFacebookUpload(env, id);
+        fbStatus = "publishing";
+      } else {
       const mediaIds: string[] = [];
       for (const url of post.images) {
         const img = await fetchImage(env, url);
@@ -37,6 +42,7 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
       fbStatus = scheduledUnix ? "scheduled" : "published";
       await updatePost(db, id, { fb_post_id: fbPostId, permalink, error: null }, ["publishing"]);
       await audit(db, input.actor, scheduledUnix ? "facebook-scheduled" : "facebook-published", id, fbPostId);
+      }
     } catch (e) {
       fbError = e instanceof Error ? e.message : String(e);
       await audit(db, input.actor, "facebook-failed", id, fbError);
@@ -90,7 +96,7 @@ async function finishBluesky(env: Env, id: string, actor: string): Promise<boole
 export async function publishDueBluesky(env: Env): Promise<void> {
   const now = new Date().toISOString();
   const ids = await dueBlueskyIds(env.DB, now);
-  for (const id of ids.slice(0, 10)) {
+  for (const id of ids.slice(0, 1)) {
     if (!(await claimDueBluesky(env.DB, id, now))) continue;
     const ok = await finishBluesky(env, id, "cron");
     const p = await getPost(env.DB, id);
