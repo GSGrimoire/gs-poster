@@ -125,13 +125,20 @@ export async function rejectPost(env: Env, id: string, reason: string, actor: st
 export async function cancelScheduled(env: Env, id: string, actor: string): Promise<void> {
   const post = await getPost(env.DB, id);
   if (!post || post.status !== "scheduled") throw new Error("Only scheduled posts can be cancelled here.");
-  if (post.facebook_enabled) {
-    if (!post.fb_post_id) throw new Error("Facebook has no scheduled post identifier.");
-    await deleteFbPost(env, post.fb_post_id);
-  }
+  // Stop the Worker queue first, before any potentially slow Facebook API call.
+  let stoppedBluesky = false;
   if (post.bluesky?.status === "scheduled") {
-    const stopped = await setBlueskyStatus(env.DB, id, { status: "cancelled" }, ["scheduled"]);
-    if (!stopped) throw new Error("Bluesky has started publishing; it could not be cancelled.");
+    stoppedBluesky = await setBlueskyStatus(env.DB, id, { status: "cancelled" }, ["scheduled"]);
+    if (!stoppedBluesky) throw new Error("Bluesky has started publishing; it could not be cancelled.");
+  }
+  try {
+    if (post.facebook_enabled) {
+      if (!post.fb_post_id) throw new Error("Facebook has no scheduled post identifier.");
+      await deleteFbPost(env, post.fb_post_id);
+    }
+  } catch (e) {
+    if (stoppedBluesky) await setBlueskyStatus(env.DB, id, { status: "scheduled" }, ["cancelled"]);
+    throw e;
   }
   await updatePost(env.DB, id, { status: "cancelled" }, ["scheduled"]);
   await audit(env.DB, actor, "cancelled", id);
@@ -163,6 +170,7 @@ export async function refreshScheduled(env: Env): Promise<void> {
     try {
       const info = await getPostInfo(env, p.fb_post_id!);
       if (!info) {
+        if (p.bluesky?.status === "scheduled") await setBlueskyStatus(env.DB, p.id, { status: "cancelled" }, ["scheduled"]);
         await updatePost(env.DB, p.id, { status: "cancelled", note: "Removed on Facebook" }, ["scheduled"]);
       } else if (info.is_published) {
         await updatePost(env.DB, p.id, { status: "published", permalink: info.permalink_url ?? null }, ["scheduled"]);
