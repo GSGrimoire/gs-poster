@@ -124,24 +124,30 @@ export async function rejectPost(env: Env, id: string, reason: string, actor: st
 /** Take a scheduled post off Facebook's schedule. */
 export async function cancelScheduled(env: Env, id: string, actor: string): Promise<void> {
   const post = await getPost(env.DB, id);
-  if (!post || post.status !== "scheduled") throw new Error("Only scheduled posts can be cancelled here.");
+  if (!post) throw new Error("Post not found.");
+  const fbScheduled = post.status === "scheduled" && post.facebook_enabled && !!post.fb_post_id;
+  const bsScheduled = post.bluesky?.status === "scheduled";
+  if (!fbScheduled && !bsScheduled) throw new Error("No scheduled target remains to cancel.");
+
   // Stop the Worker queue first, before any potentially slow Facebook API call.
   let stoppedBluesky = false;
-  if (post.bluesky?.status === "scheduled") {
+  if (bsScheduled) {
     stoppedBluesky = await setBlueskyStatus(env.DB, id, { status: "cancelled" }, ["scheduled"]);
     if (!stoppedBluesky) throw new Error("Bluesky has started publishing; it could not be cancelled.");
   }
   try {
-    if (post.facebook_enabled) {
-      if (!post.fb_post_id) throw new Error("Facebook has no scheduled post identifier.");
-      await deleteFbPost(env, post.fb_post_id);
-    }
+    if (fbScheduled) await deleteFbPost(env, post.fb_post_id!);
   } catch (e) {
     if (stoppedBluesky) await setBlueskyStatus(env.DB, id, { status: "scheduled" }, ["cancelled"]);
     throw e;
   }
-  await updatePost(env.DB, id, { status: "cancelled" }, ["scheduled"]);
-  await audit(env.DB, actor, "cancelled", id);
+  // A successful Facebook post or failed Facebook attempt keeps its own status
+  // when only the pending Bluesky target was cancelled.
+  if (fbScheduled || (post.status === "scheduled" && !post.facebook_enabled)) {
+    await updatePost(env.DB, id, { status: "cancelled" }, ["scheduled"]);
+  }
+  await audit(env.DB, actor, "cancelled-targets", id,
+    [fbScheduled ? "facebook" : null, stoppedBluesky ? "bluesky" : null].filter(Boolean).join(","));
 }
 
 /** Failed or rejected → draft again, so it can be fixed and re-approved. */
