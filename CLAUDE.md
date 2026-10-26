@@ -3,7 +3,8 @@
 The point of this repo is that Claude drafts and Gus approves. Keep it that way.
 
 ## Hard rules
-- Never add an MCP tool, route or code path that publishes, schedules or cancels a Facebook post without Gus's approval on the approval site (GitHub sign-in + PIN). `src/publish.ts` is called only from `src/web.ts` after the PIN check.
+- Never add a tool, route or code path that publishes, schedules or cancels Facebook posts without approval on the site (GitHub sign-in + PIN). Facebook publication is only called from `src/publish.ts` after `src/web.ts` checks the PIN.
+- Bluesky can publish from the Worker scheduled handler only after the corresponding target has been approved using the same sign-in and PIN flow. The scheduled handler must atomically claim approved, due targets and may not accept requests to publish unapproved drafts. Never expose a publishing tool to any Model Context Protocol client.
 - Never weaken the approval guards: allowed GitHub logins, PIN and lockout, CSRF and same-origin checks, the atomic `claimForPublish`.
 - Never read, print, log or ask for secret values (Facebook token, PIN, OAuth client secret, Cloudflare token). Never commit `.dev.vars`.
 - Never push to `main`. Work on a branch and open a pull request. ChatGPT reviews and merges (Gus does not review code, same as gs-scribe). Merging to `main` deploys.
@@ -18,7 +19,7 @@ The point of this repo is that Claude drafts and Gus approves. Keep it that way.
 
 ## Review checklist (for ChatGPT before merging)
 1. CI is green (`npm run check` and the bundle dry-run).
-2. Nothing publishes, schedules or cancels a Facebook post except `src/publish.ts`, reached only from `src/web.ts` after the GitHub sign-in and PIN check. No new MCP tool can publish.
+2. Nothing publishes, schedules or cancels a Facebook post except `src/publish.ts`, reached after the GitHub sign-in and PIN check in `src/web.ts`. Bluesky scheduled publishing is allowed only for atomically claimed, previously approved targets. No Model Context Protocol tool can publish.
 3. The allowed-logins check, PIN and lockout, CSRF and same-origin checks and `claimForPublish` are unchanged or stronger.
 4. No secrets, tokens or `.dev.vars` in the diff.
 If any of these fails, comment on the pull request and tell Gus instead of merging.
