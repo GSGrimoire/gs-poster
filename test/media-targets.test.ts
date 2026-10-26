@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_IMAGES, FACEBOOK_IMAGE_BATCH_SIZE } from "../src/validate.ts";
 import { checkBluesky, publishBluesky } from "../src/bluesky.ts";
+import { nextFacebookImageBatch } from "../src/facebook-queue.ts";
 import { checkVideoUrl, fetchVideo, INITIAL_VIDEO_MAX_BYTES } from "../src/video.ts";
 import type { Env } from "../src/env.ts";
 
@@ -12,6 +13,17 @@ test("Facebook batch and maximum bounds", () => {
   assert.equal(MAX_IMAGES, 80);
   assert.equal(FACEBOOK_IMAGE_BATCH_SIZE, 8);
   assert.equal(Math.ceil(MAX_IMAGES / FACEBOOK_IMAGE_BATCH_SIZE), 10);
+  const indices: number[] = [];
+  let current = 0;
+  while (current < MAX_IMAGES) {
+    const { start, end } = nextFacebookImageBatch(current, MAX_IMAGES);
+    assert.ok(end - start <= 8);
+    indices.push(...Array.from({ length: end - start }, (_, n) => n + start));
+    current = end;
+  }
+  assert.deepEqual(indices, Array.from({ length: 80 }, (_, n) => n));
+  assert.deepEqual(nextFacebookImageBatch(76, 80), { start: 76, end: 80 });
+  assert.throws(() => nextFacebookImageBatch(0, 81), /Invalid Facebook/);
 });
 
 test("Bluesky videos require a safe MP4 source and descriptive alt", () => {
