@@ -98,6 +98,10 @@ const blueskySchema = z.object({
     url: z.string().url().describe("GitHub image library image URL."),
     alt: z.string().describe("Human-readable alternative text derived from the image library description, not a filename guess."),
   })).max(4).default([]),
+  video: z.object({
+    url: z.string().url().describe("GitHub MP4 file (initial implementation: up to 20 MB)."),
+    alt: z.string().min(1).describe("Video description for accessibility."),
+  }).nullable().optional(),
   patreon: z.object({
     url: z.string().url().describe("Public/free Patreon post URL under patreon.com/posts/."),
     title: z.string().min(1).describe("Link-card title for the free Patreon post."),
