@@ -5,6 +5,7 @@
 import type { Env } from "./env.ts";
 import type { BlueskyDraft } from "./db.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
+import { checkVideoUrl, fetchVideo } from "./video.ts";
 
 const XRPC = "https://bsky.social/xrpc/";
 export const BSKY_IMAGE_LIMIT = 1_950_000; // below the protocol's 2,000,000-byte limit
@@ -33,6 +34,13 @@ export function checkBluesky(draft: BlueskyDraft): string[] {
   if (textLength(draft.caption) > BSKY_TEXT_LIMIT) errors.push("Bluesky allows at most 300 characters (grapheme clusters).");
   if (new TextEncoder().encode(draft.caption).byteLength > 3000) errors.push("Bluesky caption is over its 3,000-byte limit.");
   if (draft.images.length > BSKY_IMAGE_COUNT) errors.push("Bluesky allows at most four images.");
+  if (draft.video) {
+    if (draft.images.length) errors.push("A Bluesky post cannot contain both gallery images and a video.");
+    const videoError = checkVideoUrl(draft.video.url);
+    if (videoError) errors.push(videoError);
+    if (!draft.video.alt.trim()) errors.push("Bluesky video needs descriptive accessibility text.");
+    if (textLength(draft.video.alt) > 1000) errors.push("Bluesky video description exceeds 1,000 characters.");
+  }
   for (const [i, image] of draft.images.entries()) {
     const urlError = checkImageUrl(image.url);
     if (urlError) errors.push("Image " + (i + 1) + ": " + urlError);
@@ -142,7 +150,20 @@ export async function publishBluesky(env: Env, id: string, draft: BlueskyDraft):
   for (const media of draft.images) {
     images.push({ image: await uploadImage(env, session, media.url), alt: media.alt.trim() });
   }
-  const embed = images.length
+  let videoBlob: unknown = undefined;
+  if (draft.video) {
+    // First stage support: Bluesky processes a direct blob asynchronously after publication.
+    const bytes = await fetchVideo(env, draft.video.url);
+    const uploaded = await api("com.atproto.repo.uploadBlob", {
+      method: "POST", headers: { ...bearer(session), "Content-Type": "video/mp4" },
+      body: bytes,
+    });
+    if (!uploaded.blob) throw new Error("Bluesky did not return a video blob.");
+    videoBlob = uploaded.blob;
+  }
+  const embed = videoBlob
+    ? { $type: "app.bsky.embed.video", video: videoBlob, alt: draft.video!.alt.trim() }
+    : images.length
     ? { $type: "app.bsky.embed.images", images }
     : draft.patreon
       ? { $type: "app.bsky.embed.external", external: {
@@ -154,8 +175,8 @@ export async function publishBluesky(env: Env, id: string, draft: BlueskyDraft):
     ...(embed ? { embed } : {}),
   });
   let cardUri: string | null = null;
-  if (images.length && draft.patreon) {
-    // Bluesky cannot hold an image gallery and external card in a single embed.
+  if ((images.length || videoBlob) && draft.patreon) {
+    // Bluesky cannot hold a gallery/video and an external card in a single embed.
     // Post the card as a reply in the same thread.
     const card = await createRecord(session, blueskyRecordKey(id, true), {
       $type: "app.bsky.feed.post",
