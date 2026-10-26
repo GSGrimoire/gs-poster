@@ -10,18 +10,11 @@ import type { Env } from "./env.ts";
 import { audit, getPost, updatePost } from "./db.ts";
 import { createFeedPost, getPostInfo, uploadUnpublishedPhoto } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
-import { FACEBOOK_IMAGE_BATCH_SIZE } from "./validate.ts";
+import { nextFacebookImageBatch } from "./validate.ts";
 
 export const BULK_FACEBOOK_THRESHOLD = 10;
 export const BULK_SCHEDULE_MIN_LEAD_MS = 30 * 60 * 1000;
 
-/** Ordered, non-overlapping per-run upload boundaries. */
-export function nextFacebookImageBatch(start: number, total: number): { start: number; end: number } {
-  if (!Number.isInteger(start) || !Number.isInteger(total) || start < 0 || total < 0 || start > total || total > 80) {
-    throw new Error("Invalid Facebook upload checkpoint or image count.");
-  }
-  return { start, end: Math.min(start + FACEBOOK_IMAGE_BATCH_SIZE, total) };
-}
 
 interface Job {
   post_id: string;
