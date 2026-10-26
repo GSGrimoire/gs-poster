@@ -287,8 +287,14 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   if (!p) return html(page("Not found", `<p class="empty">That post does not exist (it may have been deleted).</p><p><a href="/">Back</a></p>`, { login: session.login }), { status: 404 });
   const csrf = await csrfToken(env, session);
   const message = state.message ?? p.message;
-  const checks = checkMessage(message, { hasImages: p.images.length > 0 });
-  const checkList = [...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`), ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`)].join("");
+  const checks = checkMessage(message, { hasImages: p.images.length > 0 || (!p.facebook_enabled && !!p.bluesky) });
+  const bsChecks = p.bluesky ? checkMessage(p.bluesky.caption, { hasImages: p.bluesky.images.length > 0 }) : null;
+  const checkList = [
+    ...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`),
+    ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`),
+    ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
+    ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
+  ].join("");
   const thumbs = p.images.length ? `<div class="thumbs">${p.images.map((_, i) => `<img src="/media/${p.id}/${i}" alt="">`).join("")}</div>` : "";
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}">`;
@@ -388,8 +394,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     return ok ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Only drafts can be rejected." }, 409);
   }
   if (action === "redraft") {
-    await backToDraft(env, id, session.login);
-    return redirect(`/post/${id}`);
+    const restored = await backToDraft(env, id, session.login);
+    return restored ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Cannot redraft while an approved target may already be scheduled or published." }, 409);
   }
 
   // approve and cancel need the PIN
