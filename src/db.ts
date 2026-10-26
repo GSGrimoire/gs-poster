@@ -7,6 +7,7 @@
 export interface BlueskyDraft {
   caption: string;
   images: Array<{ url: string; alt: string }>;
+  video?: { url: string; alt: string } | null;
   patreon: { url: string; title: string; description: string } | null;
 }
 
@@ -54,6 +55,7 @@ interface Row extends Omit<Post, "images" | "facebook_enabled" | "bluesky"> {
   images: string;
   bs_caption: string | null;
   bs_images: string | null;
+  bs_video: string | null;
   bs_patreon: string | null;
   bs_facebook_enabled: number | null;
   bs_status: BlueskyStatus | null;
@@ -65,7 +67,7 @@ interface Row extends Omit<Post, "images" | "facebook_enabled" | "bluesky"> {
 }
 
 const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
- b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
+ b.video AS bs_video, b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
  b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
  b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error
  FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id`;
@@ -106,6 +108,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       post_id TEXT PRIMARY KEY,
       caption TEXT NOT NULL,
       images TEXT NOT NULL DEFAULT '[]',
+      video TEXT,
       patreon TEXT,
       facebook_enabled INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'draft',
@@ -129,6 +132,7 @@ function fromRow(r: Row): Post {
     bluesky: r.bs_caption === null ? null : {
       caption: r.bs_caption,
       images: JSON.parse(r.bs_images || "[]"),
+      video: r.bs_video ? JSON.parse(r.bs_video) : null,
       patreon: r.bs_patreon ? JSON.parse(r.bs_patreon) : null,
       status: r.bs_status!,
       uri: r.bs_uri,
@@ -168,8 +172,8 @@ export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
       .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.scheduled_at, p.created_by),
   ];
   if (p.bluesky) inserts.push(db.prepare(`INSERT INTO bluesky_targets
-      (post_id, caption, images, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?)`)
-    .bind(id, p.bluesky.caption, JSON.stringify(p.bluesky.images),
+      (post_id, caption, images, video, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?, ?)`)
+    .bind(id, p.bluesky.caption, JSON.stringify(p.bluesky.images), p.bluesky.video ? JSON.stringify(p.bluesky.video) : null,
       p.bluesky.patreon ? JSON.stringify(p.bluesky.patreon) : null, p.facebook_enabled === false ? 0 : 1));
   await db.batch(inserts);
   return (await getPost(db, id))!;
@@ -221,14 +225,14 @@ export async function saveBlueskyDraft(
       .bind(id, id).run();
     return true;
   }
-  const result = await db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, patreon, facebook_enabled)
-    SELECT ?, ?, ?, ?, ? FROM posts WHERE id = ? AND status IN ('draft','rejected')
+  const result = await db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, video, patreon, facebook_enabled)
+    SELECT ?, ?, ?, ?, ?, ? FROM posts WHERE id = ? AND status IN ('draft','rejected')
     ON CONFLICT(post_id) DO UPDATE SET
-      caption = excluded.caption, images = excluded.images,
+      caption = excluded.caption, images = excluded.images, video = excluded.video,
       patreon = excluded.patreon, facebook_enabled = excluded.facebook_enabled,
       status = 'draft', uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL
     WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND status IN ('draft','rejected'))`)
-    .bind(id, draft.caption, JSON.stringify(draft.images),
+    .bind(id, draft.caption, JSON.stringify(draft.images), draft.video ? JSON.stringify(draft.video) : null,
       draft.patreon ? JSON.stringify(draft.patreon) : null, facebookEnabled ? 1 : 0, id, id).run();
   return (result.meta.changes ?? 0) > 0;
 }
