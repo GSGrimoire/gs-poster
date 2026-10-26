@@ -7,8 +7,9 @@ import { getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import type { Env } from "./env.ts";
 import { missingSecrets } from "./env.ts";
-import { audit, createPost, deletePost, getPost, listPosts, updatePost, type Post, type PostStatus } from "./db.ts";
+import { audit, createPost, deletePost, getPost, listPosts, updatePost, type Post, type PostStatus, type BlueskyDraft, saveBlueskyDraft } from "./db.ts";
 import { checkPage, listPagePosts } from "./facebook.ts";
+import { checkBluesky } from "./bluesky.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
@@ -36,6 +37,8 @@ function view(env: Env, origin: string, p: Post) {
     release: p.release,
     message: p.message,
     images: p.images,
+    facebook_enabled: p.facebook_enabled,
+    bluesky: p.bluesky,
     link: p.link,
     publish_at: p.scheduled_at,
     publish_at_local: p.scheduled_at ? formatLocal(new Date(p.scheduled_at), env.TIMEZONE) : "on approval",
@@ -85,17 +88,33 @@ const imageList = z
     "Image URLs on GitHub, in display order. Use raw.githubusercontent.com links (e.g. from the GS Grimoire image library) or github.com/.../blob/... links. JPG, PNG or GIF, max 10 MB each.",
   );
 
+
+const blueskySchema = z.object({
+  caption: z.string().describe("Bluesky-specific caption, maximum 300 grapheme characters."),
+  images: z.array(z.object({
+    url: z.string().url().describe("GitHub image library image URL."),
+    alt: z.string().describe("Human-readable alternative text derived from the image library description, not a filename guess."),
+  })).max(4).default([]),
+  patreon: z.object({
+    url: z.string().url().describe("Public/free Patreon post URL under patreon.com/posts/."),
+    title: z.string().min(1).describe("Link-card title for the free Patreon post."),
+    description: z.string().min(1).describe("Link-card description."),
+  }).nullable().default(null),
+});
+
 export function buildServer(env: Env, origin: string): McpServer {
   const server = new McpServer({ name: "gs-poster", version: "0.1.0" });
 
   server.registerTool(
     "draft_post",
     {
-      title: "Draft a Facebook post",
+      title: "Draft a GS Poster post",
       description:
         "Save a post for the GS Grimoire Facebook Page as a DRAFT for Gus to review. Nothing is published: Gus approves it on the review page (returned as review_url), and only then does it go to Facebook. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
       inputSchema: z.object({
-        message: z.string().max(63206).describe("The caption, exactly as it should appear."),
+        message: z.string().max(63206).describe("Facebook caption or shared descriptive caption."),
+        facebook_enabled: z.boolean().default(true).describe("Whether to publish to Facebook. False requires a Bluesky target."),
+        bluesky: blueskySchema.optional().describe("Optional Bluesky target with its own caption, image alt descriptions and free Patreon link card."),
         images: imageList.optional(),
         link: z.string().url().optional().describe("Optional link preview. Only used when the post has no images."),
         publish_at: z.string().optional().describe("When to publish. Copenhagen time (2026-10-16T19:00) or ISO 8601 with offset. 30 minutes to 30 days ahead."),
@@ -104,11 +123,13 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ message, images = [], link, publish_at, label, release }) => {
+    async ({ message, images = [], link, publish_at, label, release, facebook_enabled, bluesky }) => {
       const checks = checkMessage(message, { hasImages: images.length > 0 });
       const time = readWhen(env, publish_at);
       const imgErrors = await checkImages(env, images);
-      const errors = [...checks.errors, ...(time.error ? [time.error] : []), ...imgErrors];
+      const bsErrors = bluesky ? [...checkBluesky(bluesky), ...(await checkImages(env, bluesky.images.map((i) => i.url)))] : [];
+      const errors = [...checks.errors, ...(time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
+      if (!facebook_enabled && !bluesky) errors.push("Select Facebook, Bluesky or both.");
       if (errors.length) return fail("Draft not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
       const p = await createPost(env.DB, {
         message,
@@ -118,6 +139,8 @@ export function buildServer(env: Env, origin: string): McpServer {
         label: label ?? null,
         release: release ?? null,
         created_by: actor(),
+        facebook_enabled,
+        bluesky: bluesky ?? null,
       });
       await audit(env.DB, actor(), "drafted", p.id, label);
       return ok({ saved: true, note: "Waiting for Gus to approve. Not published.", warnings: checks.warnings, post: view(env, origin, p) });
@@ -133,6 +156,8 @@ export function buildServer(env: Env, origin: string): McpServer {
       inputSchema: z.object({
         id: z.string(),
         message: z.string().max(63206).optional(),
+        facebook_enabled: z.boolean().optional(),
+        bluesky: blueskySchema.nullable().optional(),
         images: imageList.optional(),
         link: z.string().url().nullable().optional(),
         publish_at: z.string().nullable().optional(),
@@ -141,7 +166,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, message, images, link, publish_at, label, release }) => {
+    async ({ id, message, images, link, publish_at, label, release, facebook_enabled, bluesky }) => {
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
       if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
@@ -150,7 +175,11 @@ export function buildServer(env: Env, origin: string): McpServer {
       const checks = checkMessage(nextMessage, { hasImages: nextImages.length > 0 });
       const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
       const imgErrors = images ? await checkImages(env, images) : [];
-      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors];
+      const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
+      const fbNext = facebook_enabled ?? cur.facebook_enabled;
+      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
+      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
+      if (!fbNext && !bsNext) errors.push("Select Facebook, Bluesky or both.");
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
       const changed = await updatePost(
         env.DB,
@@ -168,6 +197,9 @@ export function buildServer(env: Env, origin: string): McpServer {
         ["draft", "rejected"],
       );
       if (!changed) return fail("The post changed status while saving. Fetch it again.");
+      if (bluesky !== undefined || facebook_enabled !== undefined) {
+        if (!(await saveBlueskyDraft(env.DB, id, bsNext, fbNext))) return fail("Could not save the Bluesky target.");
+      }
       await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id);
       return ok({ saved: true, warnings: checks.warnings, post: view(env, origin, (await getPost(env.DB, id))!) });
     },
@@ -275,6 +307,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         review_site: origin,
         missing_secrets: missing,
         optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN },
+        bluesky: { configured: !!env.BSKY_HANDLE && !!env.BSKY_APP_PASSWORD, images_ready: !!env.IMAGES },
         graph_version: env.GRAPH_VERSION,
         timezone: env.TIMEZONE,
         facebook,
