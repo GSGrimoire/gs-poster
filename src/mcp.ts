@@ -55,12 +55,15 @@ function view(env: Env, origin: string, p: Post) {
 async function checkImages(env: Env, urls: string[]): Promise<string[]> {
   const errors: string[] = [];
   if (urls.length > MAX_IMAGES) errors.push(`At most ${MAX_IMAGES} images per post.`);
-  for (const u of urls) {
+  // Each image must have a valid GitHub URL. Only the first eight are fetched
+  // during draft validation to remain within Cloudflare's 50-request budget.
+  for (const [index, u] of urls.entries()) {
     const bad = checkImageUrl(u);
     if (bad) {
       errors.push(bad);
       continue;
     }
+    if (index >= 8) continue;
     try {
       await fetchImage(env, u);
     } catch (e) {
@@ -85,7 +88,7 @@ const imageList = z
   .array(z.string().url())
   .max(MAX_IMAGES)
   .describe(
-    "Image URLs on GitHub, in display order. Use raw.githubusercontent.com links (e.g. from the GS Grimoire image library) or github.com/.../blob/... links. JPG, PNG or GIF, max 10 MB each.",
+    "Image URLs on GitHub, in display order. Use raw.githubusercontent.com links (e.g. from the GS Grimoire image library) or github.com/.../blob/... links. JPG, PNG or GIF, max 10 MB each. Up to 80 Facebook images; persisted uploads happen in groups of eight.",
   );
 
 
