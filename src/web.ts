@@ -247,7 +247,7 @@ function postCard(env: Env, p: Post): string {
   const bsky = p.bluesky?.permalink ? ` · <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
     <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span></div>
-    <p class="caption clip">${esc(p.message)}</p>${thumbs}</a>
+    <p class="caption clip">${esc(p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
     ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
 
@@ -321,7 +321,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <textarea id="message" name="message">${esc(message)}</textarea>
         <label><input type="checkbox" name="target_bluesky" value="1" ${bs ? "checked" : ""}> Publish to Bluesky</label>
         <label for="bs_caption">Bluesky caption (300 characters)</label>
-        <textarea id="bs_caption" name="bs_caption" maxlength="300">${esc(bs?.caption ?? message.slice(0, 300))}</textarea>
+        <textarea id="bs_caption" name="bs_caption">${esc(bs?.caption ?? message.slice(0, 300))}</textarea>
         <p class="hint">Provide alternative text for each Bluesky image. When images and a Patreon card are selected, the link card appears as a reply in the same thread.</p>
         ${bsMediaFields}
         <label for="bs_patreon_url">Free Patreon post URL (optional)</label>
@@ -344,21 +344,23 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
           <div class="row"><button class="danger">Reject</button></div>
         </form>
       </details>`;
-  } else if (p.bluesky?.status === "failed" && p.approved_at) {
-    actions = `<form method="post" action="/post/${p.id}/retry-bluesky" class="card">${hidden}
+  }
+  if (p.status !== "draft" && p.bluesky?.status === "failed" && p.approved_at) {
+    actions += `<form method="post" action="/post/${p.id}/retry-bluesky" class="card">${hidden}
       <p>Bluesky publishing failed. Retry this approved target without reposting to Facebook.</p>
-      <label for="pin">PIN</label><input id="pin" type="password" name="pin" inputmode="numeric" required>
+      <label for="retry-pin">PIN</label><input id="retry-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button class="primary">Retry Bluesky only</button></div></form>`;
-  } else if (p.status === "scheduled") {
-    actions = `
-      <form method="post" action="/post/${p.id}/cancel" class="card">${hidden}
-        <p>Scheduled for <strong>${esc(whenText(env, p))}</strong>. Cancelling here stops the scheduled targets.</p>
-        <label for="pin">PIN</label>
-        <input id="pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
-        <div class="row"><button class="danger">Cancel this post</button></div>
+  }
+  if (p.status === "scheduled" || p.bluesky?.status === "scheduled") {
+    actions += `<form method="post" action="/post/${p.id}/cancel" class="card">${hidden}
+      <p>Pending for <strong>${esc(whenText(env, p))}</strong>. Cancellation stops pending targets only, not already published posts.</p>
+      <label for="cancel-pin">PIN</label>
+      <input id="cancel-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
+      <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
-  } else if (p.status === "failed" || p.status === "rejected") {
-    actions = `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
+  }
+  if (p.status === "failed" && !p.approved_at && p.bluesky?.status !== "published") {
+    actions += `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
       <div class="row"><button>Move back to drafts</button></div></form>`;
   }
 
@@ -373,8 +375,11 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
         <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""}</span></div>
-      <p class="caption">${esc(p.message)}</p>${thumbs}
-      ${p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
+      ${p.facebook_enabled ? `<p class="hint">Facebook caption and images</p><p class="caption">${esc(p.message)}</p>${thumbs}` : ""}
+      ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
+        ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
+        ${bs.patreon ? `<p class="meta">Patreon card: ${esc(bs.patreon.title)} | ${esc(bs.patreon.url)}</p>` : ""}` : ""}
+      ${p.facebook_enabled && p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
       <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} · ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} · ${esc(p.id)}</p>
     </div>
