@@ -3,7 +3,8 @@
  * approval page after Gus's GitHub sign-in and PIN check, never from an MCP tool.
  */
 import type { Env } from "./env.ts";
-import { audit, claimForPublish, getPost, listPosts, updatePost, type Post } from "./db.ts";
+import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, type Post } from "./db.ts";
+import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
 
@@ -13,37 +14,105 @@ export interface ApproveInput {
   actor: string;
 }
 
+/** Called exclusively by an authenticated human approval on the review site. */
 export async function approveAndPublish(env: Env, id: string, input: ApproveInput): Promise<Post> {
   const db = env.DB;
-  // Save Gus's last edits first, while the post is still a draft.
   await updatePost(db, id, { message: input.message, scheduled_at: input.scheduledAt?.toISOString() ?? null }, ["draft"]);
   if (!(await claimForPublish(db, id))) throw new Error("This post is no longer a draft. It may already have been approved.");
-
   const post = (await getPost(db, id))!;
-  try {
-    const scheduledUnix = input.scheduledAt ? Math.floor(input.scheduledAt.getTime() / 1000) : undefined;
-    const mediaIds: string[] = [];
-    for (const url of post.images) {
-      const img = await fetchImage(env, url);
-      mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
+  const scheduledUnix = input.scheduledAt ? Math.floor(input.scheduledAt.getTime() / 1000) : undefined;
+  await updatePost(db, id, { approved_at: new Date().toISOString() }, ["publishing"]);
+
+  let fbStatus: "scheduled" | "published" | "failed" = "failed";
+  let fbError: string | null = null;
+  if (post.facebook_enabled) {
+    try {
+      const mediaIds: string[] = [];
+      for (const url of post.images) {
+        const img = await fetchImage(env, url);
+        mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
+      }
+      const fbPostId = await createFeedPost(env, { message: post.message, link: post.link, mediaIds, scheduledUnix });
+      const permalink = scheduledUnix ? null : (await getPostInfo(env, fbPostId).catch(() => null))?.permalink_url ?? null;
+      fbStatus = scheduledUnix ? "scheduled" : "published";
+      await updatePost(db, id, { fb_post_id: fbPostId, permalink, error: null }, ["publishing"]);
+      await audit(db, input.actor, scheduledUnix ? "facebook-scheduled" : "facebook-published", id, fbPostId);
+    } catch (e) {
+      fbError = e instanceof Error ? e.message : String(e);
+      await audit(db, input.actor, "facebook-failed", id, fbError);
     }
-    const fbPostId = await createFeedPost(env, { message: post.message, link: post.link, mediaIds, scheduledUnix });
-    let permalink: string | null = null;
-    if (!scheduledUnix) permalink = (await getPostInfo(env, fbPostId).catch(() => null))?.permalink_url ?? null;
-    await updatePost(db, id, {
-      status: scheduledUnix ? "scheduled" : "published",
-      fb_post_id: fbPostId,
-      permalink,
-      approved_at: new Date().toISOString(),
-      error: null,
-    });
-    await audit(db, input.actor, scheduledUnix ? "approved-scheduled" : "approved-published", id, fbPostId);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    await updatePost(db, id, { status: "failed", error: msg });
-    await audit(db, input.actor, "publish-failed", id, msg);
   }
+
+  let bsStatus: "scheduled" | "published" | "failed" = "failed";
+  let bsError: string | null = null;
+  if (post.bluesky) {
+    if (scheduledUnix !== undefined) {
+      await setBlueskyStatus(db, id, { status: "scheduled" }, ["draft"]);
+      bsStatus = "scheduled";
+    } else {
+      const success = await finishBluesky(env, id, input.actor);
+      bsStatus = success ? "published" : "failed";
+      bsError = success ? null : (await getPost(db, id))?.bluesky?.error ?? "Unknown Bluesky error";
+    }
+  }
+
+  const finalStatus = post.facebook_enabled ? fbStatus : bsStatus;
+  await updatePost(db, id, {
+    status: finalStatus,
+    error: post.facebook_enabled ? fbError : bsError,
+  }, ["publishing"]);
+  await audit(db, input.actor, "approved-" + finalStatus, id,
+    [post.facebook_enabled ? "facebook:" + fbStatus : null, post.bluesky ? "bluesky:" + bsStatus : null].filter(Boolean).join(","));
   return (await getPost(db, id))!;
+}
+
+/** Never invoked from an MCP tool. Caller already claimed the approved target. */
+async function finishBluesky(env: Env, id: string, actor: string): Promise<boolean> {
+  const post = await getPost(env.DB, id);
+  if (!post?.bluesky) return false;
+  try {
+    const result = await publishBluesky(env, id, post.bluesky);
+    await setBlueskyStatus(env.DB, id, {
+      status: "published", uri: result.uri, cid: result.cid,
+      card_uri: result.cardUri, permalink: result.permalink, error: null,
+    }, ["draft", "publishing"]);
+    await audit(env.DB, actor, "bluesky-published", id, result.uri);
+    return true;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await setBlueskyStatus(env.DB, id, { status: "failed", error: message }, ["draft", "publishing"]);
+    await audit(env.DB, actor, "bluesky-failed", id, message);
+    return false;
+  }
+}
+
+/** Cron: take a due approved target atomically, then post. No approval bypass. */
+export async function publishDueBluesky(env: Env): Promise<void> {
+  const now = new Date().toISOString();
+  const ids = await dueBlueskyIds(env.DB, now);
+  for (const id of ids.slice(0, 10)) {
+    if (!(await claimDueBluesky(env.DB, id, now))) continue;
+    const ok = await finishBluesky(env, id, "cron");
+    const p = await getPost(env.DB, id);
+    if (p && !p.facebook_enabled) {
+      await updatePost(env.DB, id, {
+        status: ok ? "published" : "failed",
+        error: ok ? null : p.bluesky?.error ?? "Bluesky failed",
+      }, ["scheduled"]);
+    }
+  }
+}
+
+/** Human-controlled retry after a PIN, never repeats the Facebook target. */
+export async function retryFailedBluesky(env: Env, id: string, actor: string): Promise<boolean> {
+  if (!(await claimFailedBluesky(env.DB, id))) throw new Error("Only previously approved, failed Bluesky targets can be retried.");
+  const ok = await finishBluesky(env, id, actor);
+  const p = await getPost(env.DB, id);
+  if (p && !p.facebook_enabled) {
+    await updatePost(env.DB, id, { status: ok ? "published" : "failed", error: ok ? null : p.bluesky?.error ?? "Bluesky failed" },
+      ["failed"]);
+  }
+  return ok;
 }
 
 export async function rejectPost(env: Env, id: string, reason: string, actor: string): Promise<boolean> {
@@ -55,15 +124,28 @@ export async function rejectPost(env: Env, id: string, reason: string, actor: st
 /** Take a scheduled post off Facebook's schedule. */
 export async function cancelScheduled(env: Env, id: string, actor: string): Promise<void> {
   const post = await getPost(env.DB, id);
-  if (!post || post.status !== "scheduled" || !post.fb_post_id) throw new Error("Only scheduled posts can be cancelled here.");
-  await deleteFbPost(env, post.fb_post_id);
+  if (!post || post.status !== "scheduled") throw new Error("Only scheduled posts can be cancelled here.");
+  if (post.facebook_enabled) {
+    if (!post.fb_post_id) throw new Error("Facebook has no scheduled post identifier.");
+    await deleteFbPost(env, post.fb_post_id);
+  }
+  if (post.bluesky?.status === "scheduled") {
+    const stopped = await setBlueskyStatus(env.DB, id, { status: "cancelled" }, ["scheduled"]);
+    if (!stopped) throw new Error("Bluesky has started publishing; it could not be cancelled.");
+  }
   await updatePost(env.DB, id, { status: "cancelled" }, ["scheduled"]);
-  await audit(env.DB, actor, "cancelled", id, post.fb_post_id);
+  await audit(env.DB, actor, "cancelled", id);
 }
 
 /** Failed or rejected → draft again, so it can be fixed and re-approved. */
 export async function backToDraft(env: Env, id: string, actor: string): Promise<boolean> {
+  const p = await getPost(env.DB, id);
+  // Never reapprove Facebook when Bluesky may already have been scheduled/published.
+  if (p?.bluesky && ["scheduled", "publishing", "published"].includes(p.bluesky.status)) return false;
   const ok = await updatePost(env.DB, id, { status: "draft", error: null }, ["failed", "rejected"]);
+  if (ok && p?.bluesky?.status === "failed") {
+    await setBlueskyStatus(env.DB, id, { status: "draft", error: null }, ["failed"]);
+  }
   if (ok) await audit(env.DB, actor, "back-to-draft", id);
   return ok;
 }
