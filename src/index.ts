@@ -10,6 +10,7 @@ import type { Env } from "./env.ts";
 import { buildServer } from "./mcp.ts";
 import { handleWeb } from "./web.ts";
 import { publishDueBluesky } from "./publish.ts";
+import { processFacebookUploadBatch } from "./facebook-queue.ts";
 
 const providers = new Map<string, OAuthProvider<Env>>();
 
@@ -44,6 +45,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
 
 export default {
   async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await processFacebookUploadBatch(env);
     await publishDueBluesky(env);
   },
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response {
