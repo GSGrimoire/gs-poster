@@ -456,6 +456,28 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    if (action === "resume-facebook") {
+      const resumed = await resumeFailedFacebookUploads(env, id, session.login);
+      return postPage(env, session, id, {
+        notice: resumed ? "Remaining Facebook photos have been queued." :
+          "Cannot safely resume this queue. Reconcile the Facebook post instead.",
+      });
+    }
+    if (action === "abandon-facebook") {
+      const abandoned = await abandonFacebookUpload(env, id, session.login);
+      return postPage(env, session, id, {
+        notice: abandoned ? "Queue abandoned. No more Facebook sends will be attempted." :
+          "Queue was not eligible for abandonment.",
+      });
+    }
+    if (action === "reconcile-facebook") {
+      const facebookId = String(form.get("facebook_post_id") ?? "").trim();
+      const confirmed = await markFacebookUploadPosted(env, id, facebookId, session.login);
+      return postPage(env, session, id, {
+        notice: confirmed ? "Verified Facebook post was recorded; no new post was sent." :
+          "The Facebook post could not be reconciled.",
+      });
+    }
     if (action === "redraft" || action === "retry-facebook") {
       if (form.get("confirmed_no_facebook") !== "1") {
         return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
@@ -500,6 +522,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       bluesky = {
         caption: String(form.get("bs_caption") || ""),
         images,
+        video: String(form.get("bs_video_url") || "").trim() || String(form.get("bs_video_alt") || "").trim()
+          ? { url: String(form.get("bs_video_url") || "").trim(), alt: String(form.get("bs_video_alt") || "").trim() }
+          : null,
         patreon: patreonUrl ? {
           url: patreonUrl, title: String(form.get("bs_patreon_title") || ""),
           description: String(form.get("bs_patreon_description") || ""),
@@ -516,7 +541,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         return postPage(env, session, id, { ...keep, error: "Could not read the publish time." }, 400);
       }
     }
-    const timeErr = checkWhen(when, new Date(), APPROVE_MIN_LEAD_MS);
+    const minLead = facebook && current.images.length > BULK_FACEBOOK_THRESHOLD
+      ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
+    const timeErr = checkWhen(when, new Date(), minLead);
     if (timeErr) return postPage(env, session, id, { ...keep, error: timeErr }, 400);
 
     // Human review only authorizes media that is actually readable now.
@@ -526,6 +553,15 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         catch (error) {
           return postPage(env, session, id, {
             error: "Bluesky image could not be loaded: " +
+              (error instanceof Error ? error.message : String(error)),
+          }, 400);
+        }
+      }
+      if (bluesky.video) {
+        try { await fetchVideo(env, bluesky.video.url); }
+        catch (error) {
+          return postPage(env, session, id, {
+            error: "Bluesky video could not be loaded: " +
               (error instanceof Error ? error.message : String(error)),
           }, 400);
         }
