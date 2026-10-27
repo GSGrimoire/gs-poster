@@ -3,25 +3,21 @@
  * approval page after Gus's GitHub sign-in and PIN check, never from an MCP tool.
  */
 import type { Env } from "./env.ts";
-import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, type Post } from "./db.ts";
+import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, type Post, type ApprovalSnapshot } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
 
-export interface ApproveInput {
-  message: string;
-  scheduledAt: Date | null;
+export interface ApproveInput extends ApprovalSnapshot {
   actor: string;
 }
 
 /** Called exclusively by an authenticated human approval on the review site. */
 export async function approveAndPublish(env: Env, id: string, input: ApproveInput): Promise<Post> {
   const db = env.DB;
-  await updatePost(db, id, { message: input.message, scheduled_at: input.scheduledAt?.toISOString() ?? null }, ["draft"]);
-  if (!(await claimForPublish(db, id))) throw new Error("This post is no longer a draft. It may already have been approved.");
+  if (!(await claimForPublish(db, id, input))) throw new Error("This post is no longer a draft. It may already have been approved.");
   const post = (await getPost(db, id))!;
-  const scheduledUnix = input.scheduledAt ? Math.floor(input.scheduledAt.getTime() / 1000) : undefined;
-  await updatePost(db, id, { approved_at: new Date().toISOString() }, ["publishing"]);
+  const scheduledUnix = post.scheduled_at ? Math.floor(Date.parse(post.scheduled_at) / 1000) : undefined;
 
   let fbStatus: "scheduled" | "published" | "failed" = "failed";
   let fbError: string | null = null;

@@ -4,7 +4,7 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, saveBlueskyDraft, type BlueskyDraft, type Post } from "./db.ts";
+import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { fetchImage } from "./media.ts";
@@ -462,10 +462,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const timeErr = checkWhen(when, new Date(), APPROVE_MIN_LEAD_MS);
     if (timeErr) return postPage(env, session, id, { ...keep, error: timeErr }, 400);
 
-    if (!(await saveBlueskyDraft(env.DB, id, bluesky, facebook))) {
-      return postPage(env, session, id, { ...keep, error: "Draft changed while saving targets." }, 409);
-    }
-    const result = await approveAndPublish(env, id, { message, scheduledAt: when, actor: session.login });
+    const result = await approveAndPublish(env, id, {
+      message, scheduledAt: when, actor: session.login,
+      facebookEnabled: facebook, bluesky, expectedUpdatedAt: current.updated_at,
+    });
     if (result.status === "failed") return postPage(env, session, id, { error: "A selected target failed. Review the target-specific error below." }, 502);
     return postPage(env, session, id, {
       notice: result.status === "scheduled" ? `Scheduled for ${whenText(env, result)}.` : "Approved. Review each target status below.",

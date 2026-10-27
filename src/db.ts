@@ -283,9 +283,44 @@ export async function claimFailedBluesky(db: D1Database, id: string): Promise<bo
   return (result.meta.changes ?? 0) > 0;
 }
 
-/** Atomic draft → publishing. False if someone else got there first. */
-export function claimForPublish(db: D1Database, id: string): Promise<boolean> {
-  return updatePost(db, id, { status: "publishing", error: null }, ["draft"]);
+export interface ApprovalSnapshot {
+  message: string;
+  scheduledAt: Date | null;
+  facebookEnabled: boolean;
+  bluesky: BlueskyDraft | null;
+  expectedUpdatedAt: string;
+}
+
+/** Save the exact human-selected targets and claim the draft in one transaction. */
+export async function claimForPublish(db: D1Database, id: string, input: ApprovalSnapshot): Promise<boolean> {
+  await ensureSchema(db);
+  if (!input.facebookEnabled && !input.bluesky) throw new Error("Choose at least one target.");
+  const { bluesky } = input;
+  const target = bluesky
+    ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, patreon, facebook_enabled)
+        SELECT ?, ?, ?, ?, ? FROM posts WHERE id = ? AND status = 'draft' AND updated_at = ?
+        ON CONFLICT(post_id) DO UPDATE SET
+          caption = excluded.caption, images = excluded.images, patreon = excluded.patreon,
+          facebook_enabled = excluded.facebook_enabled, status = 'draft',
+          uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL, started_at = NULL`)
+      .bind(id, bluesky.caption, JSON.stringify(bluesky.images),
+        bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, input.facebookEnabled ? 1 : 0,
+        id, input.expectedUpdatedAt)
+    : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ?
+        AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND status = 'draft' AND updated_at = ?)`)
+      .bind(id, id, input.expectedUpdatedAt);
+  const now = new Date().toISOString();
+  // D1 batch is transactional. Concurrent requests cannot write different targets
+  // between this target change and the draft-to-publishing claim. The losing
+  // transaction sees a non-draft and both of its statements make no changes.
+  const results = await db.batch([
+    target,
+    db.prepare(`UPDATE posts SET message = ?, scheduled_at = ?, status = 'publishing',
+        approved_at = ?, error = NULL, updated_at = ?
+        WHERE id = ? AND status = 'draft' AND updated_at = ?`)
+      .bind(input.message, input.scheduledAt?.toISOString() ?? null, now, now, id, input.expectedUpdatedAt),
+  ]);
+  return (results[1].meta.changes ?? 0) === 1;
 }
 
 export async function deletePost(db: D1Database, id: string, onlyIfStatus: PostStatus[]): Promise<boolean> {
