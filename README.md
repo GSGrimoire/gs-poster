@@ -1,11 +1,11 @@
 # GS Poster
 
-Claude drafts Facebook posts for the GS Grimoire Page. Gus approves them. Only then do they go out.
+GS Poster prepares Facebook and Bluesky posts for GS Grimoire. Each target requires approval on the site with GitHub sign-in and the approval PIN before it can go out.
 
 One Cloudflare Worker (free plan) does three jobs:
 
 - **MCP server** at `/mcp`. Claude connects to it as a custom connector and gets tools to draft, revise, list and delete drafts, and read the Page. **There is no publish tool.**
-- **Approval site** at `/`. Gus signs in with GitHub, reviews each draft (caption, images, time), can edit it, and approves with a PIN. Approving schedules the post on Facebook, or posts it at once if no time is set.
+- **Approval site** at `/`. Gus signs in with GitHub, chooses Facebook, Bluesky or both, edits platform captions, image alternative text and publish time, and approves with a PIN. Facebook uses Meta scheduling. Bluesky uses an approved queue served by the Worker's cron trigger.
 - **OAuth server**. Connecting Claude requires Gus's GitHub sign-in plus a consent click.
 
 ## Who can do what
@@ -16,7 +16,7 @@ One Cloudflare Worker (free plan) does three jobs:
 | Read Page posts and the schedule | yes | in Business Suite |
 | Publish or schedule | **no** | yes, with PIN |
 | Cancel a scheduled post | no | yes, with PIN |
-| See the Facebook token | no | only in the Cloudflare dashboard |
+| See Facebook or Bluesky credentials | no | only in the Cloudflare dashboard |
 
 Guards on the approval side: GitHub sign-in limited to `ALLOWED_GITHUB_LOGINS`, a PIN only Gus knows (5 wrong tries lock approvals for an hour), CSRF tokens and same-origin checks, and an atomic draft → publishing step so a double tap cannot post twice. Every action is logged in the Activity list.
 
@@ -53,6 +53,8 @@ In [dash.cloudflare.com](https://dash.cloudflare.com): left sidebar **Compute (W
 | `FB_PAGE_ID` | the GS Grimoire Page ID |
 | `FB_PAGE_TOKEN` | a long-lived Page access token (below) |
 | `FB_APP_SECRET` | optional, recommended: your Meta app's secret, if you turn on "Require app secret" |
+| `BSKY_HANDLE` | Bluesky account handle for the account GS Poster should post as |
+| `BSKY_APP_PASSWORD` | a Bluesky **app password**, not your main account password, generated in Bluesky settings |
 | `GITHUB_READ_TOKEN` | optional: fine-grained token, *Contents: read* only, for images in private repos |
 
 `COOKIE_SECRET` is created automatically on the first deploy. Never put any of these in the repo or in a chat.
@@ -64,7 +66,17 @@ In your Meta app (Development mode is fine, since only your own Page is used):
 - Keep the analytics dashboard on a **separate, read-only** token.
 - Recommended: turn on **Require app secret** in the app's advanced settings and add `FB_APP_SECRET` above. A leaked token alone is then useless.
 
-### 6. Connect Claude
+### 6. Bluesky setup
+
+1. Create a Bluesky app password in your Bluesky account settings, then add `BSKY_HANDLE` and `BSKY_APP_PASSWORD` to **Cloudflare Worker Secrets**, not GitHub. Do not enter the app password into draft text, logs or chat.
+2. The Worker configuration includes an `IMAGES` binding for Cloudflare Images, which converts each selected GitHub image to WebP, strips its original metadata and reduces it until the upload is below 1,950,000 bytes. The Cloudflare Images Free plan includes a monthly transformation allowance. The binding must be active at deployment.
+3. The configuration schedules a Worker cron trigger every minute. Bluesky has no native scheduled-post endpoint: only previously approved and still-scheduled Bluesky targets can be picked up by this trigger. Actual dispatch timing depends on Cloudflare cron execution.
+4. Each Bluesky target gets its own caption (up to 300 grapheme characters), up to four image URLs and **explicit alternative text per image**. Draft authors must write the alternative text from the original image descriptions. The current GitHub image repository does not expose separate description metadata, so GS Poster does not automatically invent descriptions from filenames.
+5. The optional free Patreon post card needs a Patreon `/posts/` URL, title and description. With no images, the card is on the post itself. With images, Bluesky's embed limitation requires a second, threaded reply carrying the card.
+
+**Publishing safeguards:** Adding a Bluesky target does not add an MCP publishing tool. Only approval with the existing PIN changes a target to publishable. A Bluesky publish failure remains visible on the review page and can be retried there with the PIN; it never causes Facebook to be posted a second time. For a two-post gallery-and-card thread, deterministic Bluesky record keys guard against duplicates if a network response is lost.
+
+### 7. Connect Claude
 1. Open the site URL and sign in with GitHub once.
 2. claude.ai → **Settings → Connectors → Add custom connector**, URL = site URL + `/mcp`. Connect, sign in, **Allow**.
 3. Ask Claude to run **check_setup**. It reports anything missing and whether the Page token works.
@@ -72,9 +84,9 @@ In your Meta app (Development mode is fine, since only your own Page is used):
 ## Day to day
 1. After a Release Schedule session, Claude drafts the Facebook posts with their times.
 2. You open the site (it works on a phone), check each draft, edit if needed, enter the PIN and approve. Or reject it with a note. Claude sees the note and revises.
-3. Facebook publishes at the set time. You can cancel from the site or in Business Suite.
+3. Facebook publishes at the set time; GS Poster publishes approved Bluesky targets through Cloudflare's scheduled trigger. You can cancel queued targets from the review site.
 
-Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB, at most 10 per post.
+Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB. Facebook supports up to 10 per post; Bluesky allows up to four with reviewed alternative text. Bluesky images are converted and resized under the 2 MB upload cap.
 
 ## Who reviews changes
 Whoever can change this code controls what the server does, so changes go through a second pair of eyes. As in gs-scribe, Gus does not review code: Claude works on a branch and opens a pull request, ChatGPT reviews it against the checklist in `CLAUDE.md` and merges, and merging to `main` deploys. Claude never pushes to `main` or merges its own pull requests.

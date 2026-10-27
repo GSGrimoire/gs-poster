@@ -4,10 +4,11 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, type Post } from "./db.ts";
+import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
+import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { fetchImage } from "./media.ts";
-import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost } from "./publish.ts";
+import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook } from "./publish.ts";
 import {
   checkCsrf,
   cookie,
@@ -70,7 +71,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   if (path === "/" && req.method === "GET") return dashboard(env, session);
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -243,10 +244,11 @@ function postCard(env: Env, p: Post): string {
     ? `<div class="thumbs">${p.images.map((_, i) => `<img src="/media/${p.id}/${i}" alt="" loading="lazy">`).join("")}</div>`
     : "";
   const live = p.permalink ? ` · <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
+  const bsky = p.bluesky?.permalink ? ` · <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
     <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span></div>
-    <p class="caption clip">${esc(p.message)}</p>${thumbs}</a>
-    ${live ? `<div class="meta" style="margin-top:8px">${live.slice(3)}</div>` : ""}</div>`;
+    <p class="caption clip">${esc(p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
+    ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
 
 async function dashboard(env: Env, session: Session): Promise<Response> {
@@ -264,7 +266,7 @@ async function dashboard(env: Env, session: Session): Promise<Response> {
   const body = `
     ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
     ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts. Claude's drafts show up here.")}
-    ${section("Scheduled on Facebook", scheduled, "Nothing scheduled.")}
+    ${section("Scheduled", scheduled, "Nothing scheduled.")}
     ${section("Recent", other, "Nothing yet.")}
     <h2>Activity</h2>
     ${log.length ? `<table class="log">${log
@@ -285,19 +287,49 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   if (!p) return html(page("Not found", `<p class="empty">That post does not exist (it may have been deleted).</p><p><a href="/">Back</a></p>`, { login: session.login }), { status: 404 });
   const csrf = await csrfToken(env, session);
   const message = state.message ?? p.message;
-  const checks = checkMessage(message, { hasImages: p.images.length > 0 });
-  const checkList = [...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`), ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`)].join("");
+  const checks = checkMessage(message, { hasImages: p.images.length > 0 || (!p.facebook_enabled && !!p.bluesky) });
+  const bsChecks = p.bluesky ? checkMessage(p.bluesky.caption, { hasImages: p.bluesky.images.length > 0 }) : null;
+  const checkList = [
+    ...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`),
+    ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`),
+    ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
+    ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
+  ].join("");
   const thumbs = p.images.length ? `<div class="thumbs">${p.images.map((_, i) => `<img src="/media/${p.id}/${i}" alt="">`).join("")}</div>` : "";
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}">`;
+  const bs = p.bluesky;
+  const bsMedia = bs?.images ?? p.images.slice(0, 4).map((url) => ({ url, alt: "" }));
+  const bsMediaFields = Array.from({ length: 4 }, (_, i) => {
+    const item = bsMedia[i];
+    return `<div><label for="bs_image_${i}">Bluesky image ${i + 1} (GitHub URL, optional)</label>
+      <input type="text" id="bs_image_${i}" name="bs_image_${i}" value="${esc(item?.url ?? "")}">
+      <label for="bs_alt_${i}">Alternative text from image library description</label>
+      <input type="text" id="bs_alt_${i}" name="bs_alt_${i}" value="${esc(item?.alt ?? "")}"></div>`;
+  }).join("");
+  const patreon = bs?.patreon;
+
 
   let actions = "";
   if (p.status === "draft") {
     actions = `
       <form method="post" action="/post/${p.id}/approve" class="card">
         ${hidden}
-        <label for="message">Caption</label>
+        <p class="hint">Select one or both targets. Every selected target is authorized by this approval and PIN.</p>
+        <label><input type="checkbox" name="target_facebook" value="1" ${p.facebook_enabled ? "checked" : ""}> Publish to Facebook</label>
+        <label for="message">Facebook caption</label>
         <textarea id="message" name="message">${esc(message)}</textarea>
+        <label><input type="checkbox" name="target_bluesky" value="1" ${bs ? "checked" : ""}> Publish to Bluesky</label>
+        <label for="bs_caption">Bluesky caption (300 characters)</label>
+        <textarea id="bs_caption" name="bs_caption">${esc(bs?.caption ?? message.slice(0, 300))}</textarea>
+        <p class="hint">Provide alternative text for each Bluesky image. When images and a Patreon card are selected, the link card appears as a reply in the same thread.</p>
+        ${bsMediaFields}
+        <label for="bs_patreon_url">Free Patreon post URL (optional)</label>
+        <input id="bs_patreon_url" type="text" name="bs_patreon_url" value="${esc(patreon?.url ?? "")}">
+        <label for="bs_patreon_title">Patreon card title</label>
+        <input id="bs_patreon_title" type="text" name="bs_patreon_title" value="${esc(patreon?.title ?? "")}">
+        <label for="bs_patreon_description">Patreon card description</label>
+        <input id="bs_patreon_description" type="text" name="bs_patreon_description" value="${esc(patreon?.description ?? "")}">
         <label for="when">Publish time (${esc(env.TIMEZONE)})</label>
         <input id="when" type="datetime-local" name="when" value="${esc(whenValue)}">
         <p class="hint">Leave empty to post the moment you approve. Otherwise between 12 minutes and 30 days from now.</p>
@@ -312,16 +344,36 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
           <div class="row"><button class="danger">Reject</button></div>
         </form>
       </details>`;
-  } else if (p.status === "scheduled") {
-    actions = `
-      <form method="post" action="/post/${p.id}/cancel" class="card">${hidden}
-        <p>Scheduled for <strong>${esc(whenText(env, p))}</strong>. You can also change or cancel it in Meta Business Suite.</p>
-        <label for="pin">PIN</label>
-        <input id="pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
-        <div class="row"><button class="danger">Cancel this post</button></div>
+  }
+  if (p.status !== "draft" && p.bluesky?.status === "failed" && p.approved_at) {
+    actions += `<form method="post" action="/post/${p.id}/retry-bluesky" class="card">${hidden}
+      <p>Bluesky publishing failed. Retry this approved target without reposting to Facebook.</p>
+      <label for="retry-pin">PIN</label><input id="retry-pin" type="password" name="pin" inputmode="numeric" required>
+      <div class="row"><button class="primary">Retry Bluesky only</button></div></form>`;
+  }
+  if (p.status === "scheduled" || p.bluesky?.status === "scheduled") {
+    actions += `<form method="post" action="/post/${p.id}/cancel" class="card">${hidden}
+      <p>Pending for <strong>${esc(whenText(env, p))}</strong>. Cancellation stops pending targets only, not already published posts.</p>
+      <label for="cancel-pin">PIN</label>
+      <input id="cancel-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
+      <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
-  } else if (p.status === "failed" || p.status === "rejected") {
-    actions = `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
+  }
+  // Failed Facebook requests can have succeeded remotely despite a lost response.
+  // Both recovery actions require a fresh PIN and explicit human reconciliation.
+  if (p.status === "failed" && p.facebook_enabled && p.approved_at && !p.fb_post_id) {
+    actions += `<form method="post" action="/post/${p.id}/retry-facebook" class="card">${hidden}
+      <p>Facebook publishing failed or returned an uncertain response. Check your Page for this exact post first. Retrying can create a duplicate if it already exists.</p>
+      <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
+      <label for="facebook-retry-pin">PIN</label><input id="facebook-retry-pin" type="password" name="pin" inputmode="numeric" required>
+      <div class="row"><button class="primary">Retry Facebook only</button></div></form>`;
+  }
+  if (p.status === "failed" && !p.fb_post_id &&
+      !["scheduled", "publishing", "published"].includes(p.bluesky?.status ?? "")) {
+    actions += `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
+      <p>Check Facebook first. This resets an unresolved failed draft without publishing it.</p>
+      <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
+      <label for="redraft-pin">PIN</label><input id="redraft-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button>Move back to drafts</button></div></form>`;
   }
 
@@ -329,12 +381,18 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     <p><a href="/">← All posts</a></p>
     ${state.error ? `<div class="notice err">${esc(state.error)}</div>` : ""}
     ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
-    ${p.error ? `<div class="notice err">Facebook error: ${esc(p.error)}</div>` : ""}
+    ${p.error ? `<div class="notice err">Publishing error: ${esc(p.error)}</div>` : ""}
+    ${p.bluesky?.error ? `<div class="notice err">Bluesky error: ${esc(p.bluesky.error)}</div>` : ""}
     ${p.status === "rejected" && p.note ? `<div class="notice">Your note to Claude: ${esc(p.note)}</div>` : ""}
     <div class="card preview">
-      <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}</div>
-      <p class="caption">${esc(p.message)}</p>${thumbs}
-      ${p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
+      <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
+        ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
+        <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""}</span></div>
+      ${p.facebook_enabled ? `<p class="hint">Facebook caption and images</p><p class="caption">${esc(p.message)}</p>${thumbs}` : ""}
+      ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
+        ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
+        ${bs.patreon ? `<p class="meta">Patreon card: ${esc(bs.patreon.title)} | ${esc(bs.patreon.url)}</p>` : ""}` : ""}
+      ${p.facebook_enabled && p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
       <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} · ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} · ${esc(p.id)}</p>
     </div>
@@ -353,12 +411,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const ok = await rejectPost(env, id, String(form.get("reason") || "").slice(0, 500), session.login);
     return ok ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Only drafts can be rejected." }, 409);
   }
-  if (action === "redraft") {
-    await backToDraft(env, id, session.login);
-    return redirect(`/post/${id}`);
-  }
-
-  // approve and cancel need the PIN
+  // All publication, cancellation and failed-target recovery require the PIN
   const message = String(form.get("message") ?? "");
   const whenRaw = String(form.get("when") ?? "").trim();
   const keep = { message: action === "approve" ? message : undefined, when: action === "approve" ? whenRaw : undefined };
@@ -371,13 +424,54 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    if (action === "redraft" || action === "retry-facebook") {
+      if (form.get("confirmed_no_facebook") !== "1") {
+        return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
+      }
+      if (action === "redraft") {
+        const restored = await backToDraft(env, id, session.login, true);
+        return restored ? redirect(`/post/${id}`) :
+          postPage(env, session, id, { error: "Cannot restore a post with an active or already published target." }, 409);
+      }
+      const retried = await retryFailedFacebook(env, id, session.login);
+      return postPage(env, session, id, {
+        notice: retried ? "Facebook-only retry completed." : "Facebook retry failed. Check Facebook before another attempt.",
+      });
+    }
     if (action === "cancel") {
       await cancelScheduled(env, id, session.login);
-      return postPage(env, session, id, { notice: "Cancelled. It has been removed from Facebook's schedule." });
+      return postPage(env, session, id, { notice: "Scheduled targets cancelled." });
     }
-    // approve
-    if (!message.trim() && !((await getPost(env.DB, id))?.images.length)) {
-      return postPage(env, session, id, { ...keep, error: "The caption is empty and there are no images." }, 400);
+    if (action === "retry-bluesky") {
+      const succeeded = await retryFailedBluesky(env, id, session.login);
+      return postPage(env, session, id, { notice: succeeded ? "Bluesky published." : "Bluesky retry failed. Review the error." });
+    }
+    // approve: validate the human-selected targets before the atomic publishing claim.
+    const current = await getPost(env.DB, id);
+    if (!current || current.status !== "draft") return postPage(env, session, id, { error: "Only drafts can be approved." }, 409);
+    const facebook = form.get("target_facebook") === "1";
+    const blueskySelected = form.get("target_bluesky") === "1";
+    if (!facebook && !blueskySelected) return postPage(env, session, id, { ...keep, error: "Choose at least one target." }, 400);
+    if (facebook && !message.trim() && !current.images.length) {
+      return postPage(env, session, id, { ...keep, error: "The Facebook post needs a caption or image." }, 400);
+    }
+    let bluesky: BlueskyDraft | null = null;
+    if (blueskySelected) {
+      const images = Array.from({ length: 4 }, (_, i) => ({
+        url: String(form.get("bs_image_" + i) || "").trim(),
+        alt: String(form.get("bs_alt_" + i) || "").trim(),
+      })).filter((img) => img.url || img.alt);
+      const patreonUrl = String(form.get("bs_patreon_url") || "").trim();
+      bluesky = {
+        caption: String(form.get("bs_caption") || ""),
+        images,
+        patreon: patreonUrl ? {
+          url: patreonUrl, title: String(form.get("bs_patreon_title") || ""),
+          description: String(form.get("bs_patreon_description") || ""),
+        } : null,
+      };
+      const problems = checkBluesky(bluesky);
+      if (problems.length) return postPage(env, session, id, { ...keep, error: problems.join(" ") }, 400);
     }
     let when: Date | null = null;
     if (whenRaw) {
@@ -390,10 +484,13 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const timeErr = checkWhen(when, new Date(), APPROVE_MIN_LEAD_MS);
     if (timeErr) return postPage(env, session, id, { ...keep, error: timeErr }, 400);
 
-    const result = await approveAndPublish(env, id, { message, scheduledAt: when, actor: session.login });
-    if (result.status === "failed") return postPage(env, session, id, { error: "Facebook did not accept the post. See the error below; fix it and move it back to drafts." }, 502);
+    const result = await approveAndPublish(env, id, {
+      message, scheduledAt: when, actor: session.login,
+      facebookEnabled: facebook, bluesky, expectedUpdatedAt: current.updated_at,
+    });
+    if (result.status === "failed") return postPage(env, session, id, { error: "A selected target failed. Review the target-specific error below." }, 502);
     return postPage(env, session, id, {
-      notice: result.status === "scheduled" ? `Scheduled for ${whenText(env, result)}.` : "Posted.",
+      notice: result.status === "scheduled" ? `Scheduled for ${whenText(env, result)}.` : "Approved. Review each target status below.",
     });
   } catch (e) {
     return postPage(env, session, id, { ...keep, error: e instanceof Error ? e.message : String(e) }, 409);
