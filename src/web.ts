@@ -387,7 +387,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label for="resume-pin">PIN</label><input id="resume-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button class="primary">Resume remaining uploads</button></div></form>`;
   }
-  if (fbQueue && p.status === "publishing" && ["failed", "sending"].includes(fbQueue.status)) {
+  if (fbQueue && p.status === "publishing" && ["failed", "sending", "done"].includes(fbQueue.status)) {
     actions += `<div class="card"><p>The Facebook queue needs manual reconciliation. First check your Page for an existing post. Neither action sends another Facebook post.</p>
       <form method="post" action="/post/${p.id}/reconcile-facebook">${hidden}
       <label for="confirmed-fb-id">Existing Facebook post ID from this Page</label>
