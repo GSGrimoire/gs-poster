@@ -8,7 +8,7 @@ import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, ty
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { fetchImage } from "./media.ts";
-import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky } from "./publish.ts";
+import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook } from "./publish.ts";
 import {
   checkCsrf,
   cookie,
@@ -71,7 +71,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   if (path === "/" && req.method === "GET") return dashboard(env, session);
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -359,8 +359,21 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
   }
-  if (p.status === "failed" && !p.approved_at && p.bluesky?.status !== "published") {
+  // Failed Facebook requests can have succeeded remotely despite a lost response.
+  // Both recovery actions require a fresh PIN and explicit human reconciliation.
+  if (p.status === "failed" && p.facebook_enabled && p.approved_at && !p.fb_post_id) {
+    actions += `<form method="post" action="/post/${p.id}/retry-facebook" class="card">${hidden}
+      <p>Facebook publishing failed or returned an uncertain response. Check your Page for this exact post first. Retrying can create a duplicate if it already exists.</p>
+      <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
+      <label for="facebook-retry-pin">PIN</label><input id="facebook-retry-pin" type="password" name="pin" inputmode="numeric" required>
+      <div class="row"><button class="primary">Retry Facebook only</button></div></form>`;
+  }
+  if (p.status === "failed" && !p.fb_post_id &&
+      !["scheduled", "publishing", "published"].includes(p.bluesky?.status ?? "")) {
     actions += `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
+      <p>Check Facebook first. This resets an unresolved failed draft without publishing it.</p>
+      <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
+      <label for="redraft-pin">PIN</label><input id="redraft-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button>Move back to drafts</button></div></form>`;
   }
 
@@ -398,12 +411,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const ok = await rejectPost(env, id, String(form.get("reason") || "").slice(0, 500), session.login);
     return ok ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Only drafts can be rejected." }, 409);
   }
-  if (action === "redraft") {
-    const restored = await backToDraft(env, id, session.login);
-    return restored ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Cannot redraft while an approved target may already be scheduled or published." }, 409);
-  }
-
-  // approve and cancel need the PIN
+  // All publication, cancellation and failed-target recovery require the PIN
   const message = String(form.get("message") ?? "");
   const whenRaw = String(form.get("when") ?? "").trim();
   const keep = { message: action === "approve" ? message : undefined, when: action === "approve" ? whenRaw : undefined };
@@ -416,6 +424,20 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    if (action === "redraft" || action === "retry-facebook") {
+      if (form.get("confirmed_no_facebook") !== "1") {
+        return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
+      }
+      if (action === "redraft") {
+        const restored = await backToDraft(env, id, session.login, true);
+        return restored ? redirect(`/post/${id}`) :
+          postPage(env, session, id, { error: "Cannot restore a post with an active or already published target." }, 409);
+      }
+      const retried = await retryFailedFacebook(env, id, session.login);
+      return postPage(env, session, id, {
+        notice: retried ? "Facebook-only retry completed." : "Facebook retry failed. Check Facebook before another attempt.",
+      });
+    }
     if (action === "cancel") {
       await cancelScheduled(env, id, session.login);
       return postPage(env, session, id, { notice: "Scheduled targets cancelled." });
