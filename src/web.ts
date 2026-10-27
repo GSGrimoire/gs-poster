@@ -297,7 +297,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   ].join("");
   const thumbs = p.images.length ? `<div class="thumbs">${p.images.map((_, i) => `<img src="/media/${p.id}/${i}" alt="">`).join("")}</div>` : "";
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
-  const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}">`;
+  const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">`;
   const bs = p.bluesky;
   const bsMedia = bs?.images ?? p.images.slice(0, 4).map((url) => ({ url, alt: "" }));
   const bsMediaFields = Array.from({ length: 4 }, (_, i) => {
@@ -449,6 +449,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     // approve: validate the human-selected targets before the atomic publishing claim.
     const current = await getPost(env.DB, id);
     if (!current || current.status !== "draft") return postPage(env, session, id, { error: "Only drafts can be approved." }, 409);
+    if (String(form.get("expected_updated_at") ?? "") !== current.updated_at) {
+      return postPage(env, session, id, { error: "The draft changed since you opened this page. Reload and review the current version before approving." }, 409);
+    }
     const facebook = form.get("target_facebook") === "1";
     const blueskySelected = form.get("target_bluesky") === "1";
     if (!facebook && !blueskySelected) return postPage(env, session, id, { ...keep, error: "Choose at least one target." }, 400);
@@ -484,6 +487,18 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const timeErr = checkWhen(when, new Date(), APPROVE_MIN_LEAD_MS);
     if (timeErr) return postPage(env, session, id, { ...keep, error: timeErr }, 400);
 
+    // Human review only authorizes media that is actually readable now.
+    if (bluesky) {
+      for (const image of bluesky.images) {
+        try { await fetchImage(env, image.url); }
+        catch (error) {
+          return postPage(env, session, id, {
+            error: "Bluesky image could not be loaded: " +
+              (error instanceof Error ? error.message : String(error)),
+          }, 400);
+        }
+      }
+    }
     const result = await approveAndPublish(env, id, {
       message, scheduledAt: when, actor: session.login,
       facebookEnabled: facebook, bluesky, expectedUpdatedAt: current.updated_at,
