@@ -302,7 +302,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
-  const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="">`).join("")}</div>${p.images.length > 12 ? `<p class="hint">Showing the first 12 of ${p.images.length} images. All images are included in the approved order.</p>` : ""}` : "";
+  const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="Photo ${i + 1}">`).join("")}</div>${p.images.length > 12 ? `<details class="card"><summary>Review remaining ${p.images.length - 12} photos in order</summary><div class="thumbs">${p.images.slice(12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i + 12}" alt="Photo ${i + 13}">`).join("")}</div></details>` : ""}` : "";
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">`;
   const bs = p.bluesky;
@@ -345,6 +345,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <label for="when">Publish time (${esc(env.TIMEZONE)})</label>
         <input id="when" type="datetime-local" name="when" value="${esc(whenValue)}">
         <p class="hint">Leave empty to post the moment you approve. Otherwise between 12 minutes and 30 days from now.</p>
+        ${p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed every photo in the full sequence above.</label>` : ""}
         <label for="pin">PIN</label>
         <input id="pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
         <div class="row"><button class="primary">Approve and ${p.scheduled_at ? "schedule" : "post"}</button></div>
@@ -509,6 +510,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const facebook = form.get("target_facebook") === "1";
     const blueskySelected = form.get("target_bluesky") === "1";
     if (!facebook && !blueskySelected) return postPage(env, session, id, { ...keep, error: "Choose at least one target." }, 400);
+    if (facebook && current.images.length > 12 && form.get("reviewed_all_images") !== "1") {
+      return postPage(env, session, id, { error: "Review every photo before approving this large Facebook post." }, 400);
+    }
     if (facebook && !message.trim() && !current.images.length) {
       return postPage(env, session, id, { ...keep, error: "The Facebook post needs a caption or image." }, 400);
     }
