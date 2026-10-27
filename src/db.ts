@@ -277,9 +277,10 @@ export async function dueBlueskyIds(db: D1Database, now: string): Promise<string
 
 export async function claimFailedBluesky(db: D1Database, id: string): Promise<boolean> {
   await ensureSchema(db);
-  const result = await db.prepare(`UPDATE bluesky_targets SET status = 'publishing'
+  const result = await db.prepare(`UPDATE bluesky_targets SET status = 'publishing', started_at = ?
     WHERE post_id = ? AND status = 'failed'
-    AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND approved_at IS NOT NULL)`).bind(id, id).run();
+    AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND approved_at IS NOT NULL)`)
+    .bind(new Date().toISOString(), id, id).run();
   return (result.meta.changes ?? 0) > 0;
 }
 
