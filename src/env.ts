@@ -7,7 +7,7 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 export interface Env {
   OAUTH_KV: KVNamespace;
   DB: D1Database;
-  /** Optional private uploads; feature disabled if the binding is absent. */
+  /** Optional private object storage for draft uploads. */
   UPLOADS?: R2Bucket;
   /** Injected by OAuthProvider into the default handler. */
   OAUTH_PROVIDER: OAuthHelpers;
@@ -32,6 +32,11 @@ export interface Env {
   FB_PAGE_TOKEN?: string;
   /** Optional: when the Meta app has "Require app secret" on. */
   FB_APP_SECRET?: string;
+  /** Bluesky service credentials, only kept in Cloudflare Worker secrets. */
+  BSKY_HANDLE?: string;
+  BSKY_APP_PASSWORD?: string;
+  /** Cloudflare Images binding used to strip metadata and shrink uploads. */
+  IMAGES?: ImagesBinding;
   /** Optional: read-only GitHub token for images in private repos. */
   GITHUB_READ_TOKEN?: string;
 }

@@ -9,6 +9,8 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": true,
   "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  "images": { "binding": "IMAGES" },
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-oauth-kv" }],
   "d1_databases": [{ "binding": "DB", "database_name": "gs-poster-db", "database_id": "local-gs-poster-db" }],
   "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "gs-poster-uploads" }],
