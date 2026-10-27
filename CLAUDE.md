@@ -21,6 +21,9 @@ The point of this repo is that Claude drafts and Gus approves. Keep it that way.
 2. Nothing publishes, schedules or cancels a Facebook post except `src/publish.ts`, reached only from `src/web.ts` after the GitHub sign-in and PIN check. No new MCP tool can publish.
 3. The allowed-logins check, PIN and lockout, CSRF and same-origin checks and `claimForPublish` are unchanged or stronger.
 4. No secrets, tokens or `.dev.vars` in the diff.
+5. PUT /upload/:id/:token is the only unauthenticated write. It must remain single-use, token-hash-gated, size-limited and magic-byte checked.
+6. Private uploads must never be exposed as public files; only the Worker reads R2.
+7. UPLOAD_RETENTION_DAYS in src/upload.ts must equal the retention configured in scripts/prepare-deploy.mjs.
 If any of these fails, comment on the pull request and tell Gus instead of merging.
 
 ## Using the connector (for Claude in other sessions)
