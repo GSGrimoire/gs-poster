@@ -104,3 +104,18 @@ test("quotas, unsupported files and missing R2 are enforced",async()=>{
   await assert.rejects(createUpload({DB:db} as unknown as Env,"https://poster.test",
     {filename:"a.png",actor:"test"}),/not set up/);
 });
+
+test("ambiguous R2 write failure consumes bearer link and blocks a second PUT",async()=>{
+  const {env,db}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"a.png",actor:"test"});
+  const bucket=env.UPLOADS!;
+  let calls=0;
+  (bucket as unknown as {put: (...args:unknown[]) => Promise<void>}).put=async()=>{
+    calls++;
+    throw new Error("R2 did not confirm write");
+  };
+  assert.equal((await handleUploadPut(upload(grant.upload_url,png),env)).status,500);
+  assert.equal(db.rows[0].status,"uploading");
+  assert.equal((await handleUploadPut(upload(grant.upload_url,png),env)).status,404);
+  assert.equal(calls,1);
+});
