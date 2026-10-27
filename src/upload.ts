@@ -88,7 +88,11 @@ export async function createUpload(env: Env, origin: string, input: { filename: 
   };
 }
 class UploadError extends Error {
-  constructor(message: string, public status: number) { super(message); }
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
 }
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: {
