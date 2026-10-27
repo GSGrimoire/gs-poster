@@ -7,6 +7,8 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 export interface Env {
   OAUTH_KV: KVNamespace;
   DB: D1Database;
+  /** Optional private uploads; feature disabled if the binding is absent. */
+  UPLOADS?: R2Bucket;
   /** Injected by OAuthProvider into the default handler. */
   OAUTH_PROVIDER: OAuthHelpers;
 

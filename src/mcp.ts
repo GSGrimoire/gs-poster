@@ -13,6 +13,7 @@ import { checkImageUrl, fetchImage } from "./media.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
+import { createUpload } from "./upload.ts";
 
 const STATUSES = ["draft", "rejected", "publishing", "scheduled", "published", "failed", "cancelled"] as const;
 
@@ -79,7 +80,7 @@ function readWhen(env: Env, input: string | null | undefined): { when: Date | nu
 }
 
 const imageList = z
-  .array(z.string().url())
+  .array(z.string().min(1))
   .max(MAX_IMAGES)
   .describe(
     "Image URLs on GitHub, in display order. Use raw.githubusercontent.com links (e.g. from the GS Grimoire image library) or github.com/.../blob/... links. JPG, PNG or GIF, max 10 MB each.",
@@ -87,6 +88,29 @@ const imageList = z
 
 export function buildServer(env: Env, origin: string): McpServer {
   const server = new McpServer({ name: "gs-poster", version: "0.1.0" });
+
+  // OAuth-protected. The returned PUT URL is a short-lived bearer credential;
+  // writing media never approves or publishes a post.
+  server.registerTool(
+    "request_upload",
+    {
+      title: "Get a private one-time file upload link",
+      description: "Create one private JPG, PNG, GIF (up to 10 MB) or MP4 (up to 20 MB) upload link, valid for 10 minutes. Run the returned curl command, then use its upload:// reference in a draft. Uploaded files expire after 45 days. Uploading is NOT publishing.",
+      inputSchema: z.object({
+        filename: z.string().min(1).max(200).describe("File name with extension. Only extension is retained."),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ filename }) => {
+      try {
+        const grant = await createUpload(env, origin, { filename, actor: actor() });
+        await audit(env.DB, actor(), "upload-link", null, grant.reference);
+        return ok({ ...grant, next: "Upload the local file with curl, then use the reference in draft_post." });
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
 
   server.registerTool(
     "draft_post",
@@ -274,7 +298,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       return ok({
         review_site: origin,
         missing_secrets: missing,
-        optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN },
+        optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN, UPLOADS: !!env.UPLOADS },
         graph_version: env.GRAPH_VERSION,
         timezone: env.TIMEZONE,
         facebook,

@@ -13,6 +13,9 @@ const API = "https://api.cloudflare.com/client/v4";
 const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 const KV_TITLE = "gs-poster-oauth";
 const D1_NAME = "gs-poster-db";
+const R2_BUCKET = "gs-poster-uploads";
+// Keep this identical to UPLOAD_RETENTION_DAYS in src/upload.ts.
+const UPLOAD_RETENTION_DAYS = 45;
 
 if (!TOKEN) fail("CLOUDFLARE_API_TOKEN is not set. Add it under the repo's Settings → Secrets and variables → Actions.");
 
@@ -69,6 +72,41 @@ if (!d1) {
   console.log(`Created D1 database ${D1_NAME}`);
 } else console.log(`Using D1 database ${D1_NAME}`);
 
+// Optional private R2 uploads: only enable the binding when the bucket AND
+// its 45-day auto-deletion rule have been confirmed. Preserve existing
+// lifecycle rules: PUT /lifecycle replaces the entire rule set.
+let uploadsReady = false;
+try {
+  const listed = await cf("/accounts/" + acct + "/r2/buckets?name_contains=" + encodeURIComponent(R2_BUCKET));
+  if (!(listed.buckets || []).some(b => b.name === R2_BUCKET)) {
+    await cf("/accounts/" + acct + "/r2/buckets", {
+      method: "POST", body: JSON.stringify({ name: R2_BUCKET }),
+    });
+    console.log("Created R2 bucket " + R2_BUCKET);
+  }
+  const path = "/accounts/" + acct + "/r2/buckets/" + R2_BUCKET + "/lifecycle";
+  const previous = await cf(path);
+  const newRule = {
+    id: "expire-uploads", enabled: true, conditions: { prefix: "uploads/" },
+    deleteObjectsTransition: { condition: { type: "Age", maxAge: UPLOAD_RETENTION_DAYS * 86400 } },
+  };
+  const rules = [...(previous.rules || []).filter(r => r.id !== newRule.id), newRule];
+  await cf(path, { method: "PUT", body: JSON.stringify({ rules }) });
+  // Re-read the result so a silently rejected rule cannot turn uploads on.
+  const verified = await cf(path);
+  if (!(verified.rules || []).some(r =>
+    r.id === newRule.id && r.enabled &&
+    r.conditions?.prefix === "uploads/" &&
+    r.deleteObjectsTransition?.condition?.type === "Age" &&
+    r.deleteObjectsTransition?.condition?.maxAge === UPLOAD_RETENTION_DAYS * 86400
+  )) throw new Error("R2 lifecycle verification failed");
+  uploadsReady = true;
+  console.log("Uploads auto-delete after " + UPLOAD_RETENTION_DAYS + " days.");
+} catch (error) {
+  console.log("::warning::Private uploads disabled (" + error.message +
+    "). Enable R2 and grant the deploy token Workers R2 Storage: Edit.");
+}
+
 // wrangler.jsonc → JSON: drop whole-line comments (there are no trailing ones).
 const src = readFileSync("wrangler.jsonc", "utf8")
   .split("\n")
@@ -78,6 +116,8 @@ const config = JSON.parse(src);
 config.account_id = acct;
 config.kv_namespaces = [{ binding: "OAUTH_KV", id: kv.id }];
 config.d1_databases = [{ binding: "DB", database_name: D1_NAME, database_id: d1.uuid }];
+if (uploadsReady) config.r2_buckets = [{ binding: "UPLOADS", bucket_name: R2_BUCKET }];
+else delete config.r2_buckets;
 delete config.$schema;
 writeFileSync("wrangler.generated.jsonc", JSON.stringify(config, null, 2) + "\n");
 
