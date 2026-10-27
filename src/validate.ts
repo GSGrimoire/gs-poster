@@ -11,7 +11,16 @@ export interface CheckResult {
 }
 
 const FB_MAX_MESSAGE = 63_206;
-export const MAX_IMAGES = 10;
+export const MAX_IMAGES = 80;
+export const FACEBOOK_IMAGE_BATCH_SIZE = 8;
+
+/** Ordered, non-overlapping per-run upload boundaries. */
+export function nextFacebookImageBatch(start: number, total: number): { start: number; end: number } {
+  if (!Number.isInteger(start) || !Number.isInteger(total) || start < 0 || total < 0 || start > total || total > 80) {
+    throw new Error("Invalid Facebook upload checkpoint or image count.");
+  }
+  return { start, end: Math.min(start + FACEBOOK_IMAGE_BATCH_SIZE, total) };
+}
 
 /** Facebook: a scheduled post must be 10 minutes to 30 days out. */
 export const FB_MIN_LEAD_MS = 10 * 60 * 1000;
