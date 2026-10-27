@@ -79,6 +79,9 @@ test("expired scheduled lead fails before any Facebook final Graph request", asy
   await db.prepare(`UPDATE facebook_upload_jobs
     SET next_index = 11, media_ids = ?, status = 'uploading'
     WHERE post_id = ?`).bind(JSON.stringify(Array(11).fill("test-media-id")),id).run();
+  // Earlier queue fixtures must not consume this tick ahead of this job.
+  await db.prepare(`UPDATE facebook_upload_jobs SET status = 'cancelled'
+    WHERE post_id != ? AND status IN ('uploading','busy')`).bind(id).run();
   // No Facebook credentials: if a Graph call is attempted, it would fail differently.
   await processFacebookUploadBatch(env);
   const state = await getFacebookUploadProgress(db,id,11);
