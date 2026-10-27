@@ -1,7 +1,7 @@
 /**
  * A durable, PIN-approved Facebook bulk photo queue.
  * One cron invocation handles at most eight photo downloads/uploads
- * (16 external subrequests), then checkpoints each returned media id in D1.
+ * (up to 24 external subrequests with private GitHub fallback), then checkpoints each returned media id in D1.
  *
  * Feed creation has a one-way "sending" barrier. If the Graph response is
  * ambiguous, the job remains blocked instead of risking a duplicate post.
@@ -63,7 +63,8 @@ export async function enqueueFacebookUpload(env: Env, postId: string): Promise<v
 
 async function claimedJob(db: D1Database, now: string): Promise<Job | null> {
   await ensureFacebookQueue(db);
-  // Cloudflare requests do not execute for 15 minutes. Reclaim only after a conservative 2-minute lease.
+  // A network request can outlive the lease. Every subsequent write is fenced
+  // by started_at so a replaced worker cannot change the new owner's progress.
   const stale = new Date(Date.parse(now) - 2 * 60_000).toISOString();
   const row = await db.prepare(`SELECT f.* FROM facebook_upload_jobs f
     JOIN posts p ON p.id = f.post_id
@@ -72,9 +73,10 @@ async function claimedJob(db: D1Database, now: string): Promise<Job | null> {
     ORDER BY p.approved_at LIMIT 1`).bind(stale).first<Job>();
   if (!row) return null;
   const claim = await db.prepare(`UPDATE facebook_upload_jobs SET status = 'busy', started_at = ?, error = NULL
-    WHERE post_id = ? AND (status = 'uploading' OR (status = 'busy' AND started_at < ?))
+    WHERE post_id = ? AND status = ? AND started_at IS ? AND next_index = ?
+      AND (status = 'uploading' OR (status = 'busy' AND started_at < ?))
       AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND status = 'publishing' AND approved_at IS NOT NULL)`)
-    .bind(now, row.post_id, stale, row.post_id).run();
+    .bind(now, row.post_id, row.status, row.started_at, row.next_index, stale, row.post_id).run();
   return (claim.meta.changes ?? 0) === 1 ? { ...row, status: "busy", started_at: now } : null;
 }
 
@@ -98,12 +100,12 @@ export async function processFacebookUploadBatch(env: Env): Promise<void> {
       // each group of eight. A crash cannot cause an attached-media index gap.
       const saved = await env.DB.prepare(`UPDATE facebook_upload_jobs
         SET next_index = next_index + 1, media_ids = json_insert(media_ids, '$[#]', ?)
-        WHERE post_id = ? AND status = 'busy' AND next_index = ?`)
-        .bind(mediaId, post.id, index).run();
+        WHERE post_id = ? AND status = 'busy' AND next_index = ? AND started_at = ?`)
+        .bind(mediaId, post.id, index, job.started_at).run();
       if ((saved.meta.changes ?? 0) !== 1) throw new Error("Upload checkpoint was lost; no Facebook feed post was sent.");
     }
     if (index < post.images.length) {
-      await env.DB.prepare("UPDATE facebook_upload_jobs SET status = 'uploading' WHERE post_id = ? AND status = 'busy'").bind(post.id).run();
+      await env.DB.prepare("UPDATE facebook_upload_jobs SET status = 'uploading' WHERE post_id = ? AND status = 'busy' AND started_at = ?").bind(post.id, job.started_at).run();
       await audit(env.DB, "cron", "facebook-batch", post.id, index + "/" + post.images.length);
       return;
     }
@@ -114,8 +116,8 @@ export async function processFacebookUploadBatch(env: Env): Promise<void> {
     }
     // The send barrier is deliberately not automatically retried: a lost Meta
     // response may mean the feed post was already created.
-    const send = await env.DB.prepare("UPDATE facebook_upload_jobs SET status = 'sending' WHERE post_id = ? AND status = 'busy'")
-      .bind(post.id).run();
+    const send = await env.DB.prepare("UPDATE facebook_upload_jobs SET status = 'sending' WHERE post_id = ? AND status = 'busy' AND started_at = ?")
+      .bind(post.id, job.started_at).run();
     if ((send.meta.changes ?? 0) !== 1) throw new Error("Could not lock the final Facebook publication.");
     const all = await env.DB.prepare("SELECT media_ids FROM facebook_upload_jobs WHERE post_id = ?")
       .bind(post.id).first<{ media_ids: string }>();
@@ -140,7 +142,7 @@ export async function processFacebookUploadBatch(env: Env): Promise<void> {
     // A final send may already have succeeded. Block the job for reconciliation,
     // rather than attempt an automatic second feed request.
     await env.DB.prepare(`UPDATE facebook_upload_jobs SET status = 'failed', error = ?
-      WHERE post_id = ? AND status IN ('busy','sending')`).bind(message, post.id).run();
+      WHERE post_id = ? AND status IN ('busy','sending') AND started_at = ?`).bind(message, post.id, job.started_at).run();
     await audit(env.DB, "cron", "facebook-bulk-failed", post.id, message);
   }
 }
