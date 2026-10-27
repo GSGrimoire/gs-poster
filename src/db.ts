@@ -4,6 +4,22 @@
  * post twice.
  */
 
+export interface BlueskyDraft {
+  caption: string;
+  images: Array<{ url: string; alt: string }>;
+  patreon: { url: string; title: string; description: string } | null;
+}
+
+export type BlueskyStatus = "draft" | "scheduled" | "publishing" | "published" | "failed" | "cancelled";
+export interface BlueskyTarget extends BlueskyDraft {
+  status: BlueskyStatus;
+  uri: string | null;
+  cid: string | null;
+  card_uri: string | null;
+  permalink: string | null;
+  error: string | null;
+}
+
 export type PostStatus =
   | "draft" // waiting for Gus
   | "rejected" // Gus said no; Claude can revise it back to draft
@@ -30,11 +46,29 @@ export interface Post {
   error: string | null;
   created_by: string | null;
   approved_at: string | null;
+  facebook_enabled: boolean;
+  bluesky: BlueskyTarget | null;
 }
 
-interface Row extends Omit<Post, "images"> {
+interface Row extends Omit<Post, "images" | "facebook_enabled" | "bluesky"> {
   images: string;
+  bs_caption: string | null;
+  bs_images: string | null;
+  bs_patreon: string | null;
+  bs_facebook_enabled: number | null;
+  bs_status: BlueskyStatus | null;
+  bs_uri: string | null;
+  bs_cid: string | null;
+  bs_card_uri: string | null;
+  bs_permalink: string | null;
+  bs_error: string | null;
 }
+
+const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
+ b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
+ b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
+ b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error
+ FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id`;
 
 let schemaReady = false;
 
@@ -68,12 +102,42 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       detail TEXT
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS pin_failures (ts INTEGER NOT NULL)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS bluesky_targets (
+      post_id TEXT PRIMARY KEY,
+      caption TEXT NOT NULL,
+      images TEXT NOT NULL DEFAULT '[]',
+      patreon TEXT,
+      facebook_enabled INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'draft',
+      uri TEXT,
+      cid TEXT,
+      card_uri TEXT,
+      permalink TEXT,
+      error TEXT,
+      started_at TEXT
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS bluesky_due ON bluesky_targets(status)`),
   ]);
   schemaReady = true;
 }
 
 function fromRow(r: Row): Post {
-  return { ...r, images: JSON.parse(r.images || "[]") };
+  return {
+    ...r,
+    images: JSON.parse(r.images || "[]"),
+    facebook_enabled: r.bs_caption === null ? true : r.bs_facebook_enabled !== 0,
+    bluesky: r.bs_caption === null ? null : {
+      caption: r.bs_caption,
+      images: JSON.parse(r.bs_images || "[]"),
+      patreon: r.bs_patreon ? JSON.parse(r.bs_patreon) : null,
+      status: r.bs_status!,
+      uri: r.bs_uri,
+      cid: r.bs_cid,
+      card_uri: r.bs_card_uri,
+      permalink: r.bs_permalink,
+      error: r.bs_error,
+    },
+  };
 }
 
 export function newId(): string {
@@ -90,25 +154,30 @@ export interface NewPost {
   label?: string | null;
   release?: string | null;
   created_by: string;
+  bluesky?: BlueskyDraft | null;
+  facebook_enabled?: boolean;
 }
 
 export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
   await ensureSchema(db);
   const now = new Date().toISOString();
   const id = newId();
-  await db
-    .prepare(
-      `INSERT INTO posts (id, created_at, updated_at, status, label, release, message, link, images, scheduled_at, created_by)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.scheduled_at, p.created_by)
-    .run();
+  const inserts = [
+    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, link, images, scheduled_at, created_by)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.scheduled_at, p.created_by),
+  ];
+  if (p.bluesky) inserts.push(db.prepare(`INSERT INTO bluesky_targets
+      (post_id, caption, images, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?)`)
+    .bind(id, p.bluesky.caption, JSON.stringify(p.bluesky.images),
+      p.bluesky.patreon ? JSON.stringify(p.bluesky.patreon) : null, p.facebook_enabled === false ? 0 : 1));
+  await db.batch(inserts);
   return (await getPost(db, id))!;
 }
 
 export async function getPost(db: D1Database, id: string): Promise<Post | null> {
   await ensureSchema(db);
-  const r = await db.prepare(`SELECT * FROM posts WHERE id = ?`).bind(id).first<Row>();
+  const r = await db.prepare(POST_SELECT + " WHERE p.id = ?").bind(id).first<Row>();
   return r ? fromRow(r) : null;
 }
 
@@ -116,8 +185,8 @@ export async function listPosts(db: D1Database, opts: { status?: PostStatus; lim
   await ensureSchema(db);
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const stmt = opts.status
-    ? db.prepare(`SELECT * FROM posts WHERE status = ? ORDER BY created_at DESC LIMIT ?`).bind(opts.status, limit)
-    : db.prepare(`SELECT * FROM posts ORDER BY created_at DESC LIMIT ?`).bind(limit);
+    ? db.prepare(POST_SELECT + " WHERE p.status = ? ORDER BY p.created_at DESC LIMIT ?").bind(opts.status, limit)
+    : db.prepare(POST_SELECT + " ORDER BY p.created_at DESC LIMIT ?").bind(limit);
   const { results } = await stmt.all<Row>();
   return results.map(fromRow);
 }
@@ -139,9 +208,120 @@ export async function updatePost(db: D1Database, id: string, patch: Patch, onlyI
   return (res.meta.changes ?? 0) > 0;
 }
 
-/** Atomic draft → publishing. False if someone else got there first. */
-export function claimForPublish(db: D1Database, id: string): Promise<boolean> {
-  return updatePost(db, id, { status: "publishing", error: null }, ["draft"]);
+
+/** Draft-only Bluesky edits. Non-Bluesky drafts always publish to Facebook. */
+export async function saveBlueskyDraft(
+  db: D1Database, id: string, draft: BlueskyDraft | null, facebookEnabled: boolean,
+): Promise<boolean> {
+  await ensureSchema(db);
+  const allowed = await db.prepare("SELECT status FROM posts WHERE id = ?").bind(id).first<{ status: PostStatus }>();
+  if (!allowed || !["draft", "rejected"].includes(allowed.status)) return false;
+  if (!draft) {
+    await db.prepare("DELETE FROM bluesky_targets WHERE post_id = ? AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND status IN ('draft','rejected'))")
+      .bind(id, id).run();
+    return true;
+  }
+  const result = await db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, patreon, facebook_enabled)
+    SELECT ?, ?, ?, ?, ? FROM posts WHERE id = ? AND status IN ('draft','rejected')
+    ON CONFLICT(post_id) DO UPDATE SET
+      caption = excluded.caption, images = excluded.images,
+      patreon = excluded.patreon, facebook_enabled = excluded.facebook_enabled,
+      status = 'draft', uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL
+    WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND status IN ('draft','rejected'))`)
+    .bind(id, draft.caption, JSON.stringify(draft.images),
+      draft.patreon ? JSON.stringify(draft.patreon) : null, facebookEnabled ? 1 : 0, id, id).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function setBlueskyStatus(
+  db: D1Database, id: string,
+  patch: Partial<Pick<BlueskyTarget, "status" | "uri" | "cid" | "card_uri" | "permalink" | "error">>,
+  onlyStatuses?: BlueskyStatus[],
+): Promise<boolean> {
+  await ensureSchema(db);
+  const fields = Object.entries(patch);
+  if (!fields.length) return false;
+  const sets = fields.map(([k]) => k + " = ?").join(", ");
+  const binds: unknown[] = [...fields.map(([, v]) => v ?? null), id];
+  let sql = "UPDATE bluesky_targets SET " + sets + " WHERE post_id = ?";
+  if (onlyStatuses?.length) {
+    sql += " AND status IN (" + onlyStatuses.map(() => "?").join(",") + ")";
+    binds.push(...onlyStatuses);
+  }
+  const result = await db.prepare(sql).bind(...binds).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function claimDueBluesky(db: D1Database, id: string, now: string): Promise<boolean> {
+  await ensureSchema(db);
+  const stale = new Date(Date.parse(now) - 15 * 60 * 1000).toISOString();
+  const result = await db.prepare(`UPDATE bluesky_targets SET status = 'publishing', started_at = ?
+    WHERE post_id = ? AND (status = 'scheduled' OR (status = 'publishing' AND started_at <= ?))
+    AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND approved_at IS NOT NULL
+      AND scheduled_at IS NOT NULL AND scheduled_at <= ? AND status IN ('scheduled','published','failed'))`)
+    .bind(now, id, stale, id, now).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function dueBlueskyIds(db: D1Database, now: string): Promise<string[]> {
+  await ensureSchema(db);
+  const stale = new Date(Date.parse(now) - 15 * 60 * 1000).toISOString();
+  const result = await db.prepare(`SELECT p.id AS id FROM posts p
+    JOIN bluesky_targets b ON b.post_id = p.id
+    WHERE (b.status = 'scheduled' OR (b.status = 'publishing' AND b.started_at <= ?))
+      AND p.approved_at IS NOT NULL AND p.scheduled_at IS NOT NULL AND p.scheduled_at <= ?
+      AND p.status IN ('scheduled','published','failed')
+    ORDER BY p.scheduled_at LIMIT 20`).bind(stale, now).all<{ id: string }>();
+  return result.results.map((r) => r.id);
+}
+
+export async function claimFailedBluesky(db: D1Database, id: string): Promise<boolean> {
+  await ensureSchema(db);
+  const result = await db.prepare(`UPDATE bluesky_targets SET status = 'publishing', started_at = ?
+    WHERE post_id = ? AND status = 'failed'
+    AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND approved_at IS NOT NULL)`)
+    .bind(new Date().toISOString(), id, id).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export interface ApprovalSnapshot {
+  message: string;
+  scheduledAt: Date | null;
+  facebookEnabled: boolean;
+  bluesky: BlueskyDraft | null;
+  expectedUpdatedAt: string;
+}
+
+/** Save the exact human-selected targets and claim the draft in one transaction. */
+export async function claimForPublish(db: D1Database, id: string, input: ApprovalSnapshot): Promise<boolean> {
+  await ensureSchema(db);
+  if (!input.facebookEnabled && !input.bluesky) throw new Error("Choose at least one target.");
+  const { bluesky } = input;
+  const target = bluesky
+    ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, patreon, facebook_enabled)
+        SELECT ?, ?, ?, ?, ? FROM posts WHERE id = ? AND status = 'draft' AND updated_at = ?
+        ON CONFLICT(post_id) DO UPDATE SET
+          caption = excluded.caption, images = excluded.images, patreon = excluded.patreon,
+          facebook_enabled = excluded.facebook_enabled, status = 'draft',
+          uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL, started_at = NULL`)
+      .bind(id, bluesky.caption, JSON.stringify(bluesky.images),
+        bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, input.facebookEnabled ? 1 : 0,
+        id, input.expectedUpdatedAt)
+    : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ?
+        AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND status = 'draft' AND updated_at = ?)`)
+      .bind(id, id, input.expectedUpdatedAt);
+  const now = new Date().toISOString();
+  // D1 batch is transactional. Concurrent requests cannot write different targets
+  // between this target change and the draft-to-publishing claim. The losing
+  // transaction sees a non-draft and both of its statements make no changes.
+  const results = await db.batch([
+    target,
+    db.prepare(`UPDATE posts SET message = ?, scheduled_at = ?, status = 'publishing',
+        approved_at = ?, error = NULL, updated_at = ?
+        WHERE id = ? AND status = 'draft' AND updated_at = ?`)
+      .bind(input.message, input.scheduledAt?.toISOString() ?? null, now, now, id, input.expectedUpdatedAt),
+  ]);
+  return (results[1].meta.changes ?? 0) === 1;
 }
 
 export async function deletePost(db: D1Database, id: string, onlyIfStatus: PostStatus[]): Promise<boolean> {
@@ -150,7 +330,11 @@ export async function deletePost(db: D1Database, id: string, onlyIfStatus: PostS
     .prepare(`DELETE FROM posts WHERE id = ? AND status IN (${onlyIfStatus.map(() => "?").join(", ")})`)
     .bind(id, ...onlyIfStatus)
     .run();
-  return (res.meta.changes ?? 0) > 0;
+  if ((res.meta.changes ?? 0) > 0) {
+    await db.prepare("DELETE FROM bluesky_targets WHERE post_id = ?").bind(id).run();
+    return true;
+  }
+  return false;
 }
 
 export async function audit(db: D1Database, actor: string, action: string, postId: string | null, detail?: string): Promise<void> {
