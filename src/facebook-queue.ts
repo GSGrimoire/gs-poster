@@ -179,7 +179,8 @@ export async function markFacebookUploadPosted(
 ): Promise<boolean> {
   await ensureFacebookQueue(env.DB);
   const post = await getPost(env.DB, id);
-  if (!post || post.status !== "publishing" || !post.approved_at || post.fb_post_id) return false;
+  if (!post || post.status !== "publishing" || !post.approved_at ||
+      (post.fb_post_id && post.fb_post_id !== facebookId)) return false;
   // Restrict the supplied identifier to this Page, never an arbitrary Graph node.
   if (!env.FB_PAGE_ID || !new RegExp("^" + env.FB_PAGE_ID.replace(/[^0-9]/g, "") + "_[0-9]+$").test(facebookId)) {
     throw new Error("Enter the complete Facebook post ID from this Page.");
@@ -187,7 +188,7 @@ export async function markFacebookUploadPosted(
   const info = await getPostInfo(env, facebookId);
   if (!info) throw new Error("Facebook could not confirm the supplied post ID.");
   const claim = await env.DB.prepare(`UPDATE facebook_upload_jobs SET status = 'done', error = NULL
-    WHERE post_id = ? AND status IN ('failed','sending')`).bind(id).run();
+    WHERE post_id = ? AND status IN ('failed','sending','done')`).bind(id).run();
   if ((claim.meta.changes ?? 0) !== 1) return false;
   await updatePost(env.DB, id, {
     fb_post_id: facebookId, status: info.is_published ? "published" : "scheduled",
