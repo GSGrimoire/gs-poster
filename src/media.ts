@@ -1,9 +1,10 @@
 /**
- * Images come from GitHub: the image library (public raw URLs) or a private
+ * Images come from GitHub or private upload references: the image library (public raw URLs) or a private
  * repo (needs GITHUB_READ_TOKEN). Nothing else is fetched, so the server
  * cannot be pointed at arbitrary URLs.
  */
 import type { Env } from "./env.ts";
+import { isUploadRef, parseUploadRef, readUpload } from "./upload.ts";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const ALLOWED_TYPES: Record<string, string> = {
@@ -51,6 +52,12 @@ export function imageType(path: string): string | null {
 }
 
 export function checkImageUrl(url: string): string | null {
+  if (isUploadRef(url)) {
+    const r = parseUploadRef(url);
+    return r && imageType(r.ext)
+      ? null
+      : "Invalid image upload reference. Use a JPG, PNG or GIF reference from request_upload.";
+  }
   const ref = parseGitHubUrl(url);
   if (!ref) return `Not a GitHub file URL: ${url}. Use a raw.githubusercontent.com or github.com/.../blob/... link.`;
   if (!imageType(ref.path)) return `Unsupported image type: ${ref.path}. Use JPG, PNG or GIF.`;
@@ -64,6 +71,14 @@ export interface ImageBytes {
 }
 
 export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
+  if (isUploadRef(url)) {
+    const ref = parseUploadRef(url);
+    const type = ref ? imageType(ref.ext) : null;
+    if (!ref || !type) throw new Error("Invalid image upload reference.");
+    const bytes = await readUpload(env, ref);
+    if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("Uploaded image exceeds 10 MB.");
+    return { bytes, type, name: ref.id + "." + ref.ext };
+  }
   const ref = parseGitHubUrl(url);
   if (!ref) throw new Error(`Not a GitHub file URL: ${url}`);
   const type = imageType(ref.path);
