@@ -5,10 +5,15 @@
  */
 import type { Env } from "./env.ts";
 import { parseGitHubUrl } from "./media.ts";
+import { isUploadRef, parseUploadRef, readUpload } from "./upload.ts";
 
 export const INITIAL_VIDEO_MAX_BYTES = 20_000_000;
 
 export function checkVideoUrl(value: string): string | null {
+  if (isUploadRef(value)) {
+    const ref = parseUploadRef(value);
+    return ref?.ext === "mp4" ? null : "Bluesky video requires a valid private MP4 upload reference.";
+  }
   const ref = parseGitHubUrl(value);
   if (!ref || !ref.path.toLowerCase().endsWith(".mp4")) {
     return "Bluesky video currently requires a GitHub MP4 file URL.";
@@ -19,6 +24,17 @@ export function checkVideoUrl(value: string): string | null {
 export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
   const bad = checkVideoUrl(value);
   if (bad) throw new Error(bad);
+  if (isUploadRef(value)) {
+    const upload = parseUploadRef(value);
+    if (!upload || upload.ext !== "mp4") throw new Error("Invalid private MP4 upload reference.");
+    const raw = await readUpload(env, upload);
+    if (raw.byteLength > INITIAL_VIDEO_MAX_BYTES) throw new Error("Private MP4 exceeds 20 MB.");
+    const bytes = new Uint8Array(raw);
+    if (bytes.length < 12 || String.fromCharCode(...bytes.subarray(4, 8)) !== "ftyp") {
+      throw new Error("Private upload does not have an MP4 header.");
+    }
+    return bytes;
+  }
   const ref = parseGitHubUrl(value)!;
   const path = ref.path.split("/").map(encodeURIComponent).join("/");
   let response = await fetch(
