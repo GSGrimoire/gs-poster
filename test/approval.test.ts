@@ -1,7 +1,9 @@
 import { before, after, test } from "node:test";
 import assert from "node:assert/strict";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { claimForPublish, createPost, getPost, updatePost, type ApprovalSnapshot } from "../src/db.ts";
+import { claimForPublish, claimFailedBluesky, createPost, getPost, setBlueskyStatus, updatePost, type ApprovalSnapshot } from "../src/db.ts";
+import { backToDraft } from "../src/publish.ts";
+import type { Env } from "../src/env.ts";
 
 let worker: Miniflare;
 let db: D1Database;
@@ -71,4 +73,42 @@ test("failed approval transaction rolls target changes back", async () => {
   } finally {
     await db.prepare("DROP TRIGGER fail_test_approval").run();
   }
+});
+
+test("failed target recovery requires reconciliation and Bluesky retries are atomic and timed", async () => {
+  const p = await draft();
+  const claimed = await claimForPublish(db, p.id, {
+    message: "Approved", facebookEnabled: true,
+    bluesky: { caption: "Approved Bluesky", images: [], patreon: null },
+    scheduledAt: null, expectedUpdatedAt: p.updated_at,
+  });
+  assert.equal(claimed, true);
+  await updatePost(db, p.id, { status: "failed", error: "facebook ambiguous" }, ["publishing"]);
+  await setBlueskyStatus(db, p.id, { status: "failed", error: "bluesky error" }, ["draft"]);
+  const env = { DB: db } as Env;
+  assert.equal(await backToDraft(env, p.id, "test"), false, "approved retries need human reconciliation");
+  const attempts = await Promise.all([
+    claimFailedBluesky(db, p.id), claimFailedBluesky(db, p.id),
+  ]);
+  assert.equal(attempts.filter(Boolean).length, 1);
+  const first = await db.prepare("SELECT status, started_at FROM bluesky_targets WHERE post_id = ?")
+    .bind(p.id).first<{ status: string; started_at: string | null }>();
+  assert.equal(first?.status, "publishing");
+  assert.ok(first?.started_at, "retry must timestamp the atomic publishing claim");
+  assert.equal(await backToDraft(env, p.id, "test", true), false, "active Bluesky claim blocks redraft");
+  await setBlueskyStatus(db, p.id, { status: "failed", error: "again" }, ["publishing"]);
+  assert.equal(await backToDraft(env, p.id, "test", true), true);
+  assert.equal((await getPost(db, p.id))?.status, "draft");
+});
+
+test("a published Bluesky target cannot be inadvertently re-drafted", async () => {
+  const p = await draft();
+  await claimForPublish(db, p.id, {
+    message: "Approved", facebookEnabled: true,
+    bluesky: { caption: "Already sent", images: [], patreon: null },
+    scheduledAt: null, expectedUpdatedAt: p.updated_at,
+  });
+  await updatePost(db, p.id, { status: "failed" }, ["publishing"]);
+  await setBlueskyStatus(db, p.id, { status: "published", uri: "at://test" }, ["draft"]);
+  assert.equal(await backToDraft({DB:db} as Env, p.id, "test", true), false);
 });
