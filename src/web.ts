@@ -8,6 +8,11 @@ import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, ty
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { fetchImage } from "./media.ts";
+import { fetchVideo } from "./video.ts";
+import {
+  getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
+  markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
+} from "./facebook-queue.ts";
 import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook } from "./publish.ts";
 import {
   checkCsrf,
@@ -71,7 +76,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   if (path === "/" && req.method === "GET") return dashboard(env, session);
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -286,6 +291,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const p = await getPost(env.DB, id);
   if (!p) return html(page("Not found", `<p class="empty">That post does not exist (it may have been deleted).</p><p><a href="/">Back</a></p>`, { login: session.login }), { status: 404 });
   const csrf = await csrfToken(env, session);
+  const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at
+    ? await getFacebookUploadProgress(env.DB, p.id, p.images.length) : null;
   const message = state.message ?? p.message;
   const checks = checkMessage(message, { hasImages: p.images.length > 0 || (!p.facebook_enabled && !!p.bluesky) });
   const bsChecks = p.bluesky ? checkMessage(p.bluesky.caption, { hasImages: p.bluesky.images.length > 0 }) : null;
@@ -295,14 +302,14 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
-  const thumbs = p.images.length ? `<div class="thumbs">${p.images.map((_, i) => `<img src="/media/${p.id}/${i}" alt="">`).join("")}</div>` : "";
+  const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="Photo ${i + 1}">`).join("")}</div>${p.images.length > 12 ? `<details class="card"><summary>Review remaining ${p.images.length - 12} photos in order</summary><div class="thumbs">${p.images.slice(12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i + 12}" alt="Photo ${i + 13}">`).join("")}</div></details>` : ""}` : "";
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">`;
   const bs = p.bluesky;
   const bsMedia = bs?.images ?? p.images.slice(0, 4).map((url) => ({ url, alt: "" }));
   const bsMediaFields = Array.from({ length: 4 }, (_, i) => {
     const item = bsMedia[i];
-    return `<div><label for="bs_image_${i}">Bluesky image ${i + 1} (GitHub URL, optional)</label>
+    return `<div><label for="bs_image_${i}">Bluesky image ${i + 1} (GitHub URL or private upload, optional)</label>
       <input type="text" id="bs_image_${i}" name="bs_image_${i}" value="${esc(item?.url ?? "")}">
       <label for="bs_alt_${i}">Alternative text from image library description</label>
       <input type="text" id="bs_alt_${i}" name="bs_alt_${i}" value="${esc(item?.alt ?? "")}"></div>`;
@@ -324,6 +331,11 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <textarea id="bs_caption" name="bs_caption">${esc(bs?.caption ?? message.slice(0, 300))}</textarea>
         <p class="hint">Provide alternative text for each Bluesky image. When images and a Patreon card are selected, the link card appears as a reply in the same thread.</p>
         ${bsMediaFields}
+        <label for="bs_video_url">Bluesky video (optional MP4 GitHub URL or private upload)</label>
+        <input id="bs_video_url" type="text" name="bs_video_url" value="${esc(bs?.video?.url ?? "")}">
+        <label for="bs_video_alt">Video accessibility description</label>
+        <input id="bs_video_alt" type="text" name="bs_video_alt" value="${esc(bs?.video?.alt ?? "")}">
+        <p class="hint">A Bluesky post can have either a video or an image gallery, not both.</p>
         <label for="bs_patreon_url">Free Patreon post URL (optional)</label>
         <input id="bs_patreon_url" type="text" name="bs_patreon_url" value="${esc(patreon?.url ?? "")}">
         <label for="bs_patreon_title">Patreon card title</label>
@@ -333,6 +345,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <label for="when">Publish time (${esc(env.TIMEZONE)})</label>
         <input id="when" type="datetime-local" name="when" value="${esc(whenValue)}">
         <p class="hint">Leave empty to post the moment you approve. Otherwise between 12 minutes and 30 days from now.</p>
+        ${p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed every photo in the full sequence above.</label>` : ""}
         <label for="pin">PIN</label>
         <input id="pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
         <div class="row"><button class="primary">Approve and ${p.scheduled_at ? "schedule" : "post"}</button></div>
@@ -361,12 +374,30 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   }
   // Failed Facebook requests can have succeeded remotely despite a lost response.
   // Both recovery actions require a fresh PIN and explicit human reconciliation.
-  if (p.status === "failed" && p.facebook_enabled && p.approved_at && !p.fb_post_id) {
+  if (p.status === "failed" && p.facebook_enabled && p.images.length <= BULK_FACEBOOK_THRESHOLD && p.approved_at && !p.fb_post_id) {
     actions += `<form method="post" action="/post/${p.id}/retry-facebook" class="card">${hidden}
       <p>Facebook publishing failed or returned an uncertain response. Check your Page for this exact post first. Retrying can create a duplicate if it already exists.</p>
       <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
       <label for="facebook-retry-pin">PIN</label><input id="facebook-retry-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button class="primary">Retry Facebook only</button></div></form>`;
+  }
+  if (fbQueue && p.status === "publishing" && fbQueue.status === "failed" && fbQueue.uploaded < fbQueue.total) {
+    actions += `<form method="post" action="/post/${p.id}/resume-facebook" class="card">${hidden}
+      <p>Facebook uploaded ${fbQueue.uploaded} of ${fbQueue.total} photos and paused before the final feed send.</p>
+      <label for="resume-pin">PIN</label><input id="resume-pin" type="password" name="pin" inputmode="numeric" required>
+      <div class="row"><button class="primary">Resume remaining uploads</button></div></form>`;
+  }
+  if (fbQueue && p.status === "publishing" && ["failed", "sending", "done"].includes(fbQueue.status)) {
+    actions += `<div class="card"><p>The Facebook queue needs manual reconciliation. First check your Page for an existing post. Neither action sends another Facebook post.</p>
+      <form method="post" action="/post/${p.id}/reconcile-facebook">${hidden}
+      <label for="confirmed-fb-id">Existing Facebook post ID from this Page</label>
+      <input id="confirmed-fb-id" name="facebook_post_id" type="text" required>
+      <label for="reconcile-pin">PIN</label><input id="reconcile-pin" type="password" name="pin" required>
+      <div class="row"><button class="primary">Mark verified Facebook post</button></div></form>
+      <form method="post" action="/post/${p.id}/abandon-facebook">${hidden}
+      <p class="hint">Abandon stops further sending, without deleting anything already posted.</p>
+      <label for="abandon-pin">PIN</label><input id="abandon-pin" type="password" name="pin" required>
+      <div class="row"><button class="danger">Abandon unresolved Facebook queue</button></div></form></div>`;
   }
   if (p.status === "failed" && !p.fb_post_id &&
       !["scheduled", "publishing", "published"].includes(p.bluesky?.status ?? "")) {
@@ -383,6 +414,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
     ${p.error ? `<div class="notice err">Publishing error: ${esc(p.error)}</div>` : ""}
     ${p.bluesky?.error ? `<div class="notice err">Bluesky error: ${esc(p.bluesky.error)}</div>` : ""}
+    ${fbQueue ? `<div class="notice">Facebook bulk upload: ${fbQueue.uploaded}/${fbQueue.total} photos. Status: ${esc(fbQueue.status)}.${fbQueue.error ? " " + esc(fbQueue.error) : ""}</div>` : ""}
     ${p.status === "rejected" && p.note ? `<div class="notice">Your note to Claude: ${esc(p.note)}</div>` : ""}
     <div class="card preview">
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
@@ -391,6 +423,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       ${p.facebook_enabled ? `<p class="hint">Facebook caption and images</p><p class="caption">${esc(p.message)}</p>${thumbs}` : ""}
       ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
         ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
+        ${bs.video ? `<p class="meta">Bluesky video: ${esc(bs.video.url)} (${esc(bs.video.alt)})</p>` : ""}
         ${bs.patreon ? `<p class="meta">Patreon card: ${esc(bs.patreon.title)} | ${esc(bs.patreon.url)}</p>` : ""}` : ""}
       ${p.facebook_enabled && p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
@@ -424,6 +457,28 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    if (action === "resume-facebook") {
+      const resumed = await resumeFailedFacebookUploads(env, id, session.login);
+      return postPage(env, session, id, {
+        notice: resumed ? "Remaining Facebook photos have been queued." :
+          "Cannot safely resume this queue. Reconcile the Facebook post instead.",
+      });
+    }
+    if (action === "abandon-facebook") {
+      const abandoned = await abandonFacebookUpload(env, id, session.login);
+      return postPage(env, session, id, {
+        notice: abandoned ? "Queue abandoned. No more Facebook sends will be attempted." :
+          "Queue was not eligible for abandonment.",
+      });
+    }
+    if (action === "reconcile-facebook") {
+      const facebookId = String(form.get("facebook_post_id") ?? "").trim();
+      const confirmed = await markFacebookUploadPosted(env, id, facebookId, session.login);
+      return postPage(env, session, id, {
+        notice: confirmed ? "Verified Facebook post was recorded; no new post was sent." :
+          "The Facebook post could not be reconciled.",
+      });
+    }
     if (action === "redraft" || action === "retry-facebook") {
       if (form.get("confirmed_no_facebook") !== "1") {
         return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
@@ -455,6 +510,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const facebook = form.get("target_facebook") === "1";
     const blueskySelected = form.get("target_bluesky") === "1";
     if (!facebook && !blueskySelected) return postPage(env, session, id, { ...keep, error: "Choose at least one target." }, 400);
+    if (facebook && current.images.length > 12 && form.get("reviewed_all_images") !== "1") {
+      return postPage(env, session, id, { error: "Review every photo before approving this large Facebook post." }, 400);
+    }
     if (facebook && !message.trim() && !current.images.length) {
       return postPage(env, session, id, { ...keep, error: "The Facebook post needs a caption or image." }, 400);
     }
@@ -468,6 +526,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       bluesky = {
         caption: String(form.get("bs_caption") || ""),
         images,
+        video: String(form.get("bs_video_url") || "").trim() || String(form.get("bs_video_alt") || "").trim()
+          ? { url: String(form.get("bs_video_url") || "").trim(), alt: String(form.get("bs_video_alt") || "").trim() }
+          : null,
         patreon: patreonUrl ? {
           url: patreonUrl, title: String(form.get("bs_patreon_title") || ""),
           description: String(form.get("bs_patreon_description") || ""),
@@ -484,7 +545,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         return postPage(env, session, id, { ...keep, error: "Could not read the publish time." }, 400);
       }
     }
-    const timeErr = checkWhen(when, new Date(), APPROVE_MIN_LEAD_MS);
+    const minLead = facebook && current.images.length > BULK_FACEBOOK_THRESHOLD
+      ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
+    const timeErr = checkWhen(when, new Date(), minLead);
     if (timeErr) return postPage(env, session, id, { ...keep, error: timeErr }, 400);
 
     // Human review only authorizes media that is actually readable now.
@@ -494,6 +557,15 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         catch (error) {
           return postPage(env, session, id, {
             error: "Bluesky image could not be loaded: " +
+              (error instanceof Error ? error.message : String(error)),
+          }, 400);
+        }
+      }
+      if (bluesky.video) {
+        try { await fetchVideo(env, bluesky.video.url); }
+        catch (error) {
+          return postPage(env, session, id, {
+            error: "Bluesky video could not be loaded: " +
               (error instanceof Error ? error.message : String(error)),
           }, 400);
         }

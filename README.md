@@ -86,7 +86,23 @@ In your Meta app (Development mode is fine, since only your own Page is used):
 2. You open the site (it works on a phone), check each draft, edit if needed, enter the PIN and approve. Or reject it with a note. Claude sees the note and revises.
 3. Facebook publishes at the set time; GS Poster publishes approved Bluesky targets through Cloudflare's scheduled trigger. You can cancel queued targets from the review site.
 
-Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB. Facebook supports up to 10 per post; Bluesky allows up to four with reviewed alternative text. Bluesky images are converted and resized under the 2 MB upload cap.
+Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB each. Facebook drafts may contain up to **80 photos**. Bluesky supports up to four gallery images with reviewed alternative text; Bluesky images are converted and resized under the 2 MB upload cap.
+
+### Facebook large image posts
+
+Facebook posts with **11 to 80 images** use a durable queue instead of uploading everything in one request. Once approved with the existing PIN, GS Poster uploads **up to eight photos per cron invocation**, preserving their original order and saving each uploaded media ID in the database before moving to the next one. This avoids the Cloudflare Free plan's 50 external-request limit, but 80 images can require ten scheduled runs and several minutes. Scheduled bulk posts therefore need **at least 30 minutes of lead time** when approved; all uploads must complete before the final Facebook scheduling call. Posts without a time go out after the batch queue completes, not immediately after approval.
+
+The review page displays how many images were uploaded. If an upload fails before the feed is created, the existing GitHub sign-in and approval PIN can resume the remaining images. **GS Poster will not automatically retry an ambiguous final Facebook feed submission**, because Meta may have already published it despite a lost response. A human must reconcile that situation on Facebook; otherwise a duplicate is possible.
+
+**Important:** 80 images is a configurable application-side target, **not a verified official Meta per-post limit**. If Meta rejects 80 attachments to one feed post, the queue will report an error. In that case the product needs either a lower cap or a supported album-based publishing strategy. The initial library draft check only downloads the first eight URLs; later images are verified as they are uploaded.
+
+### Initial Bluesky video support
+
+Bluesky supports one video in a post. The service announced support for videos up to 10 minutes and 300 MB in August 2026, but this initial Worker implementation is deliberately narrower: it accepts **one GitHub-hosted MP4 of up to 20 MB**, with a required accessibility description. The video and an image gallery are mutually exclusive. When a free Patreon card is selected alongside a video, the card is published as a threaded reply.
+
+This first implementation uploads the MP4 directly to the Bluesky personal data server, then posts the video reference; **Bluesky may show the video as unavailable briefly while it processes**. It does not yet provide 300 MB transfers, automatic transcoding, pre-publication video processing, captions/subtitles, or automatic duration validation. Large-video support should use a streaming ingest service and `video.bsky.app` processing jobs with durable status tracking. A verified Bluesky account email is required to post videos.
+
+Do not test with a live social account until the branch is independently reviewed and the service credentials are configured in Cloudflare. No new approval-free publishing tool is added.
 
 ## Who reviews changes
 Whoever can change this code controls what the server does, so changes go through a second pair of eyes. As in gs-scribe, Gus does not review code: Claude works on a branch and opens a pull request, ChatGPT reviews it against the checklist in `CLAUDE.md` and merges, and merging to `main` deploys. Claude never pushes to `main` or merges its own pull requests.

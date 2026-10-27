@@ -56,12 +56,16 @@ function view(env: Env, origin: string, p: Post) {
 async function checkImages(env: Env, urls: string[]): Promise<string[]> {
   const errors: string[] = [];
   if (urls.length > MAX_IMAGES) errors.push(`At most ${MAX_IMAGES} images per post.`);
-  for (const u of urls) {
+  // Validate every source, but fetch no more than eight media files per request.
+  // The approved queue checks remaining files in batches without exceeding
+  // the Worker free-plan subrequest budget.
+  for (const [index, u] of urls.entries()) {
     const bad = checkImageUrl(u);
     if (bad) {
       errors.push(bad);
       continue;
     }
+    if (index >= 8) continue;
     try {
       await fetchImage(env, u);
     } catch (e) {
@@ -86,7 +90,7 @@ const imageList = z
   .array(z.string().min(1))
   .max(MAX_IMAGES)
   .describe(
-    "Image URLs in display order. Use upload:// references from request_upload, or raw.githubusercontent.com links (e.g. from the GS Grimoire image library) or github.com/.../blob/... links. JPG, PNG or GIF, max 10 MB each.",
+    "Image URLs in display order. Use upload:// references from request_upload, or raw.githubusercontent.com links (e.g. from the GS Grimoire image library) or github.com/.../blob/... links. JPG, PNG or GIF, max 10 MB each. Up to 80 Facebook photos are uploaded in safe eight-photo batches after approval.",
   );
 
 
@@ -96,6 +100,10 @@ const blueskySchema = z.object({
     url: z.string().min(1).describe("GitHub file URL or upload:// reference from request_upload."),
     alt: z.string().describe("Human-readable alternative text derived from the image library description, not a filename guess."),
   })).max(4).default([]),
+  video: z.object({
+    url: z.string().min(1).describe("GitHub MP4 URL or private upload:// MP4 reference (up to 20 MB)."),
+    alt: z.string().min(1).describe("Accessibility description for this video."),
+  }).nullable().optional(),
   patreon: z.object({
     url: z.string().url().describe("Public/free Patreon post URL under patreon.com/posts/."),
     title: z.string().min(1).describe("Link-card title for the free Patreon post."),
@@ -334,7 +342,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       return ok({
         review_site: origin,
         missing_secrets: missing,
-        optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN, UPLOADS: !!env.UPLOADS },
+        optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN, UPLOADS: !!env.UPLOADS, IMAGES: !!env.IMAGES, BSKY_HANDLE: !!env.BSKY_HANDLE, BSKY_APP_PASSWORD: !!env.BSKY_APP_PASSWORD },
         bluesky: { configured: !!env.BSKY_HANDLE && !!env.BSKY_APP_PASSWORD, images_ready: !!env.IMAGES },
         graph_version: env.GRAPH_VERSION,
         timezone: env.TIMEZONE,
