@@ -14,7 +14,7 @@ import { checkImageUrl, fetchImage } from "./media.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
-import { createUpload } from "./upload.ts";
+import { createUpload, getUploadUsage } from "./upload.ts";
 
 const STATUSES = ["draft", "rejected", "publishing", "scheduled", "published", "failed", "cancelled"] as const;
 
@@ -138,6 +138,21 @@ export function buildServer(env: Env, origin: string): McpServer {
   );
 
 
+
+  server.registerTool(
+    "check_upload_usage",
+    {
+      title: "Check private R2 upload budget",
+      description: "Read how many bytes GS Poster has stored or reserved, the remaining 3 GiB upload allowance, and the hourly link quota. This is NOT account-wide Cloudflare billing data.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      if (!env.UPLOADS) return fail("Private uploads are disabled (R2 storage is not bound).");
+      try { return ok(await getUploadUsage(env.DB)); }
+      catch (e) { return fail(e instanceof Error ? e.message : String(e)); }
+    },
+  );
 
   server.registerTool(
     "draft_post",
@@ -344,6 +359,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         missing_secrets: missing,
         optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN, UPLOADS: !!env.UPLOADS, IMAGES: !!env.IMAGES, BSKY_HANDLE: !!env.BSKY_HANDLE, BSKY_APP_PASSWORD: !!env.BSKY_APP_PASSWORD },
         bluesky: { configured: !!env.BSKY_HANDLE && !!env.BSKY_APP_PASSWORD, images_ready: !!env.IMAGES },
+        upload_usage: env.UPLOADS ? await getUploadUsage(env.DB) : null,
         graph_version: env.GRAPH_VERSION,
         timezone: env.TIMEZONE,
         facebook,
