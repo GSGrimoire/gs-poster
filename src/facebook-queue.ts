@@ -63,7 +63,8 @@ export async function enqueueFacebookUpload(env: Env, postId: string): Promise<v
 
 async function claimedJob(db: D1Database, now: string): Promise<Job | null> {
   await ensureFacebookQueue(db);
-  const stale = new Date(Date.parse(now) - 15 * 60_000).toISOString();
+  // Cloudflare requests do not execute for 15 minutes. Reclaim only after a conservative 2-minute lease.
+  const stale = new Date(Date.parse(now) - 2 * 60_000).toISOString();
   const row = await db.prepare(`SELECT f.* FROM facebook_upload_jobs f
     JOIN posts p ON p.id = f.post_id
     WHERE p.status = 'publishing' AND p.approved_at IS NOT NULL
@@ -105,6 +106,11 @@ export async function processFacebookUploadBatch(env: Env): Promise<void> {
       await env.DB.prepare("UPDATE facebook_upload_jobs SET status = 'uploading' WHERE post_id = ? AND status = 'busy'").bind(post.id).run();
       await audit(env.DB, "cron", "facebook-batch", post.id, index + "/" + post.images.length);
       return;
+    }
+    // A queue can take several minutes to upload 80 photos. Facebook requires
+    // at least ten minutes between this final send and the scheduled time.
+    if (scheduledUnix !== undefined && scheduledUnix * 1000 - Date.now() < 12 * 60_000) {
+      throw new Error("Scheduled time became too close during photo uploads. Final Facebook send was not attempted; abandon this job and create a new draft.");
     }
     // The send barrier is deliberately not automatically retried: a lost Meta
     // response may mean the feed post was already created.
@@ -150,4 +156,43 @@ export async function resumeFailedFacebookUploads(env: Env, id: string, actor: s
     WHERE post_id = ? AND status = 'failed' AND next_index < ?`).bind(id, post.images.length).run();
   if ((res.meta.changes ?? 0) === 1) await audit(env.DB, actor, "facebook-bulk-resume", id);
   return (res.meta.changes ?? 0) === 1;
+}
+
+/** PIN-gated recovery: stop an unresolved queue without retrying the final feed request. */
+export async function abandonFacebookUpload(env: Env, id: string, actor: string): Promise<boolean> {
+  await ensureFacebookQueue(env.DB);
+  const post = await getPost(env.DB, id);
+  if (!post || post.status !== "publishing" || !post.approved_at || post.fb_post_id) return false;
+  const result = await env.DB.prepare(`UPDATE facebook_upload_jobs SET status = 'cancelled'
+    WHERE post_id = ? AND status IN ('failed','sending')`).bind(id).run();
+  if ((result.meta.changes ?? 0) !== 1) return false;
+  await updatePost(env.DB, id, {
+    status: "failed", error: "The Facebook bulk queue was abandoned after manual reconciliation; no further Facebook sends are allowed.",
+  }, ["publishing"]);
+  await audit(env.DB, actor, "facebook-bulk-abandoned", id);
+  return true;
+}
+
+/** PIN-gated reconciliation for a Facebook post already confirmed on the Page. */
+export async function markFacebookUploadPosted(
+  env: Env, id: string, facebookId: string, actor: string,
+): Promise<boolean> {
+  await ensureFacebookQueue(env.DB);
+  const post = await getPost(env.DB, id);
+  if (!post || post.status !== "publishing" || !post.approved_at || post.fb_post_id) return false;
+  // Restrict the supplied identifier to this Page, never an arbitrary Graph node.
+  if (!env.FB_PAGE_ID || !new RegExp("^" + env.FB_PAGE_ID.replace(/[^0-9]/g, "") + "_[0-9]+$").test(facebookId)) {
+    throw new Error("Enter the complete Facebook post ID from this Page.");
+  }
+  const info = await getPostInfo(env, facebookId);
+  if (!info) throw new Error("Facebook could not confirm the supplied post ID.");
+  const claim = await env.DB.prepare(`UPDATE facebook_upload_jobs SET status = 'done', error = NULL
+    WHERE post_id = ? AND status IN ('failed','sending')`).bind(id).run();
+  if ((claim.meta.changes ?? 0) !== 1) return false;
+  await updatePost(env.DB, id, {
+    fb_post_id: facebookId, status: info.is_published ? "published" : "scheduled",
+    permalink: info.permalink_url ?? null, error: null,
+  }, ["publishing"]);
+  await audit(env.DB, actor, "facebook-bulk-reconciled", id, facebookId);
+  return true;
 }
