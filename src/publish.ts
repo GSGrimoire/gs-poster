@@ -7,6 +7,7 @@ import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBluesky
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
+import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload } from "./facebook-queue.ts";
 
 export interface ApproveInput extends ApprovalSnapshot {
   actor: string;
@@ -19,10 +20,16 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
   const post = (await getPost(db, id))!;
   const scheduledUnix = post.scheduled_at ? Math.floor(Date.parse(post.scheduled_at) / 1000) : undefined;
 
-  let fbStatus: "scheduled" | "published" | "failed" = "failed";
+  let fbStatus: "scheduled" | "published" | "failed" | "publishing" = "failed";
   let fbError: string | null = null;
   if (post.facebook_enabled) {
     try {
+      if (post.images.length > BULK_FACEBOOK_THRESHOLD) {
+        // This claim was recorded by claimForPublish after PIN approval.
+        // No remote Facebook request occurs here; cron consumes the durable job.
+        await enqueueFacebookUpload(env, id);
+        fbStatus = "publishing";
+      } else {
       const mediaIds: string[] = [];
       for (const url of post.images) {
         const img = await fetchImage(env, url);
@@ -33,6 +40,7 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
       fbStatus = scheduledUnix ? "scheduled" : "published";
       await updatePost(db, id, { fb_post_id: fbPostId, permalink, error: null }, ["publishing"]);
       await audit(db, input.actor, scheduledUnix ? "facebook-scheduled" : "facebook-published", id, fbPostId);
+      }
     } catch (e) {
       fbError = e instanceof Error ? e.message : String(e);
       await audit(db, input.actor, "facebook-failed", id, fbError);
@@ -121,6 +129,10 @@ export async function retryFailedFacebook(env: Env, id: string, actor: string): 
   const p = await getPost(db, id);
   if (!p || p.status !== "failed" || !p.facebook_enabled || !p.approved_at || p.fb_post_id) {
     throw new Error("Only approved, unresolved failed Facebook attempts can be retried.");
+  }
+  // Bulks must never be retried through a one-request publication path.
+  if (p.images.length > BULK_FACEBOOK_THRESHOLD) {
+    throw new Error("Bulk Facebook posts need queue reconciliation, not the single-post retry path.");
   }
   if (p.scheduled_at && Date.parse(p.scheduled_at) - Date.now() < 12 * 60_000) {
     throw new Error("The scheduled Facebook time is too close or already passed. Do not retry a stale schedule.");
