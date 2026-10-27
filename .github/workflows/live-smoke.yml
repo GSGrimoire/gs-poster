@@ -1,0 +1,42 @@
+name: Live smoke test
+
+# Public, read-only checks after production deploy. No account secrets.
+on:
+  workflow_run:
+    workflows: ["Deploy"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe GS Poster without authentication or publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          origin="https://gs-poster.goofyspook.workers.dev"
+          response="$(curl --fail-with-body --silent --show-error --max-time 20 "$origin/health")"
+          test "$response" = '{"ok":true}' || { echo "Health response unexpected: $response"; exit 1; }
+          echo "Health: ok"
+          status="$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$origin/")"
+          test "$status" = 302 || { echo "Unprotected approval page (HTTP $status)"; exit 1; }
+          echo "Approval page: login required (302)"
+          status="$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$origin/upload/invalid")"
+          test "$status" = 404 || { echo "Malformed upload path returned HTTP $status"; exit 1; }
+          echo "Malformed upload path: rejected (404)"
+          status="$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' --request PUT "$origin/upload/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fake-secret-token-0123456789")"
+          if [ "$status" = 503 ]; then
+            echo "::warning::Private upload storage not yet enabled in Cloudflare. Enable R2 first."
+          elif [ "$status" = 404 ]; then
+            echo "Unissued upload token rejected (404)"
+          else
+            echo "Unexpected upload-token response (HTTP $status)"
+            exit 1
+          fi
+          echo "Live smoke checks finished; no drafts or posts created."
