@@ -6,6 +6,8 @@ export const UPLOAD_RETENTION_DAYS = 45;
 export const UPLOAD_PUT_WINDOW_MS = 10 * 60 * 1000;
 export const UPLOAD_MAX_LINKS_PER_HOUR = 60;
 export const UPLOAD_QUOTA_BYTES = 3 * 1024 * 1024 * 1024;
+// Allow two days for the 45-day R2 lifecycle deletion to complete.
+export const UPLOAD_ACCOUNTING_DAYS = UPLOAD_RETENTION_DAYS + 2;
 
 export type UploadExt = "jpg" | "jpeg" | "png" | "gif" | "mp4";
 export interface UploadRef { id: string; ext: UploadExt }
@@ -54,31 +56,89 @@ export interface UploadGrant {
   reference: string; upload_url: string; method: "PUT"; expires_at: string;
   max_bytes: number; keep_days: number; curl: string;
 }
+export interface UploadUsage {
+  estimated_stored_bytes: number;
+  reserved_bytes: number;
+  remaining_bytes: number;
+  quota_bytes: number;
+  percent_reserved: number;
+  links_last_hour: number;
+  max_links_per_hour: number;
+  retention_days: number;
+  accounting_days: number;
+  note: string;
+}
+
+/** Counts this Worker's uploads, not Cloudflare's account-level billable usage. */
+export async function getUploadUsage(db: D1Database, at = new Date()): Promise<UploadUsage> {
+  await ensureUploads(db);
+  const now = at.toISOString();
+  const since = new Date(at.getTime() - UPLOAD_ACCOUNTING_DAYS * 86400_000).toISOString();
+  const hourAgo = new Date(at.getTime() - 3600_000).toISOString();
+  const { results } = await db.prepare(
+    "SELECT status, max_bytes, bytes, expires_at, created_at FROM uploads WHERE created_at > ?",
+  ).bind(since).all<Pick<UploadRow,"status" | "max_bytes" | "bytes" | "expires_at" | "created_at">>();
+  const stored = results.reduce((sum,r) =>
+    sum + (r.status === "stored" ? (r.bytes ?? r.max_bytes) : 0), 0);
+  const reserved = results.reduce((sum,r) => sum +
+    (r.status === "stored" ? (r.bytes ?? r.max_bytes) :
+      r.status === "uploading" ? r.max_bytes :
+      r.status === "pending" && r.expires_at > now ? r.max_bytes : 0), 0);
+  return {
+    estimated_stored_bytes: stored,
+    reserved_bytes: reserved,
+    remaining_bytes: Math.max(0, UPLOAD_QUOTA_BYTES - reserved),
+    quota_bytes: UPLOAD_QUOTA_BYTES,
+    percent_reserved: Math.round((reserved / UPLOAD_QUOTA_BYTES) * 10000) / 100,
+    links_last_hour: results.filter(r => r.created_at > hourAgo).length,
+    max_links_per_hour: UPLOAD_MAX_LINKS_PER_HOUR,
+    retention_days: UPLOAD_RETENTION_DAYS,
+    accounting_days: UPLOAD_ACCOUNTING_DAYS,
+    note: "Estimated GS Poster upload reservations only. Cloudflare's Billable Usage dashboard is authoritative for account-wide storage and operation charges.",
+  };
+}
+
 export async function createUpload(env: Env, origin: string, input: { filename: string; actor: string }): Promise<UploadGrant> {
   if (!env.UPLOADS) throw new Error("File uploads are not set up on this server (UPLOADS binding missing).");
   const ext = extensionOf(input.filename);
   if (!ext) throw new Error("Unsupported file type. Use JPG, PNG, GIF or MP4.");
-  await ensureUploads(env.DB);
   const now = new Date();
   const nowIso = now.toISOString();
   const hourAgo = new Date(now.getTime() - 3600_000).toISOString();
-  const keepSince = new Date(now.getTime() - UPLOAD_RETENTION_DAYS * 86400_000).toISOString();
-  const { results } = await env.DB.prepare("SELECT status, max_bytes, bytes, expires_at, created_at FROM uploads WHERE created_at > ?")
-    .bind(keepSince).all<Pick<UploadRow, "status" | "max_bytes" | "bytes" | "expires_at" | "created_at">>();
-  if (results.filter(r => r.created_at > hourAgo).length >= UPLOAD_MAX_LINKS_PER_HOUR)
+  const keepSince = new Date(now.getTime() - UPLOAD_ACCOUNTING_DAYS * 86400_000).toISOString();
+  const usage = await getUploadUsage(env.DB, now);
+  if (usage.links_last_hour >= UPLOAD_MAX_LINKS_PER_HOUR)
     throw new Error("Too many upload links were requested in the last hour.");
-  const reserved = results.reduce((sum,r) =>
-    sum + (r.status === "stored" ? (r.bytes ?? r.max_bytes) : r.expires_at > nowIso ? r.max_bytes : 0), 0);
   const max = TYPES[ext].max;
-  if (reserved + max > UPLOAD_QUOTA_BYTES) throw new Error("Upload storage is full.");
+  if (usage.reserved_bytes + max > UPLOAD_QUOTA_BYTES)
+    throw new Error("Upload storage is full.");
   const id = [...crypto.getRandomValues(new Uint8Array(16))]
     .map(v => v.toString(16).padStart(2,"0")).join("");
   const token = randomToken();
   const expires = new Date(now.getTime() + UPLOAD_PUT_WINDOW_MS).toISOString();
-  await env.DB.prepare("INSERT INTO uploads (id, token_hash, ext, max_bytes, status, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)")
-    .bind(id, await sha256(token), ext, max, nowIso, expires, input.actor).run();
-  // Housekeeping: R2 already expires uploaded objects, so expire their DB rows as well.
-  const forgetBefore = new Date(now.getTime() - (UPLOAD_RETENTION_DAYS + 30) * 86400_000).toISOString();
+
+  // Check and reserve in ONE SQLite write. Concurrent requests cannot
+  // allocate above the space budget or rate limit.
+  const grant = await env.DB.prepare(`INSERT INTO uploads
+    (id, token_hash, ext, max_bytes, status, created_at, expires_at, created_by)
+    SELECT ?, ?, ?, ?, 'pending', ?, ?, ?
+    WHERE
+      (SELECT COALESCE(SUM(
+        CASE WHEN status = 'stored' THEN COALESCE(bytes,max_bytes)
+          WHEN status = 'uploading' THEN max_bytes
+          WHEN status = 'pending' AND expires_at > ? THEN max_bytes
+          ELSE 0 END),0)
+       FROM uploads WHERE created_at > ?) + ? <= ?
+      AND (SELECT COUNT(*) FROM uploads WHERE created_at > ?) < ?`)
+    .bind(id, await sha256(token), ext, max, nowIso, expires, input.actor,
+      nowIso, keepSince, max, UPLOAD_QUOTA_BYTES,
+      hourAgo, UPLOAD_MAX_LINKS_PER_HOUR).run();
+  if ((grant.meta.changes ?? 0) !== 1) {
+    throw new Error("Upload budget exceeded by concurrent requests. No upload link was created.");
+  }
+
+  // Retain accounting records slightly longer than R2's 45-day lifetime.
+  const forgetBefore = new Date(now.getTime() - (UPLOAD_ACCOUNTING_DAYS + 30) * 86400_000).toISOString();
   await env.DB.prepare("DELETE FROM uploads WHERE created_at < ?").bind(forgetBefore).run();
   const url = origin + "/upload/" + id + "/" + token;
   return {
@@ -87,6 +147,7 @@ export async function createUpload(env: Env, origin: string, input: { filename: 
     curl: 'curl -sS --fail-with-body -T "<path-to-file>" "' + url + '"',
   };
 }
+
 class UploadError extends Error {
   status: number;
   constructor(message: string, status: number) {
