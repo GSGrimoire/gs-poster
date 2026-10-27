@@ -120,7 +120,7 @@ export async function handleUploadPut(request: Request, env: Env): Promise<Respo
   const claim = await env.DB.prepare("UPDATE uploads SET status = 'uploading' WHERE id = ? AND status = 'pending' AND expires_at > ?")
     .bind(id,new Date().toISOString()).run();
   if ((claim.meta.changes ?? 0) !== 1) return gone();
-  let saved = false;
+  let writeStarted = false;
   try {
     const body = await request.arrayBuffer();
     if (!body.byteLength) throw new UploadError("The file is empty.",400);
@@ -129,15 +129,16 @@ export async function handleUploadPut(request: Request, env: Env): Promise<Respo
     if (!looksLike(row.ext,new Uint8Array(body,0,Math.min(16,body.byteLength))))
       throw new UploadError("File header does not match its extension.",415);
     const ref = {id, ext:row.ext};
+    // Once R2 is called, a network failure may be ambiguous: never reuse the token.
+    writeStarted = true;
     await env.UPLOADS.put(key(ref),body,{httpMetadata:{contentType:TYPES[row.ext].mime}});
-    saved = true;
     const mark = await env.DB.prepare("UPDATE uploads SET status = 'stored', bytes = ? WHERE id = ? AND status = 'uploading'")
       .bind(body.byteLength,id).run();
     if ((mark.meta.changes ?? 0) !== 1) throw new Error("Failed to finalize the upload record.");
     return json({ok:true,reference:formatUploadRef(ref),bytes:body.byteLength});
   } catch (error) {
     // Do not reopen a token after a successful R2 write: a retry could overwrite its object.
-    if (!saved) await env.DB.prepare("UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'uploading'")
+    if (!writeStarted) await env.DB.prepare("UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'uploading'")
       .bind(id).run();
     return error instanceof UploadError
       ? json({error:error.message},error.status)
