@@ -111,6 +111,50 @@ export async function retryFailedBluesky(env: Env, id: string, actor: string): P
   return ok;
 }
 
+/**
+ * PIN-gated, human-reconciled Facebook-only retry. The caller must verify on
+ * Facebook that the original attempt created no post before authorizing this.
+ * Never touches Bluesky: an already published Bluesky target stays published.
+ */
+export async function retryFailedFacebook(env: Env, id: string, actor: string): Promise<boolean> {
+  const db = env.DB;
+  const p = await getPost(db, id);
+  if (!p || p.status !== "failed" || !p.facebook_enabled || !p.approved_at || p.fb_post_id) {
+    throw new Error("Only approved, unresolved failed Facebook attempts can be retried.");
+  }
+  if (p.scheduled_at && Date.parse(p.scheduled_at) - Date.now() < 12 * 60_000) {
+    throw new Error("The scheduled Facebook time is too close or already passed. Do not retry a stale schedule.");
+  }
+  const claim = await updatePost(db, id, { status: "publishing", error: null }, ["failed"]);
+  if (!claim) throw new Error("This Facebook retry was already claimed.");
+  const scheduledUnix = p.scheduled_at ? Math.floor(Date.parse(p.scheduled_at) / 1000) : undefined;
+  try {
+    const mediaIds: string[] = [];
+    for (const url of p.images) {
+      const img = await fetchImage(env, url);
+      mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
+    }
+    const fbPostId = await createFeedPost(env, {
+      message: p.message, link: p.link, mediaIds, scheduledUnix,
+    });
+    // Save the returned Facebook identifier before making further calls.
+    await updatePost(db, id, { fb_post_id: fbPostId }, ["publishing"]);
+    const permalink = scheduledUnix ? null :
+      (await getPostInfo(env, fbPostId).catch(() => null))?.permalink_url ?? null;
+    await updatePost(db, id, {
+      status: scheduledUnix ? "scheduled" : "published", permalink, error: null,
+    }, ["publishing"]);
+    await audit(db, actor, "facebook-retry-success", id, fbPostId);
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // A lost Facebook response is ambiguous. Never retry automatically.
+    await updatePost(db, id, { status: "failed", error: message }, ["publishing"]);
+    await audit(db, actor, "facebook-retry-failed", id, message);
+    return false;
+  }
+}
+
 export async function rejectPost(env: Env, id: string, reason: string, actor: string): Promise<boolean> {
   const ok = await updatePost(env.DB, id, { status: "rejected", note: reason || null }, ["draft"]);
   if (ok) await audit(env.DB, actor, "rejected", id, reason || undefined);
@@ -147,8 +191,12 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
 }
 
 /** Failed or rejected → draft again, so it can be fixed and re-approved. */
-export async function backToDraft(env: Env, id: string, actor: string): Promise<boolean> {
+export async function backToDraft(env: Env, id: string, actor: string, reconciled = false): Promise<boolean> {
   const p = await getPost(env.DB, id);
+  // Approved failures may have reached Facebook despite a lost response.
+  // Require a PIN-gated human reconciliation before restoring such a draft.
+  if (p?.approved_at && !reconciled) return false;
+  if (p?.fb_post_id) return false;
   // Never reapprove Facebook when Bluesky may already have been scheduled/published.
   if (p?.bluesky && ["scheduled", "publishing", "published"].includes(p.bluesky.status)) return false;
   const ok = await updatePost(env.DB, id, { status: "draft", error: null }, ["failed", "rejected"]);
