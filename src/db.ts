@@ -271,6 +271,37 @@ export async function updateCalendarCaptions(
     (!post.bluesky || (results[1].meta.changes ?? 0) === 1);
 }
 
+/**
+ * Explicitly revoke a cancelled post's prior approval and turn it back into a
+ * draft. Never call this without checking that its recorded Facebook object
+ * is no longer available: the old Page schedule must not be reactivated.
+ *
+ * A single D1 batch resets both targets. Stale forms and active/published
+ * Bluesky targets cannot be reopened.
+ */
+export async function reopenCancelledDraft(
+  db: D1Database, id: string, expectedVersion: string,
+): Promise<boolean> {
+  await ensureSchema(db);
+  const now = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
+  const safeBluesky = "NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND " +
+    "(b.status NOT IN ('cancelled','draft') OR b.uri IS NOT NULL OR b.cid IS NOT NULL " +
+    "OR b.card_uri IS NOT NULL OR b.permalink IS NOT NULL))";
+  const results = await db.batch([
+    db.prepare("UPDATE posts SET status='draft', approved_at=NULL, scheduled_at=NULL, " +
+      "fb_post_id=NULL, permalink=NULL, error=NULL, note=NULL, updated_at=? " +
+      "WHERE id=? AND status='cancelled' AND updated_at=? AND " + safeBluesky)
+      .bind(now,id,expectedVersion),
+    db.prepare("UPDATE bluesky_targets SET status='draft', error=NULL, uri=NULL, cid=NULL, " +
+      "card_uri=NULL, permalink=NULL, started_at=NULL WHERE post_id=? " +
+      "AND status IN ('cancelled','draft') AND uri IS NULL AND cid IS NULL " +
+      "AND card_uri IS NULL AND permalink IS NULL " +
+      "AND EXISTS (SELECT 1 FROM posts WHERE id=? AND status='draft' AND updated_at=? AND approved_at IS NULL)")
+      .bind(id,id,now),
+  ]);
+  return (results[0].meta.changes ?? 0)===1;
+}
+
 /** Store one video for either or both targets in a draft-only D1 transaction. */
 export async function attachDraftVideo(
   db: D1Database, id: string, reference: string, alt: string,
@@ -281,9 +312,9 @@ export async function attachDraftVideo(
   if (bluesky && !alt.trim()) throw new Error("Bluesky video requires alternative text.");
   const version = new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
   const blueskyGuard = bluesky
-    ? " AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0 AND b.video IS NULL)"
+    ? " AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0)"
     : "";
-  const facebookGuard = facebook ? " AND json_array_length(images)=0 AND video IS NULL" : "";
+  const facebookGuard = facebook ? " AND json_array_length(images)=0" : "";
   const statements = [
     db.prepare("UPDATE posts SET video=CASE WHEN ? THEN ? ELSE video END, updated_at=? "+
       "WHERE id=? AND updated_at=? AND approved_at IS NULL AND status IN ('draft','rejected')" +
@@ -292,7 +323,7 @@ export async function attachDraftVideo(
   ];
   if (bluesky) statements.push(db.prepare(
     "UPDATE bluesky_targets SET video=json_object('url',?,'alt',?) WHERE post_id=? AND status='draft' "+
-    "AND video IS NULL AND json_array_length(images)=0 "+
+    "AND json_array_length(images)=0 "+
     "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)")
     .bind(reference,alt.trim(),id,id,version));
   const r=await db.batch(statements);
