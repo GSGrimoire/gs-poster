@@ -18,7 +18,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
 </style>
 <div class="card" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
  data-version="${esc(post.updated_at)}" data-facebook="${post.facebook_enabled ? "1" : "0"}"
- data-bluesky="${post.bluesky ? "1" : "0"}">
+ data-bluesky="${post.bluesky ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}">
   <h2>Add images to this draft</h2>
   <p class="hint">Drop JPG, PNG or GIF images here, or select files. Files go into GS Poster's private storage and are attached to the chosen draft targets. No GitHub image commit and no publishing.</p>
   <div id="media-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop images">
@@ -29,6 +29,22 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <p class="hint">Provide descriptive alternative text for each Bluesky image. Maximum 4 Bluesky images, 80 Facebook images. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
+  <h2>Add a video to this draft</h2>
+  <p class="hint">MP4 up to 20 MB. Videos and image galleries cannot be combined on the same platform.</p>
+  <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
+    Drop MP4 here, or click to choose
+    <input type="file" id="video-file" accept=".mp4,video/mp4" hidden>
+  </div>
+  <video controls playsinline preload="metadata" id="video-preview" hidden style="max-width:100%;max-height:280px;margin-top:12px"></video>
+  <p id="video-filename" class="hint"></p>
+  <div class="media-targets">
+    <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.video && !post.images.length ? "checked" : "disabled"}>Facebook</label>
+    <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.video && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
+  </div>
+  <label for="video-alt">Bluesky video alternative text</label>
+  <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
+  <div class="row"><button type="button" class="primary" id="video-upload-submit" disabled>Upload and attach video</button></div>
+  <div id="video-upload-status" class="hint" role="status" aria-live="polite"></div>
 </div>
 <script src="/draft-media.js" defer></script>
 `;
