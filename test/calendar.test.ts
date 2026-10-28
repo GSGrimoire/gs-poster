@@ -2,7 +2,7 @@ import { before, after, test } from "node:test";
 import assert from "node:assert/strict";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { weekStart, weekRange, dayPlus, postCalendarTime, renderCalendar } from "../src/calendar.ts";
-import { createPost, getPost, listCalendarPosts, updateCalendarTime, updatePost, claimForPublish } from "../src/db.ts";
+import { createPost, getPost, listCalendarPosts, updateCalendarTime, updateCalendarCaptions, updatePost, claimForPublish } from "../src/db.ts";
 import type { Post } from "../src/db.ts";
 import type { Env } from "../src/env.ts";
 
@@ -65,4 +65,25 @@ test("draft calendar moves are version-guarded and do not grant approval", async
   });
   assert.equal(claimed,true);
   assert.equal(await updateCalendarTime(db,p.id,"2030-10-30T18:00:00Z",(await getPost(db,p.id))!.updated_at,false),false);
+});
+
+test("caption edits remain pending, preserve target selection and reject stale versions", async () => {
+  const p = await createPost(db, { message:"Facebook original", images:[],
+    scheduled_at:"2030-10-28T18:00:00Z", created_by:"ChatGPT",
+    bluesky:{caption:"Bluesky original",images:[],patreon:null} });
+  assert.equal(await updateCalendarCaptions(db,p,"Facebook revised","Bluesky revised",false),true);
+  assert.equal(await updateCalendarCaptions(db,p,"stale","stale",false),false);
+  const revised=(await getPost(db,p.id))!;
+  assert.equal(revised.message,"Facebook revised");
+  assert.equal(revised.bluesky?.caption,"Bluesky revised");
+  assert.equal(revised.bluesky?.status,"draft");
+  assert.equal(revised.status,"draft");
+  assert.equal(revised.approved_at,null);
+  await claimForPublish(db,p.id,{
+    message:revised.message,facebookEnabled:true,
+    bluesky:{caption:revised.bluesky!.caption,images:[],patreon:null},
+    scheduledAt:new Date("2030-10-28T18:00:00Z"),expectedUpdatedAt:revised.updated_at,
+  });
+  const claimed=(await getPost(db,p.id))!;
+  assert.equal(await updateCalendarCaptions(db,claimed,"Not allowed","Not allowed",false),false);
 });
