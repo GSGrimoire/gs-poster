@@ -3,7 +3,7 @@
  * approval page after Gus's GitHub sign-in and PIN check, never from an MCP tool.
  */
 import type { Env } from "./env.ts";
-import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, type Post, type ApprovalSnapshot } from "./db.ts";
+import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, type Post, type ApprovalSnapshot } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchVideo } from "./video.ts";
@@ -341,6 +341,35 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
   }
   await audit(env.DB, actor, "cancelled-targets", id,
     [fbScheduled ? "facebook" : null, stoppedBluesky ? "bluesky" : null].filter(Boolean).join(","));
+}
+
+/**
+ * Human-PIN gated recovery after both platform schedules were cancelled.
+ * Fail closed if Facebook still exposes the previous post or the API cannot
+ * confirm its disappearance. The old approval and schedule are always cleared.
+ */
+export async function restoreCancelledPost(
+  env: Env, id: string, expectedVersion: string, actor: string,
+): Promise<boolean> {
+  const p = await getPost(env.DB,id);
+  if (!p || p.status !== "cancelled" || p.updated_at !== expectedVersion) return false;
+  if (p.bluesky && (p.bluesky.status !== "cancelled" && p.bluesky.status !== "draft" ||
+      p.bluesky.uri || p.bluesky.cid || p.bluesky.card_uri || p.bluesky.permalink)) {
+    throw new Error("Bluesky has already started or published this post. Do not restart it as a draft.");
+  }
+  if (p.facebook_enabled && p.fb_post_id) {
+    // A deleted video uses the Video API read, not the Page feed post fields.
+    // Permission, timeout and rate-limit errors must not be treated as deletion.
+    const remote = p.video
+      ? await getPageVideoInfo(env,p.fb_post_id)
+      : await getPostInfo(env,p.fb_post_id);
+    if (remote) throw new Error(
+      "The previous Facebook post still exists. Remove its pending schedule in Meta first; then retry.");
+  }
+  const restored=await reopenCancelledDraft(env.DB,id,expectedVersion);
+  if (restored) await audit(env.DB,actor,"cancelled-reopened-as-draft",id,
+    p.fb_post_id ? "previous Facebook object verified absent" : "no recorded Facebook object");
+  return restored;
 }
 
 /** Failed or rejected → draft again, so it can be fixed and re-approved. */
