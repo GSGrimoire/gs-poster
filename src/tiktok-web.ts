@@ -131,11 +131,13 @@ export async function tiktokSettingsAction(
         <p class="hint">Only authorize the permissions displayed by TikTok.</p>
         <script src="/tiktok-connect.js" defer></script>`,
         {login:session.login});
-      return html(connectionPage,{headers:{
-        "Set-Cookie":tiktokStateCookie(link.state),
-        "Cache-Control":"no-store",
-        "Referrer-Policy":"no-referrer",
-      }});
+      const response=html(connectionPage);
+      response.headers.set("Set-Cookie",tiktokStateCookie(link.state));
+      // Override the existing defaults instead of appending incompatible
+      // duplicate Cache-Control or Referrer-Policy directives.
+      response.headers.set("Cache-Control","no-store");
+      response.headers.set("Referrer-Policy","no-referrer");
+      return response;
     }
     if(action==="disconnect") {
       if(form.get("confirm")!=="yes")throw new Error("Please confirm disconnection.");
