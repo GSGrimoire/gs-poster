@@ -10,7 +10,7 @@ const about = `
 <p>GS Poster is the content preparation and publishing management service for GS Grimoire, a tabletop roleplaying game project. Authorized editors prepare, review and schedule promotional posts, images and videos.</p>
 <h3>How GS Poster works</h3>
 <p>Authorized editors can draft captions, upload images and videos, preview posts in a weekly calendar, and approve or cancel scheduled posts. Draft creation does not publish content. Publication requires separate approval by an authorized editor.</p>
-<p>GS Poster currently supports Facebook Pages and Bluesky. TikTok integration is planned but not yet active. Only connected and explicitly authorized social accounts may be used for publishing.</p>
+<p>GS Poster supports Facebook Pages and Bluesky publication. TikTok inbox video transfer is available after an authorized editor connects TikTok and the application has the appropriate permission. TikTok videos must be manually published in TikTok; automatic direct TikTok publishing is not enabled.</p>
 <h3>Who can use the editor?</h3>
 <p>The editorial dashboard is restricted to authorized GS Grimoire users signing in through GitHub. The public pages can be read without an account.</p>
 <h3>Learn more and contact us</h3>
@@ -47,7 +47,7 @@ const privacy = `
 <h3>Purposes</h3>
 <p>This information is used to authenticate authorized editors, prepare and approve content, transfer approved media to selected platforms, schedule publishing, display status and history, and investigate failures or misuse. It is not sold to advertisers.</p>
 <h3>Service providers and recipients</h3>
-<p>GS Poster uses GitHub for editor sign-in, Cloudflare for hosting and storage, and connected publishing platforms, currently Facebook and Bluesky. If TikTok is added, the service will process TikTok account data only under the permissions granted by the account owner. External providers maintain their own privacy policies.</p>
+<p>GS Poster uses GitHub for editor sign-in, Cloudflare for hosting and storage, and connected publishing platforms, currently Facebook and Bluesky. If an editor connects TikTok, the service processes the TikTok account identifier and authorization tokens needed to upload videos to the account inbox, using only permissions the account holder grants. The editor completes publication inside TikTok. External providers maintain their own privacy policies.</p>
 <h3>Retention</h3>
 <p>Private media uploads currently have an approximately 45-day storage policy and are not a permanent archive. Post records, activity logs and published or cancelled post history may remain for operational and accountability purposes. Copies delivered to social platforms are subject to those platforms' separate retention practices.</p>
 <h3>Security</h3>
