@@ -218,14 +218,18 @@ export async function listCalendarPosts(db: D1Database, from: string, to: string
 
 /** Optimistic, status-guarded schedule change. Never grants approval. */
 export async function updateCalendarTime(
-  db: D1Database, id: string, when: string, version: string, approved: boolean,
+  db: D1Database, id: string, when: string, version: string, approved: boolean, hasBluesky = false,
 ): Promise<boolean> {
   await ensureSchema(db);
   const now = new Date(Math.max(Date.now(), Date.parse(version) + 1)).toISOString();
+  const guard = approved && hasBluesky
+    ? " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = ? AND status = 'scheduled')"
+    : "";
   const sql = approved
-    ? "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status = 'scheduled' AND approved_at IS NOT NULL"
+    ? "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status = 'scheduled' AND approved_at IS NOT NULL" + guard
     : "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL";
-  const r = await db.prepare(sql).bind(when, now, id, version).run();
+  const args = approved && hasBluesky ? [when, now, id, version, id] : [when, now, id, version];
+  const r = await db.prepare(sql).bind(...args).run();
   return (r.meta.changes ?? 0) === 1;
 }
 
