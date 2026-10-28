@@ -66,7 +66,7 @@ test("Bluesky video creates a video post and separate linked Patreon card", asyn
     assert.equal(writes[0].record.embed.alt, "A view across a misty fantasy battlefield");
     assert.equal(writes[1].record.embed.$type, "app.bsky.embed.external");
     assert.deepEqual(writes[1].record.reply.root, { uri: writes[0].record.reply?.root?.uri ?? "at://did:plc:test/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1"), cid: "cid-" + blueskyRecordKey("p_mvrslvbab2230330c1") });
-    assert.equal(published.cardUri, "at://did:plc:test/app.bsky.feed.post/gspcardvideotest");
+    assert.equal(published.cardUri, "at://did:plc:test/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1", true));
   } finally { globalThis.fetch = previous; }
 });
 
