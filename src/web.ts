@@ -209,13 +209,16 @@ async function authorize(req: Request, env: Env): Promise<Response> {
         return redirect(denied.redirectTo, new Headers(denied.headers));
       }
       const approved = await oauth.approveConsent(req, handle, { scope: form.getAll("scope").map(String) });
+      // Reuse the same consent descriptor rather than trusting the client name as an authenticated identity.
       const connectingClient = await oauth.describeConsent(approved.request);
       const { redirectTo } = await oauth.completeAuthorization({
         request: approved.request,
         userId: encodeURIComponent(session.login.toLowerCase()),
-        metadata: { login: session.login, connectedAt: new Date().toISOString(), clientName: connectingClient.clientName },
+        metadata: { login: session.login, connectedAt: new Date().toISOString(),
+          clientName: connectingClient.clientName, clientDomain: connectingClient.clientDomain ?? null },
         scope: approved.request.scope,
-        props: { login: session.login, clientName: connectingClient.clientName },
+        props: { login: session.login, clientName: connectingClient.clientName,
+          clientDomain: connectingClient.clientDomain ?? null },
       });
       await audit(env.DB, session.login, "connected-app", null, approved.request.clientId);
       return redirect(redirectTo, new Headers(approved.headers));
