@@ -206,7 +206,10 @@ export async function reschedulePost(
   const before = Math.floor(Date.parse(p.scheduled_at) / 1000);
   const after = Math.floor(newTime.getTime() / 1000);
   if (p.facebook_enabled) await rescheduleFbPost(env, p.fb_post_id!, before, after);
-  const saved = await updateCalendarTime(env.DB, id, nextIso, version, true);
+  let saved = false;
+  let saveError: unknown = null;
+  try { saved = await updateCalendarTime(env.DB, id, nextIso, version, true); }
+  catch (error) { saveError = error; }
   if (!saved) {
     // Roll back when a concurrent edit wins. If this fails, do not pretend
     // both platforms are aligned: the user must reconcile in Meta.
@@ -217,7 +220,8 @@ export async function reschedulePost(
         throw new Error("Facebook changed, but the GS Poster record did not. Check Meta Business Suite before retrying.");
       }
     }
-    throw new Error("Post changed during rescheduling. Reload.");
+    throw new Error(saveError ? "GS Poster could not save the schedule; Facebook was restored. Try again later." :
+      "Post changed during rescheduling. Reload.");
   }
   await audit(env.DB, actor, "scheduled-rescheduled", id, p.scheduled_at + " to " + nextIso);
 }
@@ -253,7 +257,10 @@ export async function editPendingCaptions(
   if (p.facebook_enabled && message !== p.message) {
     await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message);
   }
-  const saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, true);
+  let saved = false;
+  let saveError: unknown = null;
+  try { saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, true); }
+  catch (error) { saveError = error; }
   if (!saved) {
     if (p.facebook_enabled && message !== p.message) {
       try {
@@ -263,7 +270,8 @@ export async function editPendingCaptions(
         throw new Error("Facebook changed, but GS Poster did not. Reconcile in Meta Business Suite.");
       }
     }
-    throw new Error("Post changed while editing. Reload.");
+    throw new Error(saveError ? "GS Poster could not save the captions; Facebook was restored. Try again later." :
+      "Post changed while editing. Reload.");
   }
   await audit(env.DB, actor, "scheduled-caption-edited", id);
 }
