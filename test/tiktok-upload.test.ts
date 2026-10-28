@@ -1,7 +1,8 @@
 import {before,after,test} from "node:test";
 import assert from "node:assert/strict";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
-import {createPost} from "../src/db.ts";
+import {createPost,attachDraftVideo,getPost} from "../src/db.ts";
+import {parseNewDraft,blankNewDraft} from "../src/new-draft.ts";
 import {beginTikTokConnection,finishTikTokConnection,sealTikTokTokens,unsealTikTokTokens,
   tiktokConnection,tiktokAccessToken,TIKTOK_SCOPES,tiktokRedirect} from "../src/tiktok.ts";
 import {allowedTikTokUploadUrl,startTikTokInboxTransfer,getTikTokInboxTransfer,
@@ -131,4 +132,33 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
     assert.equal(checked.publish_id,"v_inbox_file~v2.123");
     assert.equal((await getTikTokInboxTransfer(env.DB,p.id))?.status,"inbox_ready");
   }finally{globalThis.fetch=previous;}
+});
+
+test("TikTok-only video drafts remain unapproved and cannot trigger Facebook posting",async()=>{
+  const input=parseNewDraft({...blankNewDraft(),facebook:false,bluesky:false,
+    tiktok:true,contentKind:"video",label:"TikTok-first"}, "Europe/Copenhagen","reviewer");
+  assert.equal(input.facebook_enabled,false);
+  assert.equal(input.bluesky,null);
+  assert.equal(input.tiktok_enabled,true);
+  const p=await createPost(env.DB,input);
+  assert.equal(p.facebook_enabled,false);
+  assert.equal(p.tiktok_enabled,true);
+  assert.equal(p.approved_at,null);
+  const ref="upload://"+"e".repeat(32)+".mp4";
+  const revision=await attachDraftVideo(env.DB,p.id,ref,"",false,false,p.updated_at,true);
+  assert.ok(revision);
+  const after=(await getPost(env.DB,p.id))!;
+  assert.equal(after.video,ref);
+  assert.equal(after.status,"draft");
+  assert.equal(after.approved_at,null);
+  assert.equal(after.facebook_enabled,false);
+  const noTikTok=await createPost(env.DB,{
+    message:"Other video",images:[],video:null,created_by:"reviewer",
+    scheduled_at:null,facebook_enabled:false,bluesky:{caption:"Test",images:[],video:null,patreon:null},
+  });
+  assert.equal(await attachDraftVideo(env.DB,noTikTok.id,ref,"",false,false,noTikTok.updated_at,true),null);
+});
+test("TikTok requires video content, not text-only or gallery",()=>{
+  assert.throws(()=>parseNewDraft({...blankNewDraft(),facebook:false,bluesky:false,
+    tiktok:true,contentKind:"images"},"Europe/Copenhagen","reviewer"),/video only/i);
 });
