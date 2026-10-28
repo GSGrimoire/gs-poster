@@ -4,12 +4,12 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
+import { audit, attachDraftImage, attachDraftVideo, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
-import { createUpload, isStoredOwnerUpload } from "./upload.ts";
+import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
 import {
@@ -78,7 +78,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const session = auth;
 
   if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
-  const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image)$/.exec(path);
+  const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
@@ -89,6 +89,8 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     if (!action && req.method === "GET") return postPage(env, session, id, {});
     if (action && req.method === "POST") return postAction(req, env, session, id, action);
   }
+  const video = /^\/video\/(p_[a-z0-9]+)\/(facebook|bluesky)$/.exec(path);
+  if (video && req.method === "GET") return videoProxy(req,env,video[1],video[2]);
   const media = /^\/media\/(p_[a-z0-9]+)\/(\d+)$/.exec(path);
   if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1");
 
@@ -313,8 +315,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at
     ? await getFacebookUploadProgress(env.DB, p.id, p.images.length) : null;
   const message = state.message ?? p.message;
-  const checks = checkMessage(message, { hasImages: p.images.length > 0 || (!p.facebook_enabled && !!p.bluesky) });
-  const bsChecks = p.bluesky ? checkMessage(p.bluesky.caption, { hasImages: p.bluesky.images.length > 0 }) : null;
+  const checks = checkMessage(message, { hasImages: p.images.length > 0 || !!p.video || (!p.facebook_enabled && !!p.bluesky) });
+  const bsChecks = p.bluesky ? checkMessage(p.bluesky.caption, { hasImages: p.bluesky.images.length > 0 || !!p.bluesky.video }) : null;
   const checkList = [
     ...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`),
     ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`),
@@ -322,6 +324,9 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
   const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="Photo ${i + 1}">`).join("")}</div>${p.images.length > 12 ? `<details class="card"><summary>Review remaining ${p.images.length - 12} photos in order</summary><div class="thumbs">${p.images.slice(12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i + 12}" alt="Photo ${i + 13}">`).join("")}</div></details>` : ""}` : "";
+  const videoPreview = (target:"facebook"|"bluesky") =>
+    '<video controls playsinline preload="metadata" style="max-width:100%;max-height:440px;border-radius:8px" src="/video/' +
+    esc(p.id) + '/' + target + '"></video>';
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">`;
   const bs = p.bluesky;
@@ -458,10 +463,10 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
         <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""}</span></div>
-      ${p.facebook_enabled ? `<p class="hint">Facebook caption and images</p><p class="caption">${esc(p.message)}</p>${thumbs}` : ""}
+      ${p.facebook_enabled ? `<p class="hint">Facebook caption and media</p><p class="caption">${esc(p.message)}</p>${p.video ? videoPreview("facebook") : thumbs}` : ""}
       ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
         ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
-        ${bs.video ? `<p class="meta">Bluesky video: ${esc(bs.video.url)} (${esc(bs.video.alt)})</p>` : ""}
+        ${bs.video ? `<p class="hint">Bluesky video: ${esc(bs.video.alt)}</p>${videoPreview("bluesky")}` : ""}
         ${bs.patreon ? `<p class="meta">Patreon card: ${esc(bs.patreon.title)} | ${esc(bs.patreon.url)}</p>` : ""}` : ""}
       ${p.facebook_enabled && p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
@@ -496,6 +501,34 @@ async function draftImageAction(
       const grant = await createUpload(env, new URL(req.url).origin, {filename,actor:session.login});
       return Response.json({reference:grant.reference,upload_url:grant.upload_url,max_bytes:grant.max_bytes},
         {headers:{"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}});
+    }
+    if (action === "video-link") {
+      const filename = String(input.filename || "");
+      if (filename.length < 5 || filename.length > 200 || !/\.mp4$/i.test(filename))
+        return fail("Select an MP4 video.");
+      const grant = await createUpload(env,new URL(req.url).origin,{filename,actor:session.login});
+      return Response.json({reference:grant.reference,upload_url:grant.upload_url,max_bytes:grant.max_bytes},
+        {headers:{"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}});
+    }
+    if (action === "attach-video") {
+      const reference = String(input.reference || "");
+      const alt = String(input.alt || "").trim();
+      const facebook = input.facebook === true;
+      const bluesky = input.bluesky === true;
+      const version = String(input.expected_updated_at || "");
+      if (!facebook && !bluesky) return fail("Select at least one video target.");
+      if (facebook && !current.facebook_enabled) return fail("Facebook is not selected for this draft.");
+      if (bluesky && !current.bluesky) return fail("Bluesky is not selected for this draft.");
+      if (bluesky && !alt) return fail("Provide alternative text for Bluesky video.");
+      if (alt.length > 1000) return fail("Video alternative text is too long.");
+      if (version !== current.updated_at) return fail("The draft changed. Reload.",409);
+      if (!(await isStoredOwnerVideo(env.DB,reference,session.login)))
+        return fail("This private video is not stored or does not belong to your account.");
+      const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version);
+      if (!updated) return fail("A target already has media or the draft changed. Reload.",409);
+      await audit(env.DB,session.login,"draft-video-attached",id,
+        (facebook?"facebook ":"")+(bluesky?"bluesky":""));
+      return Response.json({ok:true,updated_at:updated},{headers:{"Cache-Control":"no-store"}});
     }
     if (action === "attach-image") {
       const reference = String(input.reference || "");
@@ -637,7 +670,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (facebook && current.images.length > 12 && form.get("reviewed_all_images") !== "1") {
       return postPage(env, session, id, { error: "Review every photo before approving this large Facebook post." }, 400);
     }
-    if (facebook && !message.trim() && !current.images.length) {
+    if (facebook && !message.trim() && !current.images.length && !current.video) {
       return postPage(env, session, id, { ...keep, error: "The Facebook post needs a caption or image." }, 400);
     }
     let bluesky: BlueskyDraft | null = null;
@@ -674,6 +707,13 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const timeErr = checkWhen(when, new Date(), minLead);
     if (timeErr) return postPage(env, session, id, { ...keep, error: timeErr }, 400);
 
+    if (facebook && current.video) {
+      if (current.images.length) return postPage(env,session,id,
+        {error:"Facebook video cannot be combined with image gallery."},400);
+      try { await fetchVideo(env,current.video); }
+      catch(error) { return postPage(env,session,id,{error:"Facebook video unavailable: "+
+        (error instanceof Error ? error.message : String(error))},400); }
+    }
     // Human review only authorizes media that is actually readable now.
     if (bluesky) {
       for (const image of bluesky.images) {
@@ -705,6 +745,33 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     });
   } catch (e) {
     return postPage(env, session, id, { ...keep, error: e instanceof Error ? e.message : String(e) }, 409);
+  }
+}
+
+/** Signed-in video preview with HTTP byte ranges for native playback. */
+async function videoProxy(req: Request, env: Env, id: string, target: string): Promise<Response> {
+  const p = await getPost(env.DB,id);
+  const reference = target === "facebook" ? p?.video : p?.bluesky?.video?.url;
+  if (!reference) return new Response("Not found",{status:404});
+  try {
+    const bytes = await fetchVideo(env,reference);
+    const range = req.headers.get("range");
+    const headers = new Headers({"Content-Type":"video/mp4","Accept-Ranges":"bytes",
+      "Cache-Control":"private, max-age=300","X-Content-Type-Options":"nosniff"});
+    if (range) {
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+      if (!match) return new Response(null,{status:416,headers:{"Content-Range":"bytes */"+bytes.length}});
+      const start=Number(match[1]), end=match[2]?Math.min(Number(match[2]),bytes.length-1):bytes.length-1;
+      if (start>=bytes.length || end<start)
+        return new Response(null,{status:416,headers:{"Content-Range":"bytes */"+bytes.length}});
+      headers.set("Content-Range","bytes "+start+"-"+end+"/"+bytes.length);
+      headers.set("Content-Length",String(end-start+1));
+      return new Response(bytes.slice(start,end+1),{status:206,headers});
+    }
+    headers.set("Content-Length",String(bytes.length));
+    return new Response(bytes,{headers});
+  } catch(error) {
+    return new Response(error instanceof Error ? error.message : "Could not load video",{status:502});
   }
 }
 
