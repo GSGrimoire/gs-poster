@@ -5,7 +5,7 @@
 import type { Env } from "./env.ts";
 import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, type Post, type ApprovalSnapshot } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
-import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption } from "./facebook.ts";
+import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
 import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload } from "./facebook-queue.ts";
 
@@ -205,10 +205,18 @@ export async function reschedulePost(
   }
   const before = Math.floor(Date.parse(p.scheduled_at) / 1000);
   const after = Math.floor(newTime.getTime() / 1000);
-  if (p.facebook_enabled) await rescheduleFbPost(env, p.fb_post_id!, before, after);
+  if (p.facebook_enabled) {
+    try { await rescheduleFbPost(env, p.fb_post_id!, before, after); }
+    catch {
+      // Facebook may have accepted the write before an uncertain read-back.
+      await audit(env.DB, actor, "reschedule-reconciliation-required", id,
+        p.scheduled_at + " to " + nextIso).catch(() => undefined);
+      throw new Error("Facebook's new schedule could not be confirmed. Check Meta Business Suite before retrying.");
+    }
+  }
   let saved = false;
   let saveError: unknown = null;
-  try { saved = await updateCalendarTime(env.DB, id, nextIso, version, true); }
+  try { saved = await updateCalendarTime(env.DB, id, nextIso, version, true, !!p.bluesky); }
   catch (error) { saveError = error; }
   if (!saved) {
     // Roll back when a concurrent edit wins. If this fails, do not pretend
@@ -254,15 +262,21 @@ export async function editPendingCaptions(
   if (p.facebook_enabled && !p.fb_post_id) {
     throw new Error("The scheduled Facebook post ID is missing.");
   }
-  if (p.facebook_enabled && message !== p.message) {
-    await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message);
+  const facebookCaptionChanged = p.facebook_enabled && normalizeCaption(message) !== normalizeCaption(p.message);
+  if (facebookCaptionChanged) {
+    try { await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message); }
+    catch {
+      // A successful write followed by a failed read is an uncertain remote state.
+      await audit(env.DB, actor, "caption-reconciliation-required", id).catch(() => undefined);
+      throw new Error("Facebook's edited caption could not be confirmed. Check Meta Business Suite before retrying.");
+    }
   }
   let saved = false;
   let saveError: unknown = null;
   try { saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, true); }
   catch (error) { saveError = error; }
   if (!saved) {
-    if (p.facebook_enabled && message !== p.message) {
+    if (facebookCaptionChanged) {
       try {
         await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), message, p.message);
       } catch {
