@@ -22,7 +22,7 @@ test("privacy page discloses encrypted TikTok account authorization and manual i
   for(const phrase of ["GitHub","Cloudflare","Facebook","Bluesky","45-day","TikTok","request","session cookies"])
     assert.ok(text.includes(phrase), "Missing policy section: "+phrase);
   assert.match(text,/If an editor connects TikTok/);
-  assert.match(text,/completes publication inside TikTok/);
+  assert.match(text,/Direct Post testing requires separate video.publish/);
 });
 test("public terms explain human review, media responsibility and third party rules",async()=>{
   const text=await publicPage("terms").text();
