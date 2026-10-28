@@ -34,7 +34,8 @@ test("one private MP4 can be saved for Facebook and Bluesky before approval",asy
   assert.equal(saved.status,"draft");
   assert.match(draftMediaPanel(saved,"csrf"),/video-preview/);
   assert.match(renderCalendar({TIMEZONE:"Europe/Copenhagen"} as Env,[saved],"csrf","2030-11-24"),/Video post/);
-  assert.equal(await attachDraftVideo(db,p.id,videoRef,"Again",true,true,saved.updated_at),null);
+  assert.ok(await attachDraftVideo(db,p.id,videoRef,"Again",true,true,saved.updated_at),
+    "An unapproved draft may replace its video.");
   assert.equal(await attachDraftVideo(db,p.id,videoRef,"Stale",true,true,p.updated_at),null);
 });
 
