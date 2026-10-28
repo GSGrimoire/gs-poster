@@ -17,7 +17,7 @@ import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
   markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
 } from "./facebook-queue.ts";
-import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost, editPendingCaptions } from "./publish.ts";
+import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost, editPendingCaptions, restoreCancelledPost } from "./publish.ts";
 import {
   checkCsrf,
   cookie,
@@ -85,7 +85,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
   if (path === "/new" && (req.method === "GET" || req.method === "POST")) return newDraftPage(req,env,session);
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -423,6 +423,18 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label for="retry-pin">PIN</label><input id="retry-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button class="primary">Retry Bluesky only</button></div></form>`;
   }
+  if (p.status === "cancelled") {
+    actions += `<form method="post" action="/post/${p.id}/restore-cancelled" class="card">
+      ${hidden}
+      <h2>Reopen this cancelled post</h2>
+      <p class="hint">This keeps the existing captions and media, but clears the old approval and release time. You can then replace the video and choose a new time before approving again.</p>
+      <p class="hint">GS Poster will check that the previous Facebook post is no longer available. If it still exists or its status cannot be verified, reopening is blocked to avoid duplicate publication.</p>
+      <label><input type="checkbox" name="confirmed_cancelled" value="1" required> I confirm this post was cancelled and has not been released on Facebook or Bluesky.</label>
+      <label for="restore-pin">Approval PIN</label>
+      <input id="restore-pin" name="pin" type="password" inputmode="numeric" autocomplete="off" required>
+      <div class="row"><button class="primary" type="submit">Reopen as editable draft</button></div>
+    </form>`;
+  }
   if (p.status === "scheduled" || p.bluesky?.status === "scheduled") {
     actions += `<form method="post" action="/post/${p.id}/cancel" class="card">${hidden}
       <p>Pending for <strong>${esc(whenText(env, p))}</strong>. Cancellation stops pending targets only, not already published posts.</p>
@@ -615,6 +627,16 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    if (action === "restore-cancelled") {
+      if (form.get("confirmed_cancelled") !== "1") {
+        return postPage(env,session,id,{error:"Confirm both targets are cancelled before reopening."},400);
+      }
+      const version=String(form.get("expected_updated_at") || "");
+      const restored=await restoreCancelledPost(env,id,version,session.login);
+      return restored
+        ? redirect("/post/"+id)
+        : postPage(env,session,id,{error:"The post changed, or it still has an active publishing target. Reload before trying again."},409);
+    }
     if (action === "resume-facebook") {
       const resumed = await resumeFailedFacebookUploads(env, id, session.login);
       return postPage(env, session, id, {
