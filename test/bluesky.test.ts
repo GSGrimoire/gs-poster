@@ -20,8 +20,12 @@ test("Bluesky requires valid Patreon links and description-based alt text", () =
   assert.equal(validPatreonUrl("https://www.patreon.com/membership"), false);
   assert.ok(checkBluesky({ caption: "A new scene", images: [{ url, alt: "" }], patreon }).some((e) => e.includes("alternative text")));
   assert.ok(checkBluesky({ caption: "A", images: Array(5).fill({ url, alt: "Scene" }), patreon }).some((e) => e.includes("four")));
-  assert.equal(blueskyRecordKey("p_abc12"), "gspabc12");
-  assert.equal(blueskyRecordKey("p_abc12", true), "gspcardabc12");
+  const key = blueskyRecordKey("p_mvrslvbab2230330c1");
+  assert.match(key, /^[234567a-z]{13}$/);
+  assert.equal(blueskyRecordKey("p_mvrslvbab2230330c1"), key, "retry key must be stable");
+  assert.match(blueskyRecordKey("p_mvrslvbab2230330c1", true), /^[234567a-z]{13}$/);
+  assert.notEqual(blueskyRecordKey("p_mvrslvbab2230330c1", true), key);
+  assert.throws(() => blueskyRecordKey("p_abc12"), /Invalid GS Poster post ID/);
 });
 
 test("publishes images and Patreon card as separate posts in one thread", async () => {
@@ -51,22 +55,22 @@ test("publishes images and Patreon card as separate posts in one thread", async 
         }),
       },
     } as unknown as Env;
-    const result = await publishBluesky(env, "p_abc12", {
+    const result = await publishBluesky(env, "p_mvrslvbab2230330c1", {
       caption: "Discover the free adventure.",
       images: [{ url, alt: "A stone bridge in a moonlit valley" }],
       patreon,
     });
     assert.equal(created.length, 2);
-    assert.equal(created[0].rkey, "gspabc12");
+    assert.equal(created[0].rkey, blueskyRecordKey("p_mvrslvbab2230330c1"));
     assert.equal(created[0].record.embed.$type, "app.bsky.embed.images");
     assert.equal(created[0].record.embed.images[0].alt, "A stone bridge in a moonlit valley");
-    assert.equal(created[1].rkey, "gspcardabc12");
+    assert.equal(created[1].rkey, blueskyRecordKey("p_mvrslvbab2230330c1", true));
     assert.equal(created[1].record.embed.$type, "app.bsky.embed.external");
     assert.deepEqual(created[1].record.reply.parent, {
-      uri: "at://did:plc:example/app.bsky.feed.post/gspabc12",
-      cid: "cid-gspabc12",
+      uri: "at://did:plc:example/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1"),
+      cid: "cid-" + blueskyRecordKey("p_mvrslvbab2230330c1"),
     });
-    assert.match(result.permalink, /gspabc12$/);
+    assert.ok(result.permalink.endsWith(blueskyRecordKey("p_mvrslvbab2230330c1")));
   } finally {
     globalThis.fetch = oldFetch;
   }
@@ -86,7 +90,7 @@ test("no-image Bluesky post includes the Patreon card in the main post", async (
     throw new Error("Unexpected request: " + target);
   };
   try {
-    await publishBluesky({ BSKY_HANDLE: "test", BSKY_APP_PASSWORD: "test" } as Env, "p_123", {
+    await publishBluesky({ BSKY_HANDLE: "test", BSKY_APP_PASSWORD: "test" } as Env, "p_mvrslvbab2230330c1", {
       caption: "Read this free encounter", images: [], patreon,
     });
     assert.equal(records.length, 1);

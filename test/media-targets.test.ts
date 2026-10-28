@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_IMAGES, FACEBOOK_IMAGE_BATCH_SIZE, nextFacebookImageBatch } from "../src/validate.ts";
-import { checkBluesky, publishBluesky } from "../src/bluesky.ts";
+import { checkBluesky, publishBluesky, blueskyRecordKey } from "../src/bluesky.ts";
 import { checkVideoUrl, fetchVideo, INITIAL_VIDEO_MAX_BYTES } from "../src/video.ts";
 import type { Env } from "../src/env.ts";
 
@@ -57,7 +57,7 @@ test("Bluesky video creates a video post and separate linked Patreon card", asyn
   };
   try {
     const env = { BSKY_HANDLE: "account.bsky.social", BSKY_APP_PASSWORD: "test" } as Env;
-    const published = await publishBluesky(env, "p_videotest", {
+    const published = await publishBluesky(env, "p_mvrslvbab2230330c1", {
       caption: "A look inside the new release",
       images: [], video: { url: videoUrl, alt: "A view across a misty fantasy battlefield" }, patreon,
     });
@@ -65,8 +65,8 @@ test("Bluesky video creates a video post and separate linked Patreon card", asyn
     assert.equal(writes[0].record.embed.$type, "app.bsky.embed.video");
     assert.equal(writes[0].record.embed.alt, "A view across a misty fantasy battlefield");
     assert.equal(writes[1].record.embed.$type, "app.bsky.embed.external");
-    assert.deepEqual(writes[1].record.reply.root, { uri: writes[0].record.reply?.root?.uri ?? "at://did:plc:test/app.bsky.feed.post/gspvideotest", cid: "cid-gspvideotest" });
-    assert.equal(published.cardUri, "at://did:plc:test/app.bsky.feed.post/gspcardvideotest");
+    assert.deepEqual(writes[1].record.reply.root, { uri: writes[0].record.reply?.root?.uri ?? "at://did:plc:test/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1"), cid: "cid-" + blueskyRecordKey("p_mvrslvbab2230330c1") });
+    assert.equal(published.cardUri, "at://did:plc:test/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1", true));
   } finally { globalThis.fetch = previous; }
 });
 
