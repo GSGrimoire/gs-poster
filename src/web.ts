@@ -407,7 +407,10 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
 
   let actions = "";
   const postVideo=p.video || p.bluesky?.video?.url;
-  if (postVideo && tiktokConn) {
+  if (postVideo && p.tiktok_enabled && !tiktokConn) {
+    actions += '<div class="card"><h2>TikTok inbox</h2><p>Connect your TikTok account first to send this video for manual publication.</p><p><a href="/tiktok/settings">Connect TikTok</a></p></div>';
+  }
+  if (postVideo && p.tiktok_enabled && tiktokConn) {
     if (!tiktokTransfer && ["draft","scheduled","published"].includes(p.status) && !["publishing","published"].includes(p.bluesky?.status||"")) {
       actions += `<form method="post" action="/post/${p.id}/tiktok-upload" class="card">
         ${hidden}
@@ -431,8 +434,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       </div>`;
     }
   }
-  if (p.status === "draft") {
-    actions = `
+  if (p.status === "draft" && (p.facebook_enabled || p.bluesky)) {
+    actions += `
       <form method="post" action="/post/${p.id}/approve" class="card">
         ${hidden}
         <p class="hint">Select one or both targets. Every selected target is authorized by this approval and PIN.</p>
@@ -563,8 +566,9 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     <div class="card preview">
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
-        <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""}</span></div>
+        <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""} ${p.tiktok_enabled ? "TikTok inbox (manual publishing)" : ""}</span></div>
       ${p.facebook_enabled ? `<p class="hint">Facebook caption and media</p><p class="caption">${esc(p.message)}</p>${p.video ? videoPreview("facebook") : thumbs}` : ""}
+      ${p.tiktok_enabled && !p.facebook_enabled && p.video ? `<p class="hint">TikTok MP4 preview, upload to inbox only</p>${videoPreview("facebook")}` : ""}
       ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
         ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
         ${bs.video ? `<p class="hint">Bluesky video: ${esc(bs.video.alt)}</p>${videoPreview("bluesky")}` : ""}
