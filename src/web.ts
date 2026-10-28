@@ -580,7 +580,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
         <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""} ${p.tiktok_enabled ? "TikTok inbox (manual publishing)" : ""}</span></div>
       ${p.facebook_enabled ? `<p class="hint">Facebook caption and media</p><p class="caption">${esc(p.message)}</p>${p.video ? videoPreview("facebook") : thumbs}` : ""}
-      ${p.tiktok_enabled && !p.facebook_enabled && p.video ? `<p class="hint">TikTok MP4 preview, upload to inbox only</p>${videoPreview("facebook")}` : ""}
+      ${p.tiktok_enabled && !p.facebook_enabled && p.video ? `<p class="hint">TikTok video preview</p>${videoPreview("facebook")}` : ""}
+      ${p.tiktok_enabled && !p.facebook_enabled && !p.video && p.images.length ? `<p class="hint">TikTok photo carousel (${p.images.length} images)</p>${thumbs}` : ""}
       ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
         ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
         ${bs.video ? `<p class="hint">Bluesky video: ${esc(bs.video.alt)}</p>${videoPreview("bluesky")}` : ""}
