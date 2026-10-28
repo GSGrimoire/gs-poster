@@ -1,34 +1,49 @@
-# TikTok app review and GS Poster integration checklist
+# TikTok video.upload first: operator setup and review
 
-Status: Preparatory public URLs implemented. **TikTok sign-in, posting, account permissions and public media transfer are not yet enabled.**
+## Implemented in this release
 
-## Public pages
+- Public information: `/about`, `/terms`, `/privacy`.
+- Web Login Kit callback: `https://gs-poster.goofyspook.workers.dev/tiktok/callback`.
+- GitHub-authenticated `/tiktok/settings` page with Connect and Disconnect.
+- TikTok login uses a session-bound, one-use authorization state; server-side access and refresh tokens are encrypted in Cloudflare D1 using a dedicated Worker secret.
+- Initially request only `user.info.basic` and `video.upload`, **not** `video.publish`.
+- An authenticated editor can send a GS Poster video to their TikTok inbox using a separate PIN-confirmed action on the post page. Videos are sent directly as binary MP4 files, so no public video URL or verified image domain is necessary for this phase.
+- GS Poster records TikTok's upload ID and permits a manual status refresh. A repeated or uncertain transfer is not automatically retried.
 
-- Terms of Service: https://gs-poster.goofyspook.workers.dev/terms
-- Privacy Policy: https://gs-poster.goofyspook.workers.dev/privacy
-- Public product description: https://gs-poster.goofyspook.workers.dev/about
-- Reserved TikTok Login Kit redirect URI: https://gs-poster.goofyspook.workers.dev/tiktok/callback
+This **does not** publish to TikTok, synchronize TikTok posting times, or add TikTok to automatic calendar releases. The creator must open their TikTok inbox notification, finish editing and tap Publish inside TikTok.
 
-These pages are readable without editor sign-in. The callback returns a normal informational response for a bare visit but **fails closed** if TikTok sends authorization parameters. It does not issue or store tokens yet.
+## Developer portal tasks for the operator
 
-**Before formal app review:** The GS Grimoire operator should verify the legal wording, identify a usable private privacy-support contact address, and determine an official public website that meets TikTok's requirement for a developed website. TikTok says its reviewed apps cannot be restricted to private/personal use. The current GS Poster dashboard is restricted to authorized editors, so approval may require additional product scope and explanation. Do not imply reviewer approval merely because the legal URLs load.
+1. On [TikTok for Developers](https://developers.tiktok.com/), open the GS Poster app. Add Login Kit for Web.
+2. Enter the exact allowed redirect URI: `https://gs-poster.goofyspook.workers.dev/tiktok/callback`.
+3. Add Content Posting API, enable the **Upload to TikTok** feature, and request **`video.upload`** approval. Baseline login uses `user.info.basic`. Do **not** request `video.publish` in this first review.
+4. Supply the public website `https://gs-poster.goofyspook.workers.dev/about`, Terms `https://gs-poster.goofyspook.workers.dev/terms`, and Privacy `https://gs-poster.goofyspook.workers.dev/privacy`. Review policy wording and provide a dedicated, working privacy contact before submission. TikTok may expect a fully developed public website and an explanation of the restricted editor application.
+5. Add the following values to **Cloudflare Worker > Settings > Variables and Secrets** as encrypted secrets. Never put real credentials in GitHub or chat:
+   - `TIKTOK_CLIENT_KEY`: TikTok app client key.
+   - `TIKTOK_CLIENT_SECRET`: TikTok app client secret.
+   - `TIKTOK_TOKEN_ENCRYPTION_KEY`: a separate cryptographically random value of at least 32 characters. Back it up securely: changing it invalidates previously connected TikTok tokens.
+   - `TIKTOK_REDIRECT_URI` optional. Leave unset to use the exact callback above.
+6. Open `https://gs-poster.goofyspook.workers.dev/tiktok/settings` after Cloudflare secrets are configured. Select `video.upload`, then complete TikTok consent. Verify that only `user.info.basic` and `video.upload` appear in the connected scope list.
+7. Attach a private MP4 to a GS Poster video draft. From its post review page select **Send video to TikTok inbox**, confirm the manual publishing rule and enter your PIN. Inspect the transfer status. Open TikTok to finish publication.
+8. Prepare screenshots or a short reviewer recording showing the TikTok Connect button, consent, video transfer, status, and the final TikTok inbox notification. Submit the app for review, identifying this as an upload-to-inbox application.
 
-## Developer-side tasks
+## Architecture and risks
 
-1. Register or edit the TikTok developer app. Enable Login Kit and configure web callback as the exact HTTPS URI above. No query parameters or fragment.
-2. Add the Content Posting API product and request only the needed posting scopes. Use TikTok's developer dashboard to identify which scopes require approval.
-3. Verify URL ownership for the app's website, Terms and Privacy locations. Configure domain or URL-prefix verification for the future public image source.
-4. Implement the real OAuth flow before initiating login. Generate and verify cryptographic state, securely exchange authorization codes using the server-side client secret, handle token refresh/expiry and revoke/disconnect support. Never echo tokens on public pages.
-5. For TikTok photo carousels, TikTok requires publicly fetchable HTTPS photo URLs with verified ownership under PULL_FROM_URL, without redirects, available for at least the transfer period. Do **not** expose private draft objects directly. Create a controlled public media delivery route that is enabled only after the authorized editor approves the post, with short-lived unguessable references, strict content types, expiry and a no-redirect response. Verification details and token handling must be finished before activation.
-6. For TikTok videos, use a supported Content Posting API upload option after checking current platform requirements; a verified public video URL is not the only method. Media upload and publishing permissions are distinct. Respect TikTok creator privacy choices and app review restrictions.
-7. Add TikTok as a third target to the post model and approval UI only after authenticated account connectivity. Separate TikTok's status, retry and audit from Facebook/Bluesky. Existing posts should remain unchanged.
+**Private media:** GS Poster uploads files privately to Cloudflare R2. The initial TikTok transfer uses `FILE_UPLOAD`: an authenticated Worker reads the private MP4 and sends it directly to TikTok's signed, time-limited upload endpoint. Public URL ownership verification is therefore **not needed for video.upload** with `FILE_UPLOAD`. Verified public URLs will be relevant later for TikTok photos and `PULL_FROM_URL`.
 
-## Source documentation
+**Manual release:** TikTok video.upload does not publish or schedule the video at the GS Poster calendar time. The TikTok app may show an inbox notification after processing. The creator must complete the post in TikTok, including caption, sound, visibility and final publication.
+
+**Authorization:** TikTok may not grant requested scopes until developer review. GS Poster does not handle developer-portal approval or enter private credentials.
+
+**Repeated uploads:** The first external send is stored as an irreversible, single-attempt transfer per GS Poster post. A failure or uncertain completion requires manual reconciliation instead of automatic duplicate uploads.
+
+**Next phase:** When upload-to-inbox has passed real-world verification and app review, implement separate `video.publish` consent and creator privacy options, status handling, audit and approved TikTok scheduling. Do not enable direct publishing until that review succeeds.
+
+## Official documentation
 
 - https://developers.tiktok.com/docs/en/login-kit-web
-- https://developers.tiktok.com/docs/en/app-review-guidelines
-- https://developers.tiktok.com/docs/en/getting-started-create-an-app
+- https://developers.tiktok.com/docs/en/content-posting-api-get-started-upload-content
+- https://developers.tiktok.com/docs/en/content-posting-api-reference-upload-video
+- https://developers.tiktok.com/docs/en/content-posting-api-reference-get-video-status
 - https://developers.tiktok.com/docs/en/content-posting-api-media-transfer-guide
-- https://developers.tiktok.com/docs/en/content-posting-api-reference-photo-post
-
-No production credentials, tokens or private media should be committed to GitHub.
+- https://developers.tiktok.com/docs/en/app-review-guidelines
