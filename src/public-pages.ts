@@ -75,7 +75,12 @@ export function tiktokCallbackPlaceholder(request: Request): Response {
   if (request.method !== "GET") return new Response("Method not allowed",{
     status:405,headers:{"Allow":"GET","Cache-Control":"no-store"},
   });
+  const url = new URL(request.url);
+  // Bare URL is reachable for app registration checks, but an actual OAuth
+  // redirect must never be treated as successful until state/token handling exists.
+  const attemptedAuthorization = url.searchParams.has("code") || url.searchParams.has("state") ||
+    url.searchParams.has("error");
   return html(page("TikTok connection not configured",
     '<main><h2>TikTok connection not configured</h2><p>This callback is reserved for the future TikTok integration. No account has been connected or authorized and no TikTok posting is enabled.</p><p><a href="/about">About GS Poster</a></p></main>',
-    {public:true}),{status:503});
+    {public:true}),{status:attemptedAuthorization?503:200});
 }
