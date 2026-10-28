@@ -308,17 +308,17 @@ export async function attachDraftImage(
   if (!facebook && !bluesky) throw new Error("Select at least one platform.");
   if (bluesky && !alt.trim()) throw new Error("Alternative text is required for Bluesky.");
   const next = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
-  const blueskyGuard = bluesky ? " AND EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND b.status = 'draft' AND json_array_length(b.images) < 4)" : "";
+  const blueskyGuard = bluesky ? " AND EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND b.status = 'draft' AND b.video IS NULL AND json_array_length(b.images) < 4)" : "";
   const updatePost = db.prepare(
     "UPDATE posts SET images = CASE WHEN ? THEN json_insert(images, '$[#]', ?) ELSE images END, updated_at = ? " +
     "WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL" +
-    (facebook ? " AND json_array_length(images) < 80" : "") + blueskyGuard +
+    (facebook ? " AND video IS NULL AND json_array_length(images) < 80" : "") + blueskyGuard +
     (facebook ? "" : " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = posts.id)")
   ).bind(facebook ? 1 : 0, reference, next, id, expectedVersion);
   const mutations = [updatePost];
   if (bluesky) mutations.push(db.prepare(
     "UPDATE bluesky_targets SET images = json_insert(images, '$[#]', json_object('url', ?, 'alt', ?)) " +
-    "WHERE post_id = ? AND status = 'draft' AND json_array_length(images) < 4 " +
+    "WHERE post_id = ? AND status = 'draft' AND video IS NULL AND json_array_length(images) < 4 " +
     "AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ? AND approved_at IS NULL)"
   ).bind(reference, alt.trim(), id, id, next));
   const results = await db.batch(mutations);
