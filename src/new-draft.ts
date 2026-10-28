@@ -25,6 +25,11 @@ export function newDraftTime(value: string, zone: string, now = new Date()): Dat
   if(error)throw new Error(error);
   return date;
 }
+/** Earliest whole-minute slot that remains at least 12 minutes in the future. */
+export function soonestDraftTime(zone:string,now=new Date()):string {
+  const rounded=Math.ceil((now.getTime()+APPROVE_MIN_LEAD_MS)/60_000)*60_000;
+  return toLocalInput(new Date(rounded),zone);
+}
 export function newDraftPrefill(value: string | null, zone: string, now = new Date()): string {
   if(!value)return "";
   try{newDraftTime(value,zone,now);return value;}catch{return "";}
@@ -124,7 +129,11 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
     <label for="new-release">Release or collection (optional)</label>
     <input id="new-release" name="release" type="text" maxlength="120" value="${v(fields.release)}">
     <label for="new-when">Proposed release time (${v(zone)})</label>
-    <input id="new-when" type="datetime-local" name="when" value="${v(fields.when)}">
+    <input type="hidden" name="asap" id="new-asap" value="0">
+    <div class="row" style="align-items:center;gap:9px;flex-wrap:wrap">
+      <input id="new-when" type="datetime-local" name="when" value="${v(fields.when)}" style="flex:1;min-width:190px">
+      <button id="new-asap-button" type="button" aria-pressed="false">As soon as possible (+12 min)</button>
+    </div>
     <p class="hint">Choose a time at least 12 minutes away and within 30 days, or leave blank for publication upon later approval. Saving is never approval.</p>
     <div class="row"><button class="primary" type="submit" id="new-draft-submit">Save draft and media</button><a href="/" class="btn">Cancel</a></div>
     <div id="new-draft-status" role="status" aria-live="polite" class="hint"></div>
