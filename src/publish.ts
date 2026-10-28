@@ -50,7 +50,7 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
         mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
       }
       const fbPostId = await createFeedPost(env, { message: post.message, link: post.link, mediaIds, scheduledUnix });
-      const permalink = scheduledUnix ? null : (await (p.video ? getPageVideoInfo(env,fbPostId) : getPostInfo(env, fbPostId)).catch(() => null))?.permalink_url ?? null;
+      const permalink = scheduledUnix ? null : (await getPostInfo(env, fbPostId).catch(() => null))?.permalink_url ?? null;
       fbStatus = scheduledUnix ? "scheduled" : "published";
       await updatePost(db, id, { fb_post_id: fbPostId, permalink, error: null }, ["publishing"]);
       await audit(db, input.actor, scheduledUnix ? "facebook-scheduled" : "facebook-published", id, fbPostId);
