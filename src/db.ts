@@ -283,6 +283,7 @@ export async function reopenCancelledDraft(
   db: D1Database, id: string, expectedVersion: string,
 ): Promise<boolean> {
   await ensureSchema(db);
+  if (!Number.isFinite(Date.parse(expectedVersion))) return false;
   const now = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
   const safeBluesky = "NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND " +
     "(b.status NOT IN ('cancelled','draft') OR b.uri IS NOT NULL OR b.cid IS NOT NULL " +
