@@ -44,7 +44,7 @@ test("cancelled video safely reopens to a draft only when deleted on Facebook",a
   const originalFetch=globalThis.fetch;
   let reads=0,writes=0;
   globalThis.fetch=async (_input,init)=>{
-    if(init?.method!=="GET") writes++;
+    if(init?.method && init.method!=="GET") writes++;
     reads++;
     return Response.json({error:{code:100,message:"Unsupported get request: object was deleted"}},{status:404});
   };
