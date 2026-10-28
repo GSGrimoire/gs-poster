@@ -49,13 +49,13 @@ async function contentInit(env:Env,options:TikTokPostOptions,urls:string[]) {
       info.disable_stitch=options.disableStitch;
     }
   }
-  const payload:Record<string,unknown>={
-    media_type:options.mediaType,post_mode:options.mode,
-    post_info:info,
-    source_info:options.mediaType==="PHOTO"?
-      {source:"PULL_FROM_URL",photo_cover_index:0,photo_images:urls}:
-      {source:"PULL_FROM_URL",video_url:urls[0]},
+  const payload:Record<string,unknown>=options.mediaType==="PHOTO"?{
+    media_type:"PHOTO",post_mode:options.mode,post_info:info,
+    source_info:{source:"PULL_FROM_URL",photo_cover_index:0,photo_images:urls},
     is_aigc:options.aiGenerated,
+  }:{
+    post_info:{...info,is_aigc:options.aiGenerated},
+    source_info:{source:"PULL_FROM_URL",video_url:urls[0]},
   };
   const endpoint=options.mediaType==="PHOTO"?
     "/v2/post/publish/content/init/":"/v2/post/publish/video/init/";
@@ -81,6 +81,8 @@ export async function startTikTokContentTransfer(
   env:Env,postId:string,expectedVersion:string,actor:string,options:TikTokPostOptions,
 ):Promise<TikTokInboxTransfer> {
   validateTikTokPostOptions(options);
+  if(options.mediaType==="VIDEO"&&options.mode==="MEDIA_UPLOAD")
+    throw Error("Use the existing private video inbox upload path.");
   const p=await getPost(env.DB,postId);
   if(!p || !p.tiktok_enabled || p.updated_at!==expectedVersion)
     throw Error("TikTok target changed. Reload before posting.");
