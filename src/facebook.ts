@@ -154,6 +154,11 @@ export async function rescheduleFbPost(
   }
 }
 
+/** Meta may normalize CRLF form values and trailing whitespace in Page captions. */
+export function normalizeCaption(value: string): string {
+  return value.replace(/\r\n?/g, "\n").trimEnd();
+}
+
 /** Edit the caption on a still-scheduled Page post, with read-back confirmation. */
 export async function editFbCaption(
   env: Env, fbPostId: string, previousUnix: number, oldCaption: string, nextCaption: string,
@@ -163,14 +168,15 @@ export async function editFbCaption(
       !before.scheduled_publish_time || Math.abs(before.scheduled_publish_time - previousUnix) > 60) {
     throw new FacebookError("The Facebook schedule changed or was released. Review it in Meta before editing.");
   }
-  if (before.message !== oldCaption) {
+  if (normalizeCaption(before.message ?? "") !== normalizeCaption(oldCaption)) {
     throw new FacebookError("The Facebook caption differs from GS Poster. Reconcile it before editing.");
   }
   let writeError: unknown = null;
   try { await post(env, fbPostId, new URLSearchParams({ message: nextCaption })); }
   catch (error) { writeError = error; }
   const after = await getPostInfo(env, fbPostId);
-  if (!after || after.is_published !== false || after.message !== nextCaption) {
+  if (!after || after.is_published !== false ||
+      normalizeCaption(after.message ?? "") !== normalizeCaption(nextCaption)) {
     throw new FacebookError("Facebook did not confirm the edited caption. Check Meta before another attempt." +
       (writeError instanceof Error ? " " + writeError.message : ""));
   }
