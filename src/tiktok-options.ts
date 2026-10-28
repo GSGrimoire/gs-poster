@@ -24,6 +24,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   if(!type)return html(page("Attach media",
     '<p>Attach a video or images before sending to TikTok.</p><p><a href="/post/'+esc(postId)+'">Back</a></p>',
     {login:session.login}),{status:409});
+  const post=p;
   const scopes=conn.scopes.split(",");
   let creator:TikTokCreatorOptions|null=null,creatorError="";
   if(scopes.includes("video.publish")) {
@@ -34,7 +35,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const title=(p.label||p.release||"GS Grimoire").slice(0,90);
   const caption=p.message.slice(0,type==="PHOTO"?4000:2200);
   const preview=type==="PHOTO"?
-    '<div class="thumbs">'+p.images.slice(0,35).map((_,i)=>
+    '<div class="thumbs">'+post.images.slice(0,35).map((_,i)=>
       '<img src="/media/'+esc(p.id)+'/'+i+'" alt="Carousel image '+(i+1)+'" loading="lazy">').join("")+'</div>':
     '<video controls playsinline preload="metadata" style="width:100%;max-height:360px" src="/video/'+esc(p.id)+'/facebook"></video>';
   function fields(mode:"MEDIA_UPLOAD"|"DIRECT_POST") {
