@@ -38,7 +38,7 @@ export function parseNewDraft(
   fields: NewDraftFields, zone: string, actor: string, now = new Date(),
 ): NewPost {
   if (!fields.facebook && !fields.bluesky && !fields.tiktok) throw new Error("Select Facebook, Bluesky, or TikTok.");
-  if(fields.tiktok && fields.contentKind !== "video") throw new Error("TikTok currently supports video only. Select Video.");
+  if(fields.tiktok && !["images","video"].includes(fields.contentKind||"")) throw new Error("TikTok supports videos and photo carousels. Select Images or Video.");
   if (fields.contentKind && !["text","images","video"].includes(fields.contentKind)) throw new Error("Choose a supported content type.");
   if(fields.label.length>120 || fields.release.length>120)
     throw new Error("Name and release must each be 120 characters or fewer.");
@@ -86,9 +86,9 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
     <div class="new-choice-group">
       <label><input type="checkbox" name="facebook" value="1" ${fields.facebook?"checked":""}> Facebook</label>
       <label><input type="checkbox" name="bluesky" value="1" ${fields.bluesky?"checked":""}> Bluesky</label>
-      <label><input type="checkbox" name="tiktok" value="1" ${fields.tiktok?"checked":""}> TikTok (send to inbox)</label>
+      <label><input type="checkbox" name="tiktok" value="1" ${fields.tiktok?"checked":""}> TikTok (video or photo carousel)</label>
     </div>
-    <p class="hint">TikTok videos are uploaded to your TikTok inbox for manual publication. This does not schedule publication at the calendar time. Connect the account in <a href="/tiktok/settings">TikTok settings</a> first.</p>
+    <p class="hint">TikTok supports sending videos or photo carousels to the inbox, and separate direct private test posts if authorized. TikTok does not currently follow this calendar\u0027s schedule. Connect the account in <a href="/tiktok/settings">TikTok settings</a> first.</p>
     <h3>2. Content type</h3>
     <div class="new-choice-group" role="group" aria-label="Post content type">
       <label><input type="radio" name="content_kind" value="text" ${kind==="text"?"checked":""}> Text</label>
@@ -97,7 +97,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
     </div>
     <section id="new-images-panel" ${kind!=="images"?"hidden":""}>
       <h3>Images</h3>
-      <p class="hint">JPG, PNG or GIF, 10 MB each. Up to 4 if posting to Bluesky. Add an image description when Bluesky is selected.</p>
+      <p class="hint">JPG, PNG or GIF, 10 MB each. Up to 4 for Bluesky or 35 for TikTok. Add an image description when Bluesky is selected.</p>
       <div id="new-images-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop images">
         Drop images here or select files
       </div>
@@ -119,7 +119,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
     </section>
     <h3>3. Captions</h3>
     <section id="new-facebook-panel">
-      <label for="new-message">Facebook caption</label>
+      <label for="new-message">Facebook / TikTok caption</label>
       <textarea id="new-message" name="message" maxlength="63206" placeholder="Write your caption, or add it before approval.">${v(fields.message)}</textarea>
     </section>
     <section id="new-bluesky-panel">
