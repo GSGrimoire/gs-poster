@@ -18,7 +18,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
 </style>
 <div class="card" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
  data-version="${esc(post.updated_at)}" data-facebook="${post.facebook_enabled ? "1" : "0"}"
- data-bluesky="${post.bluesky ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}">
+ data-bluesky="${post.bluesky ? "1" : "0"}" data-tiktok="${post.tiktok_enabled ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}">
   <h2>Add images to this draft</h2>
   <p class="hint">Drop JPG, PNG or GIF images here, or select files. Files go into GS Poster's private storage and are attached to the chosen draft targets. No GitHub image commit and no publishing.</p>
   <div id="media-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop images">
@@ -40,6 +40,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div class="media-targets">
     <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.images.length ? "checked" : "disabled"}>Facebook</label>
     <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
+    <label><input type="checkbox" id="video-tiktok" ${post.tiktok_enabled && !post.images.length ? "checked" : "disabled"}>TikTok inbox</label>
   </div>
   <label for="video-alt">Bluesky video alternative text</label>
   <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
@@ -74,6 +75,7 @@ export const DRAFT_MEDIA_JS = `
   const videoStatus = document.getElementById("video-upload-status");
   const videoFacebook = document.getElementById("video-facebook");
   const videoBluesky = document.getElementById("video-bluesky");
+  const videoTikTok = document.getElementById("video-tiktok");
   const videoAlt = document.getElementById("video-alt");
   let selectedVideo = null;
   let previewUrl = null;
@@ -87,7 +89,7 @@ export const DRAFT_MEDIA_JS = `
     previewUrl = URL.createObjectURL(file);
     videoPreview.src = previewUrl;videoPreview.hidden = false;
     videoName.textContent = file.name+" ("+(file.size/1048576).toFixed(1)+" MB)";
-    videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled;
+    videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled && videoTikTok.disabled;
     videoStatus.textContent = "";
   }
   videoDrop.addEventListener("click", () => videoInput.click());
@@ -178,8 +180,8 @@ export const DRAFT_MEDIA_JS = `
 
   videoSubmit.addEventListener("click",async()=>{
     if(running || !selectedVideo)return;
-    const facebook=!!videoFacebook.checked,bluesky=!!videoBluesky.checked;
-    if (!facebook && !bluesky) {videoStatus.textContent="Choose at least one available platform.";return;}
+    const facebook=!!videoFacebook.checked,bluesky=!!videoBluesky.checked,tiktok=!!videoTikTok.checked;
+    if (!facebook && !bluesky && !tiktok) {videoStatus.textContent="Choose at least one available platform.";return;}
     const alt=videoAlt.value.trim();
     if (bluesky && !alt) {videoStatus.textContent="Bluesky requires alternative text.";return;}
     running=true;videoSubmit.disabled=true;
@@ -192,7 +194,7 @@ export const DRAFT_MEDIA_JS = `
       if (!uploaded.ok || !body.ok)throw new Error(body.error || "Video upload failed.");
       videoStatus.textContent="Attaching video to the draft...";
       const saved=await api("attach-video",{
-        reference:body.reference,alt,facebook,bluesky,expected_updated_at:currentVersion
+        reference:body.reference,alt,facebook,bluesky,tiktok,expected_updated_at:currentVersion
       });
       currentVersion=saved.updated_at;
       videoStatus.textContent="Video attached. Refreshing...";
