@@ -23,12 +23,6 @@ export interface TikTokConnection {
 }
 interface TikTokRow extends TikTokConnection {token_cipher:string;lease_id:string|null;lease_until:number|null}
 interface TikTokState {state_hash:string;actor:string;session_hash:string;scopes:string;expires_at:number}
-export interface TikTokCreatorInfo {
-  creator_username:string;creator_nickname:string;privacy_level_options:string[];
-  comment_disabled:boolean;duet_disabled:boolean;stitch_disabled:boolean;
-  max_video_post_duration_sec:number;
-}
-
 export function tiktokConfigured(env:Env):boolean {
   return !!(env.TIKTOK_CLIENT_KEY && env.TIKTOK_CLIENT_SECRET &&
     env.TIKTOK_TOKEN_ENCRYPTION_KEY && env.TIKTOK_TOKEN_ENCRYPTION_KEY.length>=32);
@@ -125,6 +119,8 @@ export async function finishTikTokConnection(env:Env,session:Session,req:Request
   const token=await tokenRequest(env,{grant_type:"authorization_code",code,redirect_uri:tiktokRedirect(env)});
   const consented=new Set(token.scope.split(",").map(x=>x.trim()));
   if(!consented.has("user.info.basic"))throw new Error("TikTok did not authorize basic account information.");
+  if([...consented].some(scope=>!saved.scopes.split(",").includes(scope)))
+    throw new Error("TikTok returned permissions beyond the requested scope. Reconnect.");
   const existing=await tiktokConnection(env.DB);
   if(existing&&existing.open_id!==token.open_id)
     throw new Error("Another TikTok account is connected. Disconnect it before switching accounts.");
@@ -180,27 +176,12 @@ export async function disconnectTikTok(env:Env):Promise<{revoked:boolean}> {
       method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
       body:new URLSearchParams({client_key:key,client_secret:secret,token:old.access_token}),redirect:"error",
     });
-    revoked=res.ok;
+    const data=await res.json().catch(()=>({})) as {error?:{code?:string}};
+    revoked=res.ok && data.error?.code==="ok";
   }catch{/* local disconnection still removes the stored token */}
   await env.DB.prepare("DELETE FROM tiktok_accounts WHERE account_key='primary' AND token_cipher=?")
     .bind(row.token_cipher).run();
   return {revoked};
-}
-export async function queryTikTokCreatorInfo(env:Env) {
-  const access=await tiktokAccessToken(env,"video.publish");
-  const response=await fetch("https://open.tiktokapis.com/v2/post/publish/creator_info/query/",{
-    method:"POST",headers:{"Authorization":"Bearer "+access,"Content-Type":"application/json; charset=UTF-8"},
-    body:"{}",redirect:"error",
-  });
-  const data=await response.json().catch(()=>({})) as {data?:{creator_username?:string;creator_nickname?:string;privacy_level_options?:string[];max_video_post_duration_sec?:number};error?:{code?:string}};
-  if(!response.ok||data.error?.code!=="ok"||!data.data)
-    throw new Error("TikTok creator information unavailable. Check the video.publish permission.");
-  return {
-    creator_username:data.data.creator_username||"",
-    creator_nickname:data.data.creator_nickname||"",
-    privacy_level_options:data.data.privacy_level_options||[],
-    max_video_post_duration_sec:data.data.max_video_post_duration_sec||0,
-  };
 }
 export function tiktokStateCookie(state:string):string {return cookie(TIKTOK_STATE_COOKIE,state,STATE_TTL);}
 export function clearTikTokStateCookie():string {return cookie(TIKTOK_STATE_COOKIE,"",0);}
