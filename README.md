@@ -8,6 +8,17 @@ One Cloudflare Worker (free plan) does three jobs:
 - **Approval site** at `/`. Gus signs in with GitHub, chooses Facebook, Bluesky or both, edits platform captions, image alternative text and publish time, and approves with a PIN. Facebook uses Meta scheduling. Bluesky uses an approved queue served by the Worker's cron trigger.
 - **OAuth server**. Connecting an assistant requires Gus's GitHub sign-in plus a consent click.
 
+## Public information and TikTok preparation
+
+GS Poster exposes public product and legal information for external platform review:
+
+- [About](https://gs-poster.goofyspook.workers.dev/about)
+- [Terms of Service](https://gs-poster.goofyspook.workers.dev/terms)
+- [Privacy Policy](https://gs-poster.goofyspook.workers.dev/privacy)
+- Reserved Login Kit callback: `https://gs-poster.goofyspook.workers.dev/tiktok/callback`
+
+The callback is reserved only, **not a working TikTok sign-in**. No TikTok tokens or permissions are in place, and GS Poster does not yet publish to TikTok. Public photo URLs must not be implemented by exposing private unapproved media. See [TIKTOK_SETUP.md](./TIKTOK_SETUP.md) for domain verification, permissions, privacy contact and public-website requirements.
+
 ## Who can do what
 
 | | Connected AI assistant (MCP) | Gus (approval site) |
