@@ -32,7 +32,9 @@ function actor(): string {
   // Older connections remain unidentified until they reconnect.
   const client = typeof props?.clientName === "string" && props.clientName.trim()
     ? props.clientName.trim().slice(0, 80) : "MCP client (unidentified)";
-  return `${client} (via ${login})`;
+  const domain = typeof props?.clientDomain === "string" && props.clientDomain.trim()
+    ? props.clientDomain.trim().slice(0, 120) : "no verified domain";
+  return `${client} [client name self-declared; ${domain}] (via ${login})`;
 }
 
 function view(env: Env, origin: string, p: Post) {
