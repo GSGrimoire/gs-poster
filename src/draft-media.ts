@@ -29,8 +29,8 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <p class="hint">Provide descriptive alternative text for each Bluesky image. Maximum 4 Bluesky images, 80 Facebook images. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
-  <h2>Add a video to this draft</h2>
-  <p class="hint">MP4 up to 20 MB. Videos and image galleries cannot be combined on the same platform.</p>
+  <h2>${post.video || post.bluesky?.video ? "Replace video in this draft" : "Add a video to this draft"}</h2>
+  <p class="hint">MP4 up to 20 MB. Videos and image galleries cannot be combined on the same platform. Uploading a new video replaces the previous video only on the platforms you select. No publication takes place.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
     <input type="file" id="video-file" accept=".mp4,video/mp4" hidden>
@@ -38,12 +38,12 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <video controls playsinline preload="metadata" id="video-preview" hidden style="max-width:100%;max-height:280px;margin-top:12px"></video>
   <p id="video-filename" class="hint"></p>
   <div class="media-targets">
-    <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.video && !post.images.length ? "checked" : "disabled"}>Facebook</label>
-    <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.video && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
+    <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.images.length ? "checked" : "disabled"}>Facebook</label>
+    <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
   </div>
   <label for="video-alt">Bluesky video alternative text</label>
   <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
-  <div class="row"><button type="button" class="primary" id="video-upload-submit" disabled>Upload and attach video</button></div>
+  <div class="row"><button type="button" class="primary" id="video-upload-submit" disabled>${post.video || post.bluesky?.video ? "Upload and replace video" : "Upload and attach video"}</button></div>
   <div id="video-upload-status" class="hint" role="status" aria-live="polite"></div>
 </div>
 <script src="/draft-media.js" defer></script>
