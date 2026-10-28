@@ -94,9 +94,10 @@ export async function serveTikTokMedia(req:Request,env:Env):Promise<Response> {
     const img=await fetchImage(env,row.media_ref);
     // TikTok accepts JPEG and WebP, not PNG or GIF. Convert from private
     // source bytes instead of redirecting TikTok to the private object.
-    const result=await env.IMAGES.input(new Blob([img.bytes]).stream())
+    const conversion=await env.IMAGES.input(new Blob([img.bytes]).stream())
       .transform({width:1080,fit:"scale-down"})
-      .output({format:"image/webp"}).response();
+      .output({format:"image/webp"});
+    const result=conversion.response();
     if(!result.ok)throw new Error("Could not convert photo");
     const headers=new Headers(result.headers);
     Object.entries(extra).forEach(([k,v])=>headers.set(k,v));
