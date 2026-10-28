@@ -85,7 +85,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     if (action && req.method === "POST") return postAction(req, env, session, id, action);
   }
   const media = /^\/media\/(p_[a-z0-9]+)\/(\d+)$/.exec(path);
-  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]));
+  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1");
 
   return html(page("Not found", `<p class="empty">Nothing here.</p>`, { login: session.login }), { status: 404 });
 }
@@ -649,12 +649,23 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 }
 
-async function mediaProxy(env: Env, id: string, n: number): Promise<Response> {
+async function mediaProxy(env: Env, id: string, n: number, thumbnail = false): Promise<Response> {
   const p = await getPost(env.DB, id);
   const url = p?.images[n] ?? p?.bluesky?.images[n]?.url;
   if (!url) return new Response("Not found", { status: 404 });
   try {
     const img = await fetchImage(env, url);
+    if (thumbnail) {
+      if (!env.IMAGES) return new Response("Thumbnail transformer unavailable", { status: 503 });
+      const reduced = await env.IMAGES.input(new Blob([img.bytes]).stream())
+        .transform({ width: 112, height: 112, fit: "cover" })
+        .output({ format: "image/webp", quality: 58, anim: false });
+      const response = await reduced.response();
+      return new Response(response.body, {
+        headers: { "Content-Type": "image/webp", "Cache-Control": "private, max-age=3600",
+          "X-Content-Type-Options": "nosniff" },
+      });
+    }
     return new Response(img.bytes, {
       headers: { "Content-Type": img.type, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" },
     });
