@@ -106,12 +106,13 @@ export interface PostInfo {
   is_published?: boolean;
   permalink_url?: string;
   scheduled_publish_time?: number;
+  message?: string;
 }
 
 /** Returns null when the post no longer exists (deleted in Business Suite). */
 export async function getPostInfo(env: Env, fbPostId: string): Promise<PostInfo | null> {
   try {
-    return await get(env, fbPostId, { fields: "is_published,permalink_url,scheduled_publish_time" });
+    return await get(env, fbPostId, { fields: "is_published,permalink_url,scheduled_publish_time,message" });
   } catch (e) {
     if (e instanceof FacebookError && (e.code === 100 || e.status === 404)) return null;
     throw e;
@@ -149,6 +150,28 @@ export async function rescheduleFbPost(
   if (!after || after.is_published !== false ||
       !after.scheduled_publish_time || Math.abs(after.scheduled_publish_time - nextUnix) > 60) {
     throw new FacebookError("Facebook did not confirm the new schedule. Check Meta Business Suite before retrying." +
+      (writeError instanceof Error ? " " + writeError.message : ""));
+  }
+}
+
+/** Edit the caption on a still-scheduled Page post, with read-back confirmation. */
+export async function editFbCaption(
+  env: Env, fbPostId: string, previousUnix: number, oldCaption: string, nextCaption: string,
+): Promise<void> {
+  const before = await getPostInfo(env, fbPostId);
+  if (!before || before.is_published !== false ||
+      !before.scheduled_publish_time || Math.abs(before.scheduled_publish_time - previousUnix) > 60) {
+    throw new FacebookError("The Facebook schedule changed or was released. Review it in Meta before editing.");
+  }
+  if (before.message !== oldCaption) {
+    throw new FacebookError("The Facebook caption differs from GS Poster. Reconcile it before editing.");
+  }
+  let writeError: unknown = null;
+  try { await post(env, fbPostId, new URLSearchParams({ message: nextCaption })); }
+  catch (error) { writeError = error; }
+  const after = await getPostInfo(env, fbPostId);
+  if (!after || after.is_published !== false || after.message !== nextCaption) {
+    throw new FacebookError("Facebook did not confirm the edited caption. Check Meta before another attempt." +
       (writeError instanceof Error ? " " + writeError.message : ""));
   }
 }
