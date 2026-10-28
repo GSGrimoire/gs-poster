@@ -11,7 +11,7 @@ import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts
 import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { publicPage } from "./public-pages.ts";
-import { tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
+import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
 import { tiktokConnection } from "./tiktok.ts";
 import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
@@ -92,6 +92,11 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const auth = await requireSession(env, req);
   if (auth instanceof Response) return auth;
   const session = auth;
+  if (path === "/tiktok-connect.js" && req.method === "GET")
+    return new Response(TIKTOK_CONNECT_JS,{headers:{
+      "Content-Type":"application/javascript; charset=utf-8",
+      "Cache-Control":"no-store","X-Content-Type-Options":"nosniff"
+    }});
   if (path === "/tiktok/settings" && req.method === "GET") return tiktokSettings(env,session,url.searchParams.get("notice")||"");
   if (/^\/tiktok\/(connect|disconnect)$/.test(path) && req.method === "POST")
     return tiktokSettingsAction(req,env,session,path.split("/").pop()!);

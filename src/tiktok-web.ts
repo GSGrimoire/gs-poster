@@ -18,6 +18,23 @@ const redirect=(location:string,cookieValue?:string):Response=>{
   if(cookieValue)h.append("Set-Cookie",cookieValue);
   return new Response(null,{status:303,headers:h});
 };
+/** A top-level navigation is not subject to the preceding form's form-action redirect chain. */
+export const TIKTOK_CONNECT_JS = String.raw`
+(() => {
+  const link = document.getElementById("tiktok-continue-link");
+  if (!link) return;
+  try {
+    const target = new URL(link.href);
+    if (target.protocol !== "https:" ||
+        target.hostname !== "www.tiktok.com" ||
+        target.pathname !== "/v2/auth/authorize/") return;
+    window.location.replace(target.href);
+  } catch {
+    // The page leaves an explicit link so the editor can continue manually.
+  }
+})();
+`;
+
 const fail=(message:string,status=400,login?:string)=>
   html(page("TikTok connection",`<h2>TikTok connection</h2>
     <div class="notice err" role="alert">${esc(message)}</div>
@@ -102,8 +119,25 @@ export async function tiktokSettingsAction(
       if(await tiktokConnection(env.DB))throw new Error("Disconnect the current TikTok account before reconnecting.");
       const requested=TIKTOK_SCOPES.filter(s=>s==="user.info.basic"||form.get(s)==="1");
       const link=await beginTikTokConnection(env,session,requested);
-      const resp=redirect(link.url,tiktokStateCookie(link.state));
-      return resp;
+      // Do NOT return an external 303 from a form POST. Some browsers enforce
+      // form-action 'self' on the entire redirect chain and silently block TikTok.
+      // Serve a same-origin document with a safe client-side navigation and
+      // a visible fallback link instead, preserving the strict CSP.
+      const connectionPage=page("Continue to TikTok",
+        `<h2>Connect TikTok</h2>
+        <p>Opening TikTok to authorize GS Poster. If nothing happens, select the link below.</p>
+        <p><a id="tiktok-continue-link" class="btn" rel="noreferrer"
+            href="${esc(link.url)}">Continue to TikTok</a></p>
+        <p class="hint">Only authorize the permissions displayed by TikTok.</p>
+        <script src="/tiktok-connect.js" defer></script>`,
+        {login:session.login});
+      const response=html(connectionPage);
+      response.headers.set("Set-Cookie",tiktokStateCookie(link.state));
+      // Override the existing defaults instead of appending incompatible
+      // duplicate Cache-Control or Referrer-Policy directives.
+      response.headers.set("Cache-Control","no-store");
+      response.headers.set("Referrer-Policy","no-referrer");
+      return response;
     }
     if(action==="disconnect") {
       if(form.get("confirm")!=="yes")throw new Error("Please confirm disconnection.");
