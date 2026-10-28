@@ -4,7 +4,7 @@ import type { Post } from "./db.ts";
 /** Does not grant approval or change media for already approved posts. */
 export function draftMediaPanel(post: Post, csrf: string): string {
   if (!["draft","rejected"].includes(post.status) || post.approved_at) return "";
-  return §
+  return `
 <style>
 .media-drop{border:2px dashed var(--line);border-radius:9px;padding:18px;text-align:center;font:14px system-ui,sans-serif;cursor:pointer;transition:background .15s}
 .media-drop:focus,.media-drop:hover,.media-drop.drag-over{border-color:var(--accent2);background:color-mix(in srgb,var(--accent2) 10%,var(--panel))}
@@ -16,9 +16,9 @@ export function draftMediaPanel(post: Post, csrf: string): string {
 .media-targets{display:flex;gap:15px;flex-wrap:wrap}
 .media-targets label{margin:0;display:flex;align-items:center;gap:7px}
 </style>
-<div class="card" id="draft-media-panel" data-post="¤{esc(post.id)}" data-csrf="¤{esc(csrf)}"
- data-version="¤{esc(post.updated_at)}" data-facebook="¤{post.facebook_enabled ? "1" : "0"}"
- data-bluesky="¤{post.bluesky ? "1" : "0"}">
+<div class="card" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
+ data-version="${esc(post.updated_at)}" data-facebook="${post.facebook_enabled ? "1" : "0"}"
+ data-bluesky="${post.bluesky ? "1" : "0"}">
   <h2>Add images to this draft</h2>
   <p class="hint">Drop JPG, PNG or GIF images here, or select files. Files go into GS Poster's private storage and are attached to the chosen draft targets. No GitHub image commit and no publishing.</p>
   <div id="media-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop images">
@@ -31,11 +31,11 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
 </div>
 <script src="/draft-media.js" defer></script>
-§.replaceAll("§", "\u0060").replaceAll("¤{", "\${");
+`;
 }
 
 /** Single same-origin script; everything else is served by authenticated routes. */
-export const DRAFT_MEDIA_JS = §
+export const DRAFT_MEDIA_JS = `
 (() => {
   const panel = document.getElementById("draft-media-panel");
   if (!panel) return;
@@ -158,4 +158,4 @@ export const DRAFT_MEDIA_JS = §
     }
   });
 })();
-§.replaceAll("§", "\u0060");
+`;
