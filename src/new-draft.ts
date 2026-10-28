@@ -78,7 +78,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   .new-file input{width:100%}
   #new-video-preview{max-height:320px;max-width:100%;border-radius:8px}
   </style>
-  <form class="card" method="post" action="/new" id="new-draft-form">
+  <form class="card" method="post" action="/new" id="new-draft-form" data-zone="${v(zone)}">
     <input type="hidden" name="csrf" value="${v(csrf)}">
     <h3>1. Publishing platforms</h3>
     <div class="new-choice-group">
