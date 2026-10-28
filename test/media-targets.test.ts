@@ -57,7 +57,7 @@ test("Bluesky video creates a video post and separate linked Patreon card", asyn
   };
   try {
     const env = { BSKY_HANDLE: "account.bsky.social", BSKY_APP_PASSWORD: "test" } as Env;
-    const published = await publishBluesky(env, "p_videotest", {
+    const published = await publishBluesky(env, "p_mvrslvbab2230330c1", {
       caption: "A look inside the new release",
       images: [], video: { url: videoUrl, alt: "A view across a misty fantasy battlefield" }, patreon,
     });
