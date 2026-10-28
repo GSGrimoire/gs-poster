@@ -647,8 +647,10 @@ async function draftImageAction(
       const alt = String(input.alt || "").trim();
       const facebook = input.facebook === true;
       const bluesky = input.bluesky === true;
+      const tiktok = input.tiktok === true;
       const expected = String(input.expected_updated_at || "");
-      if (!facebook && !bluesky) return fail("Select Facebook, Bluesky or both.");
+      if (!facebook && !bluesky && !tiktok) return fail("Select Facebook, Bluesky or TikTok.");
+      if (tiktok && !current.tiktok_enabled) return fail("TikTok is not a selected draft target.");
       if (facebook && !current.facebook_enabled) return fail("Facebook is not a selected draft target.");
       if (bluesky && !current.bluesky) return fail("Bluesky is not a selected draft target.");
       if (alt.length > 1000) return fail("Alternative text exceeds 1,000 characters.");
@@ -656,7 +658,7 @@ async function draftImageAction(
       if (!expected || expected !== current.updated_at) return fail("Draft changed. Reload before attaching.",409);
       if (!(await isStoredOwnerUpload(env.DB,reference,session.login)))
         return fail("The private image is missing, incomplete, or belongs to a different session.", 400);
-      const updated = await attachDraftImage(env.DB,id,reference,alt,facebook,bluesky,expected);
+      const updated = await attachDraftImage(env.DB,id,reference,alt,facebook,bluesky,expected,tiktok);
       if (!updated) return fail("Draft changed or image limit exceeded. Reload.",409);
       await audit(env.DB,session.login,"draft-media-attached",id,
         (facebook?"facebook ":"")+(bluesky?"bluesky":""));
