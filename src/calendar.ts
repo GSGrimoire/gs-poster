@@ -24,6 +24,34 @@ export function weekRange(start: string, zone: string) {
   };
 }
 
+/**
+ * Return side-by-side lanes for cards whose 66-minute visible spans intersect.
+ * Inputs are minute-of-day values sorted in ascending order.
+ */
+export function assignCalendarLanes(minutes: number[]): Array<{lane: number; lanes: number}> {
+  const result = minutes.map(() => ({ lane: 0, lanes: 1 }));
+  let start = 0, groupEnd = -1;
+  let endings: number[] = [];
+  const finish = (last: number) => {
+    for (let j = start; j < last; j++) result[j].lanes = endings.length;
+  };
+  for (let i = 0; i < minutes.length; i++) {
+    if (minutes[i] >= groupEnd) {
+      finish(i);
+      start = i;
+      groupEnd = -1;
+      endings = [];
+    }
+    let lane = endings.findIndex(end => end <= minutes[i]);
+    if (lane < 0) { lane = endings.length; endings.push(0); }
+    endings[lane] = minutes[i] + 66;
+    result[i].lane = lane;
+    groupEnd = Math.max(groupEnd, minutes[i] + 66);
+  }
+  finish(minutes.length);
+  return result;
+}
+
 export function postCalendarTime(post: Post): string | null {
   if (post.scheduled_at) return post.scheduled_at;
   if (post.status === "published") return post.approved_at || post.created_at;
@@ -48,12 +76,13 @@ const STYLE = `
 .calendar-slot:nth-child(even){border-bottom-color:var(--line)}
 .calendar-slot.disabled{background:color-mix(in srgb,var(--muted) 12%,transparent);cursor:not-allowed}
 .calendar-slot.drop{background:color-mix(in srgb,var(--accent2) 35%,transparent)}
-.calendar-post{position:absolute;top:0;left:4px;right:4px;z-index:3;min-height:66px;max-height:100px;padding:5px;border:1px solid var(--line);border-left:4px solid var(--accent2);border-radius:7px;background:var(--bg);box-shadow:0 2px 5px #0003;font:12px/1.3 system-ui,sans-serif;color:var(--text);text-decoration:none;display:flex;gap:4px;overflow:visible}
+.calendar-post{position:absolute;top:0;left:4px;right:4px;z-index:3;height:66px;padding:5px;border:1px solid var(--line);border-left:4px solid var(--accent2);border-radius:7px;background:var(--bg);box-shadow:0 2px 5px #0003;font:12px/1.3 system-ui,sans-serif;color:var(--text);text-decoration:none;display:flex;gap:4px;overflow:visible}
 .calendar-post[data-status="scheduled"]{border-left-color:#6099df}
 .calendar-post[data-status="published"]{border-left-color:var(--ok);opacity:.85}
 .calendar-post[data-status="rejected"]{border-left-color:var(--err)}
 .calendar-post[draggable=true]{cursor:grab}
 .calendar-post .cal-thumb{object-fit:cover;width:42px;flex:0 0 42px;height:50px;border-radius:4px}
+.calendar-post[data-lanes="3"] .cal-thumb,.calendar-post[data-lanes="4"] .cal-thumb{display:none}
 .calendar-post .cal-text{min-width:0;display:flex;flex-direction:column;gap:3px}
 .calendar-post .cal-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}
 .calendar-post .cal-time{font-variant-numeric:tabular-nums;font-weight:700}
@@ -128,12 +157,19 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
       return '<div class="calendar-slot' + (disabled?' disabled':'') +
         '" data-when="' + when + '" data-utc="' + utc + '"></div>';
     }).join("");
-    const cards = posts.filter(p => {
+    const entries = posts.filter(p => {
       const t = postCalendarTime(p);
       return t && toLocalInput(new Date(t), env.TIMEZONE).slice(0,10) === day;
     }).map(p => {
       const local = toLocalInput(new Date(postCalendarTime(p)!), env.TIMEZONE);
       const minute = Number(local.slice(11,13))*60 + Number(local.slice(14,16));
+      return { p, local, minute };
+    }).sort((a,b) => a.minute - b.minute || a.p.id.localeCompare(b.p.id));
+    const lanes = assignCalendarLanes(entries.map(x => x.minute));
+    const cards = entries.map(({p,local,minute},i) => {
+      const placement = lanes[i];
+      const width = 100 / placement.lanes;
+      const left = width * placement.lane;
       const movable = (p.status === "draft" || p.status === "rejected" || p.status === "scheduled") &&
         (!p.approved_at || (p.scheduled_at && Date.parse(p.scheduled_at) - now.getTime() >= 12*60000));
       const caption = p.facebook_enabled ? p.message : p.bluesky?.caption || p.message;
@@ -145,8 +181,9 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
       const tip = '<span class="cal-tooltip"><strong>' + esc(title) + '</strong><br>' + esc(p.status) +
         ' · ' + esc(local.replace('T',' ')) + '<br>Created by ' + esc(p.created_by || "unknown") +
         '<br>' + esc(caption.slice(0,200)) + '</span>';
-      return '<a class="calendar-post" style="top:' + minute + 'px" href="/post/' + esc(p.id) +
-        '" draggable="' + (movable?'true':'false') + '" data-id="' + esc(p.id) +
+      return '<a class="calendar-post" style="top:' + minute + 'px;left:calc(' + left +
+        '% + 3px);width:calc(' + width + '% - 6px);right:auto" href="/post/' + esc(p.id) +
+        '" data-lanes="' + placement.lanes + '" draggable="' + (movable?'true':'false') + '" data-id="' + esc(p.id) +
         '" data-label="' + esc(title) + '" data-version="' + esc(p.updated_at) +
         '" data-status="' + esc(p.status) + '">' + thumb + '<span class="cal-text">' +
         '<span class="cal-time">' + esc(local.slice(11,16)) + ' <span class="platform-icons">' + platforms + '</span></span>' +
