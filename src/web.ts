@@ -552,7 +552,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       let next: Date;
       try { next = localToUtc(whenRaw, env.TIMEZONE); }
       catch { return postPage(env, session, id, { error: "Invalid date or time." }, 400); }
-      const error = checkWhen(next, new Date(), APPROVE_MIN_LEAD_MS);
+      const minLead = current.facebook_enabled && current.images.length > BULK_FACEBOOK_THRESHOLD
+        ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
+      const error = checkWhen(next, new Date(), minLead);
       if (error) return postPage(env, session, id, { error }, 400);
       await reschedulePost(env, id, next, current.updated_at, session.login);
       const returnTo = String(form.get("return_to") || "");
