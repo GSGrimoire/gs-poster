@@ -206,6 +206,29 @@ export async function listPosts(db: D1Database, opts: { status?: PostStatus; lim
   return results.map(fromRow);
 }
 
+/** Load a specific week by effective calendar time instead of the newest 200 records. */
+export async function listCalendarPosts(db: D1Database, from: string, to: string): Promise<Post[]> {
+  await ensureSchema(db);
+  const sql = POST_SELECT + " WHERE COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) >= ?"
+    + " AND COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) < ?"
+    + " ORDER BY COALESCE(p.scheduled_at, p.approved_at, p.created_at) LIMIT 500";
+  const { results } = await db.prepare(sql).bind(from, to).all<Row>();
+  return results.map(fromRow);
+}
+
+/** Optimistic, status-guarded schedule change. Never grants approval. */
+export async function updateCalendarTime(
+  db: D1Database, id: string, when: string, version: string, approved: boolean,
+): Promise<boolean> {
+  await ensureSchema(db);
+  const now = new Date().toISOString();
+  const sql = approved
+    ? "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status = 'scheduled' AND approved_at IS NOT NULL"
+    : "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL";
+  const r = await db.prepare(sql).bind(when, now, id, version).run();
+  return (r.meta.changes ?? 0) === 1;
+}
+
 type Patch = Partial<Omit<Post, "id" | "created_at">>;
 
 export async function updatePost(db: D1Database, id: string, patch: Patch, onlyIfStatus?: PostStatus[]): Promise<boolean> {
