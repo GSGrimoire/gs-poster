@@ -89,9 +89,12 @@ const STYLE = `
 .platform-icons{display:inline-flex;gap:3px}
 .platform-icon{display:inline-grid;place-items:center;width:18px;height:18px;background:#2164a8;color:#fff;border-radius:4px;font:bold 12px system-ui,sans-serif}
 .platform-icon.sky{background:#cfe8ff;color:#0861a3}
-.cal-tooltip{position:absolute;top:calc(100% + 3px);left:0;z-index:40;display:none;min-width:230px;max-width:300px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 6px 18px #0007;white-space:normal;overflow-wrap:anywhere;font:12px/1.5 system-ui,sans-serif}
+.cal-tooltip{position:absolute;top:calc(100% + 3px);left:0;z-index:40;display:none;pointer-events:none;min-width:230px;max-width:300px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 6px 18px #0007;white-space:normal;overflow-wrap:anywhere;font:12px/1.5 system-ui,sans-serif}
 .calendar-post:hover,.calendar-post:focus{z-index:25}
 .calendar-post:hover .cal-tooltip,.calendar-post:focus .cal-tooltip{display:block}
+/* While dragging, cards and tooltips must not intercept the target timeslot. */
+.calendar-window.is-dragging .calendar-post{pointer-events:none}
+.calendar-window.is-dragging .cal-tooltip{display:none!important}
 .calendar-info{font:13px system-ui,sans-serif;color:var(--muted);margin:12px 0}
 .cal-modal{border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);width:min(440px,95%);padding:22px}
 .cal-modal::backdrop{background:#0009}
@@ -109,10 +112,15 @@ export const CALENDAR_JS = `
   for (const card of document.querySelectorAll(".calendar-post[draggable=true]")) {
     card.addEventListener("dragstart", event => {
       moving = card;
+      viewport.classList.add("is-dragging");
       event.dataTransfer.setData("text/plain", card.dataset.id);
       event.dataTransfer.effectAllowed = "move";
     });
-    card.addEventListener("dragend", () => { moving = null; });
+    card.addEventListener("dragend", () => {
+      moving = null;
+      viewport.classList.remove("is-dragging");
+      document.querySelectorAll(".calendar-slot.drop").forEach(s => s.classList.remove("drop"));
+    });
   }
   for (const slot of document.querySelectorAll(".calendar-slot")) {
     slot.addEventListener("dragover", event => {
@@ -128,6 +136,7 @@ export const CALENDAR_JS = `
       if (Date.parse(slot.dataset.utc) - Date.now() < 12 * 60000) return;
       const post = moving;
       moving = null;
+      viewport.classList.remove("is-dragging");
       form.action = "/post/" + encodeURIComponent(post.dataset.id) + "/reschedule";
       form.elements.namedItem("when").value = slot.dataset.when;
       form.elements.namedItem("expected_updated_at").value = post.dataset.version;
