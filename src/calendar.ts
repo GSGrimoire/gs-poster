@@ -176,7 +176,7 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
       const title = p.label || p.release || caption.slice(0,50) || "Untitled post";
       const platforms = (p.facebook_enabled ? '<span class="platform-icon" title="Facebook">f</span>' : '') +
         (p.bluesky ? '<span class="platform-icon sky" title="Bluesky">🦋</span>' : '');
-      const url = p.images.length || p.bluesky?.images.length ? '/media/' + p.id + '/0' : null;
+      const url = p.images.length || p.bluesky?.images.length ? '/media/' + p.id + '/0?thumb=1' : null;
       const thumb = url ? '<img class="cal-thumb" src="' + esc(url) + '" alt="" loading="lazy">' : '';
       const tip = '<span class="cal-tooltip"><strong>' + esc(title) + '</strong><br>' + esc(p.status) +
         ' · ' + esc(local.replace('T',' ')) + '<br>Created by ' + esc(p.created_by || "unknown") +
