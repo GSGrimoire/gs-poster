@@ -121,3 +121,33 @@ test("Direct PHOTO requires fresh TikTok creator options and SELF_ONLY",async()=
 test("Unreviewed direct publishing never accepts PUBLIC_TO_EVERYONE",()=>{
  assert.throws(()=>validateTikTokPostOptions({...options("DIRECT_POST"),privacy:"PUBLIC_TO_EVERYONE"}),/SELF_ONLY/);
 });
+
+test("Public TikTok image lease converts private PNG into WebP without redirect",async()=>{
+ const p=await draft();
+ const url=await createTikTokMediaGrant(env,p.id,ref,"image",session.login);
+ let transformed=false;
+ env.UPLOADS={get:async (key:string)=>{
+  assert.equal(key,"uploads/"+"b".repeat(32)+".png");
+  return {arrayBuffer:async()=>new Uint8Array([137,80,78,71,13,10,26,10]).buffer};
+ }} as unknown as R2Bucket;
+ env.IMAGES={input:(stream:ReadableStream<Uint8Array>)=>{
+  assert.ok(stream);
+  return {transform:(opts:{width:number})=>{
+   assert.equal(opts.width,1080);
+   return {output:async(opts2:{format:string})=>{
+    assert.equal(opts2.format,"image/webp");
+    transformed=true;
+    return {response:()=>new Response(new Uint8Array([82,73,70,70]),{
+     headers:{"Content-Type":"image/webp"}
+    })};
+   }};
+  }};
+ }} as unknown as ImagesBinding;
+ const result=await serveTikTokMedia(new Request(url),env);
+ assert.equal(result.status,200);
+ assert.equal(result.headers.get("Content-Type"),"image/webp");
+ assert.equal(result.headers.get("Cache-Control"),"no-store");
+ assert.equal(result.headers.get("X-Robots-Tag"),"noindex, nofollow");
+ assert.equal(result.headers.get("Location"),null);
+ assert.ok(transformed);
+});
