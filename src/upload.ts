@@ -206,6 +206,18 @@ export async function handleUploadPut(request: Request, env: Env): Promise<Respo
       : json({error:"Upload failed. Contact support if the link has been consumed."},500);
   }
 }
+/** Verify that a browser upload finished and belongs to the signed-in owner. */
+export async function isStoredOwnerUpload(db: D1Database, reference: string, login: string): Promise<boolean> {
+  const ref = parseUploadRef(reference);
+  if (!ref) return false;
+  await ensureUploads(db);
+  const row = await db.prepare(
+    "SELECT status, ext, created_by FROM uploads WHERE id = ?"
+  ).bind(ref.id).first<Pick<UploadRow, "status" | "ext" | "created_by">>();
+  return !!row && row.status === "stored" && row.ext === ref.ext &&
+    row.created_by?.toLowerCase() === login.toLowerCase() && ref.ext !== "mp4";
+}
+
 /** Raw private object access for internal preflight, review preview and approved publication. */
 export async function readUpload(env: Env, ref: UploadRef): Promise<ArrayBuffer> {
   if (!env.UPLOADS) throw new Error("File uploads are not set up on this server.");
