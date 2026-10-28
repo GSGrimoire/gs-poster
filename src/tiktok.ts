@@ -208,7 +208,7 @@ export async function getTikTokCreatorOptions(env:Env):Promise<TikTokCreatorOpti
   const x=result.data;
   return {
     creator_username:String(x.creator_username||""),creator_nickname:String(x.creator_nickname||""),
-    privacy_level_options:x.privacy_level_options.filter(v=>typeof v==="string"),
+    privacy_level_options:(x.privacy_level_options||[]).filter(v=>typeof v==="string"),
     comment_disabled:x.comment_disabled===true,duet_disabled:x.duet_disabled===true,
     stitch_disabled:x.stitch_disabled===true,
     max_video_post_duration_sec:Number(x.max_video_post_duration_sec)||0,
