@@ -89,7 +89,7 @@ test("caption edits remain pending, preserve target selection and reject stale v
 });
 
 test("overlapping calendar cards use separate lanes while later cards reuse space",()=>{
-  const positions=assignCalendarLanes([540,550,600,700]);
+  const positions=assignCalendarLanes([540,550,610,700]);
   assert.deepEqual(positions.map(x=>x.lane),[0,1,0,0]);
   assert.deepEqual(positions.map(x=>x.lanes),[2,2,2,1]);
   assert.deepEqual(assignCalendarLanes([540,540,540]).map(x=>x.lane),[0,1,2]);
