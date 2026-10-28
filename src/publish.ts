@@ -3,9 +3,9 @@
  * approval page after Gus's GitHub sign-in and PIN check, never from an MCP tool.
  */
 import type { Env } from "./env.ts";
-import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, type Post, type ApprovalSnapshot } from "./db.ts";
+import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, type Post, type ApprovalSnapshot } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
-import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost } from "./facebook.ts";
+import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
 import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload } from "./facebook-queue.ts";
 
@@ -220,6 +220,52 @@ export async function reschedulePost(
     throw new Error("Post changed during rescheduling. Reload.");
   }
   await audit(env.DB, actor, "scheduled-rescheduled", id, p.scheduled_at + " to " + nextIso);
+}
+
+/** Change unreleased captions through the same human-authenticated, PIN-gated path. */
+export async function editPendingCaptions(
+  env: Env, id: string, version: string, message: string, blueskyCaption: string | null, actor: string,
+): Promise<void> {
+  const p = await getPost(env.DB, id);
+  if (!p || p.updated_at !== version) throw new Error("Post changed. Reload before editing.");
+  if (message.length > 63_206) throw new Error("Facebook caption is too long.");
+  if (p.bluesky && blueskyCaption === null) throw new Error("Bluesky caption is missing.");
+  if (blueskyCaption !== null &&
+      [...new Intl.Segmenter("en", {granularity:"grapheme"}).segment(blueskyCaption)].length > 300) {
+    throw new Error("Bluesky caption is over 300 characters.");
+  }
+  if ((p.status === "draft" || p.status === "rejected") && !p.approved_at) {
+    const saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, false);
+    if (!saved) throw new Error("The draft changed while saving. Reload.");
+    await audit(env.DB, actor, "draft-caption-edited", id);
+    return;
+  }
+  if (p.status !== "scheduled" || !p.approved_at || !p.scheduled_at ||
+      Date.parse(p.scheduled_at) - Date.now() < 12*60_000) {
+    throw new Error("Only pending schedules with at least 12 minutes remaining can be edited.");
+  }
+  if (p.bluesky && p.bluesky.status !== "scheduled") {
+    throw new Error("Bluesky has already started or completed publishing.");
+  }
+  if (p.facebook_enabled && !p.fb_post_id) {
+    throw new Error("The scheduled Facebook post ID is missing.");
+  }
+  if (p.facebook_enabled && message !== p.message) {
+    await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message);
+  }
+  const saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, true);
+  if (!saved) {
+    if (p.facebook_enabled && message !== p.message) {
+      try {
+        await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), message, p.message);
+      } catch {
+        await audit(env.DB, actor, "caption-reconciliation-required", id);
+        throw new Error("Facebook changed, but GS Poster did not. Reconcile in Meta Business Suite.");
+      }
+    }
+    throw new Error("Post changed while editing. Reload.");
+  }
+  await audit(env.DB, actor, "scheduled-caption-edited", id);
 }
 
 /** Take a scheduled post off Facebook's schedule. */
