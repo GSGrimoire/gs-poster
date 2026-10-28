@@ -66,12 +66,51 @@ export const DRAFT_MEDIA_JS = `
   const post = panel.dataset.post;
   const csrf = panel.dataset.csrf;
 
+  const videoInput = document.getElementById("video-file");
+  const videoDrop = document.getElementById("video-drop");
+  const videoPreview = document.getElementById("video-preview");
+  const videoName = document.getElementById("video-filename");
+  const videoSubmit = document.getElementById("video-upload-submit");
+  const videoStatus = document.getElementById("video-upload-status");
+  const videoFacebook = document.getElementById("video-facebook");
+  const videoBluesky = document.getElementById("video-bluesky");
+  const videoAlt = document.getElementById("video-alt");
+  let selectedVideo = null;
+  let previewUrl = null;
+  function chooseVideo(file) {
+    if (running || !file) return;
+    if (!file.name.toLowerCase().endsWith(".mp4") || file.size <= 0 || file.size > 20_000_000) {
+      videoStatus.textContent = "Choose a nonempty MP4 up to 20 MB.";return;
+    }
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    selectedVideo = file;
+    previewUrl = URL.createObjectURL(file);
+    videoPreview.src = previewUrl;videoPreview.hidden = false;
+    videoName.textContent = file.name+" ("+(file.size/1048576).toFixed(1)+" MB)";
+    videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled;
+    videoStatus.textContent = "";
+  }
+  videoDrop.addEventListener("click", () => videoInput.click());
+  videoDrop.addEventListener("keydown", e => {
+    if(e.key==="Enter" || e.key===" ") {e.preventDefault();videoInput.click();}
+  });
+  videoDrop.addEventListener("dragover", e=>{e.preventDefault();videoDrop.classList.add("drag-over");});
+  videoDrop.addEventListener("dragleave",()=>videoDrop.classList.remove("drag-over"));
+  videoDrop.addEventListener("drop",e=>{
+    e.preventDefault();videoDrop.classList.remove("drag-over");
+    chooseVideo(e.dataTransfer?.files?.[0]);
+  });
+  videoInput.addEventListener("change",()=>{
+    chooseVideo(videoInput.files?.[0]);videoInput.value="";
+  });
+
   function showError(error) { status.textContent = error instanceof Error ? error.message : String(error); }
   function choose(fileList) {
     if (running) return;
     const selected = Array.from(fileList);
     for (const file of selected) {
       const ext = (file.name.split(".").pop() || "").toLowerCase();
+      if (ext === "mp4") {chooseVideo(file);continue;}
       if (!["jpg","jpeg","png","gif"].includes(ext) || file.size <= 0 || file.size > 10 * 1024 * 1024) {
         status.textContent = "Only JPG, PNG or GIF files between 1 byte and 10 MB can be uploaded.";
         continue;
@@ -137,6 +176,32 @@ export const DRAFT_MEDIA_JS = `
     return v;
   }
 
+  videoSubmit.addEventListener("click",async()=>{
+    if(running || !selectedVideo)return;
+    const facebook=!!videoFacebook.checked,bluesky=!!videoBluesky.checked;
+    if (!facebook && !bluesky) {videoStatus.textContent="Choose at least one available platform.";return;}
+    const alt=videoAlt.value.trim();
+    if (bluesky && !alt) {videoStatus.textContent="Bluesky requires alternative text.";return;}
+    running=true;videoSubmit.disabled=true;
+    try {
+      videoStatus.textContent="Creating private upload...";
+      const grant=await api("video-link",{filename:selectedVideo.name});
+      videoStatus.textContent="Uploading video...";
+      const uploaded=await fetch(grant.upload_url,{method:"PUT",body:selectedVideo,credentials:"same-origin"});
+      const body=await uploaded.json().catch(()=>({}));
+      if (!uploaded.ok || !body.ok)throw new Error(body.error || "Video upload failed.");
+      videoStatus.textContent="Attaching video to the draft...";
+      const saved=await api("attach-video",{
+        reference:body.reference,alt,facebook,bluesky,expected_updated_at:currentVersion
+      });
+      currentVersion=saved.updated_at;
+      videoStatus.textContent="Video attached. Refreshing...";
+      location.reload();
+    } catch(error) {
+      videoStatus.textContent="Could not attach: "+(error instanceof Error?error.message:String(error));
+      videoSubmit.disabled=false;
+    } finally {running=false;}
+  });
   submit.addEventListener("click", async () => {
     if (running) return;
     running = true;submit.disabled = true;status.textContent = "";
