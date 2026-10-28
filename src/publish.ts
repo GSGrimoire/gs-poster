@@ -230,7 +230,7 @@ export async function reschedulePost(
   const before = Math.floor(Date.parse(p.scheduled_at) / 1000);
   const after = Math.floor(newTime.getTime() / 1000);
   if (p.facebook_enabled) {
-    try { await rescheduleFbPost(env, p.fb_post_id!, before, after); }
+    try { await rescheduleFbPost(env, p.fb_post_id!, before, after, !!p.video); }
     catch {
       // Facebook may have accepted the write before an uncertain read-back.
       await audit(env.DB, actor, "reschedule-reconciliation-required", id,
@@ -246,7 +246,7 @@ export async function reschedulePost(
     // Roll back when a concurrent edit wins. If this fails, do not pretend
     // both platforms are aligned: the user must reconcile in Meta.
     if (p.facebook_enabled) {
-      try { await rescheduleFbPost(env, p.fb_post_id!, after, before); }
+      try { await rescheduleFbPost(env, p.fb_post_id!, after, before, !!p.video); }
       catch (error) {
         await audit(env.DB, actor, "reschedule-reconciliation-required", id, nextIso);
         throw new Error("Facebook changed, but the GS Poster record did not. Check Meta Business Suite before retrying.");
@@ -288,7 +288,7 @@ export async function editPendingCaptions(
   }
   const facebookCaptionChanged = p.facebook_enabled && normalizeCaption(message) !== normalizeCaption(p.message);
   if (facebookCaptionChanged) {
-    try { await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message); }
+    try { await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message, !!p.video); }
     catch {
       // A successful write followed by a failed read is an uncertain remote state.
       await audit(env.DB, actor, "caption-reconciliation-required", id).catch(() => undefined);
@@ -302,7 +302,7 @@ export async function editPendingCaptions(
   if (!saved) {
     if (facebookCaptionChanged) {
       try {
-        await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), message, p.message);
+        await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), message, p.message, !!p.video);
       } catch {
         await audit(env.DB, actor, "caption-reconciliation-required", id);
         throw new Error("Facebook changed, but GS Poster did not. Reconcile in Meta Business Suite.");
