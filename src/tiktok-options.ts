@@ -41,7 +41,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   function fields(mode:"MEDIA_UPLOAD"|"DIRECT_POST") {
     return `
       <input type="hidden" name="csrf" value="${esc(csrf)}">
-      <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
+      <input type="hidden" name="expected_updated_at" value="${esc(post.updated_at)}">
       <input type="hidden" name="post_mode" value="${mode}">
       <input type="hidden" name="media_type" value="${type}">
       <label for="title-${mode}">TikTok title (up to 90 characters)</label>
