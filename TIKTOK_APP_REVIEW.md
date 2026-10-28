@@ -1,58 +1,51 @@
-# TikTok app review submission draft (upload-to-inbox phase)
+# TikTok app review preparation
 
-**Status:** Prepared for operator review. Do not submit until a real TikTok connection and video transfer have been demonstrated.
+**Status:** Review narrative and operator checklist. Do not submit until live TikTok login, video transfer and photo transfer have been demonstrated.
 
-## Product description (paste into the TikTok portal)
+## Application description
 
-GS Poster is a web-based editorial calendar and content preparation system for GS Grimoire, a tabletop roleplaying game content project. Authorized editors prepare posts and attach short videos for social media distribution. The integration uses TikTok Login Kit for authorization and TikTok's Content Posting API to upload an MP4 video to the account holder's TikTok inbox as a draft. The creator receives a TikTok inbox notification, reviews or edits the video in the TikTok app, and decides whether to publish it. GS Poster cannot publish TikTok videos directly in this first version and never sends a video automatically from the calendar.
+GS Poster is an editorial calendar and media-sharing service for authorized creators producing tabletop roleplaying game content. It allows authenticated creators to prepare their own original videos and image carousels for Facebook, Bluesky and TikTok.
 
-## Permissions requested
+TikTok Login Kit grants the application specific permissions chosen by the user. With `video.upload`, GS Poster sends videos and photo carousels to the creator's TikTok inbox for editing and manual publication. With optional `video.publish`, the editor may initiate a separately approved Direct Post from the post review screen. Until the TikTok application passes the required audit, GS Poster limits Direct Post tests to private `SELF_ONLY` posts. The editor must choose whether to upload or publish and explicitly enter an approval PIN. No scheduled TikTok publication is implemented.
 
-- `user.info.basic`: authorize the editor's TikTok account and identify the connected account.
-- `video.upload`: upload the editor-selected video to the TikTok inbox for further editing and manual publication.
+## Requested scopes and functionality
 
-**Not requesting:** `video.publish`. Direct publication will be requested in a separate application update after the initial integration is validated.
+- `user.info.basic`: identify the creator who authorizes the account.
+- `video.upload`: send video or photo carousels to TikTok inbox for manual publication.
+- `video.publish` (optional, separately consented): direct posting, with fresh creator information, privacy options, branded content flags and explicit user confirmation.
 
-## Consent and user control
+Access and refresh tokens are encrypted in Cloudflare D1. Original image and video objects remain private in Cloudflare R2. For TikTok `PULL_FROM_URL`, GS Poster creates unguessable three-hour media URLs under the verified property prefix; there are no permanent public draft media URLs.
 
-1. The editor signs in to GS Poster with their authorized GitHub account.
-2. The editor opens TikTok settings and explicitly chooses Connect TikTok.
-3. The editor completes TikTok's Login Kit authorization and consents to the requested scopes.
-4. The editor creates a TikTok video draft or chooses an existing video post and attaches a private MP4.
-5. After reviewing the video, the editor selects **Send video to TikTok inbox**, confirms that final publication is manual, and enters their approval PIN.
-6. GS Poster uploads the video directly to TikTok using `FILE_UPLOAD`. It records an upload identifier and allows the editor to refresh the TikTok processing status.
-7. The editor opens TikTok, edits the content, chooses visibility and publishes it. At any time the editor can disconnect TikTok from GS Poster settings.
+## Reviewer demonstration
 
-## Demonstration recording checklist
+1. Public About, Terms and Privacy pages; dedicated privacy contact.
+2. GitHub-authenticated editor dashboard and TikTok Connect button.
+3. TikTok's own Login Kit consent page with requested scopes.
+4. GS Poster showing granted scopes without exposing tokens.
+5. New TikTok-only draft with images and a multi-image preview.
+6. URL-prefix verification: `https://gs-poster.goofyspook.workers.dev/tiktok/media/`.
+7. Upload to TikTok inbox, processing status, manual publication within TikTok.
+8. Optional private Direct Post test with fresh privacy options and explicit PIN confirmation.
+9. Disconnect TikTok and verify local authorization is removed.
 
-Record one test showing the following in order, without showing any access tokens, secrets or credentials:
+Do not display API credentials, PINs or token-bearing media links in publicly distributed recordings.
 
-1. Public GS Poster About, Terms and Privacy pages.
-2. TikTok Connect button and TikTok consent screen, with only `user.info.basic` and `video.upload`.
-3. GS Poster showing the connected TikTok account and granted permissions.
-4. New draft page selecting **TikTok (send to inbox)**, uploading a sample MP4, and previewing the video.
-5. Post review page requesting the approval PIN and confirming manual TikTok publication.
-6. Transfer state and refreshed TikTok processing status.
-7. TikTok app inbox notification, video editor and final manual Publish action.
-8. GS Poster Disconnect TikTok control.
+## Operator review blockers
 
-## Public URLs
+- Confirm the TikTok developer application genuinely supports both upload and direct permissions in the intended environment.
+- Verify the TikTok callback and media URL properties in the portal.
+- Verify the app's product scope and public website meet TikTok's review criteria. TikTok explicitly disfavors applications restricted solely to managing one's own or internal accounts.
+- Provide a reachable privacy-support contact address and review legal wording.
+- Validate one real video and photo transfer and record reviewer evidence.
+- TikTok may prevent public Direct Post until the app passes an audit. GS Poster currently restricts direct tests to SELF_ONLY.
+- The app must not claim it performs automatic TikTok scheduling.
 
-- Website: https://gs-poster.goofyspook.workers.dev/about
+## Public addresses
+
+- About: https://gs-poster.goofyspook.workers.dev/about
 - Terms: https://gs-poster.goofyspook.workers.dev/terms
 - Privacy: https://gs-poster.goofyspook.workers.dev/privacy
-- Login Kit callback: https://gs-poster.goofyspook.workers.dev/tiktok/callback
+- Login callback: https://gs-poster.goofyspook.workers.dev/tiktok/callback
+- Verifiable media property: https://gs-poster.goofyspook.workers.dev/tiktok/media/
 
-## Operator blockers before app submission
-
-- Add TikTok Login Kit and Content Posting API in the TikTok developer portal.
-- Configure the exact callback URL and obtain the client key and secret.
-- Save the client key, client secret, and a separate randomly generated encryption key as Cloudflare Worker secrets.
-- Confirm TikTok has granted the test user and app access to `video.upload`.
-- Review the public policy text and add a working privacy-support contact method.
-- Confirm the public GS Poster website meets TikTok's application review requirements for real end-user utility.
-- Complete one live authenticated upload to verify TikTok accepts the current configuration.
-- Capture the demonstration recording and any required screenshots.
-- Submit the application for approval under `video.upload`. Do not claim that it already supports direct posting or automatic TikTok scheduling.
-
-This file contains no secrets and is suitable for use as a reviewer instruction sheet.
+See [TIKTOK_SETUP.md](./TIKTOK_SETUP.md) for current implementation steps and official API references.
