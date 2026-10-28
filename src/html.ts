@@ -52,14 +52,14 @@ details summary{cursor:pointer;font:14px system-ui,sans-serif;color:var(--muted)
 .empty{color:var(--muted);font:14px system-ui,sans-serif}
 `;
 
-export function page(title: string, body: string, opts: { login?: string; wide?: boolean } = {}): string {
+export function page(title: string, body: string, opts: { login?: string; wide?: boolean; public?: boolean } = {}): string {
   const who = opts.login
     ? `<span class="who">Signed in as ${esc(opts.login)} · <a href="/logout">sign out</a></span>`
     : "";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow"><title>${esc(title)}</title><style>${CSS}</style></head>
-<body><div class="wrap${opts.wide ? " wide" : ""}"><header><h1><a href="/">GS Poster</a></h1>${who}</header>${body}</div></body></html>`;
+${opts.public ? "" : '<meta name="robots" content="noindex,nofollow">'}<title>${esc(title)}</title><style>${CSS}</style></head>
+<body><div class="wrap${opts.wide ? " wide" : ""}"><header><h1><a href="${opts.public ? "/about" : "/"}">GS Poster</a></h1>${who}</header>${body}<footer style="border-top:1px solid var(--line);margin-top:28px;padding-top:12px;font:13px system-ui,sans-serif;display:flex;gap:16px;flex-wrap:wrap"><a href="/about">About</a><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a></footer></div></body></html>`;
 }
 
 export const SECURITY_HEADERS: Record<string, string> = {
