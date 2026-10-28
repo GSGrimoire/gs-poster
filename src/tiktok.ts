@@ -5,7 +5,7 @@ import {getCookie,randomToken,safeEqual,sha256,cookie} from "./session.ts";
 
 export const TIKTOK_STATE_COOKIE="__Host-gsp_tiktok_state";
 export const TIKTOK_CALLBACK="https://gs-poster.goofyspook.workers.dev/tiktok/callback";
-export const TIKTOK_SCOPES=["user.info.basic","video.upload","video.publish"] as const;
+export const TIKTOK_SCOPES=["user.info.basic","video.upload"] as const;
 const STATE_TTL=600;
 const textEncoder=new TextEncoder(),textDecoder=new TextDecoder();
 const aad=textEncoder.encode("gs-poster/tiktok/v1");
