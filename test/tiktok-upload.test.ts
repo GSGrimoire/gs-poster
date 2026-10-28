@@ -57,7 +57,7 @@ test("TikTok connection validates session-bound single-use state and stores encr
   };
   try {
     const link=await beginTikTokConnection(env,session,["video.upload","video.publish"]);
-    assert.equal(new URL(link.url).searchParams.get("scope"),"user.info.basic,video.upload");
+    assert.equal(new URL(link.url).searchParams.get("scope"),"user.info.basic,video.upload,video.publish");
     const callbackUrl="https://gs-poster.goofyspook.workers.dev/tiktok/callback?state="+encodeURIComponent(link.state)+"&code=fake-code";
     const req=new Request(callbackUrl,{headers:{Cookie:"__Host-gsp_tiktok_state="+link.state}});
     const result=await finishTikTokConnection(env,session,req);
