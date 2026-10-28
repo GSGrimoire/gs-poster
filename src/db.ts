@@ -50,10 +50,14 @@ export interface Post {
   created_by: string | null;
   approved_at: string | null;
   facebook_enabled: boolean;
+  /** TikTok inbox-only workflow; no automatic publication. */
+  tiktok_enabled?: boolean;
   bluesky: BlueskyTarget | null;
 }
 
-interface Row extends Omit<Post, "images" | "facebook_enabled" | "bluesky"> {
+interface Row extends Omit<Post, "images" | "facebook_enabled" | "tiktok_enabled" | "bluesky"> {
+  facebook_enabled: number;
+  tiktok_enabled: number;
   images: string;
   bs_caption: string | null;
   bs_images: string | null;
@@ -90,6 +94,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       link TEXT,
       images TEXT NOT NULL DEFAULT '[]',
       video TEXT,
+      facebook_enabled INTEGER NOT NULL DEFAULT 1,
+      tiktok_enabled INTEGER NOT NULL DEFAULT 0,
       scheduled_at TEXT,
       fb_post_id TEXT,
       permalink TEXT,
@@ -139,6 +145,13 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     try { await db.prepare("ALTER TABLE posts ADD COLUMN video TEXT").run(); }
     catch(error) { if (!/duplicate column name/i.test(String(error))) throw error; }
   }
+  const platformColumns=await db.prepare("PRAGMA table_info(posts)").all<{name:string}>();
+  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"]]) {
+    if(!platformColumns.results.some(column=>column.name===name)) {
+      try {await db.prepare("ALTER TABLE posts ADD COLUMN "+name+" "+definition).run();}
+      catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
+    }
+  }
   schemaReady = true;
 }
 
@@ -146,7 +159,8 @@ function fromRow(r: Row): Post {
   return {
     ...r,
     images: JSON.parse(r.images || "[]"),
-    facebook_enabled: r.bs_caption === null ? true : r.bs_facebook_enabled !== 0,
+    facebook_enabled: r.bs_caption === null ? r.facebook_enabled !== 0 : r.bs_facebook_enabled !== 0,
+    tiktok_enabled: r.tiktok_enabled !== 0,
     bluesky: r.bs_caption === null ? null : {
       caption: r.bs_caption,
       images: JSON.parse(r.bs_images || "[]"),
@@ -179,6 +193,7 @@ export interface NewPost {
   created_by: string;
   bluesky?: BlueskyDraft | null;
   facebook_enabled?: boolean;
+  tiktok_enabled?: boolean;
 }
 
 export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
@@ -186,9 +201,9 @@ export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
   const now = new Date().toISOString();
   const id = newId();
   const inserts = [
-    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, link, images, video, scheduled_at, created_by)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.video ?? null, p.scheduled_at, p.created_by),
+    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, link, images, video, facebook_enabled, tiktok_enabled, scheduled_at, created_by)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.video ?? null, p.facebook_enabled===false?0:1, p.tiktok_enabled?1:0, p.scheduled_at, p.created_by),
   ];
   if (p.bluesky) inserts.push(db.prepare(`INSERT INTO bluesky_targets
       (post_id, caption, images, video, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?, ?)`)
@@ -306,21 +321,22 @@ export async function reopenCancelledDraft(
 /** Store one video for either or both targets in a draft-only D1 transaction. */
 export async function attachDraftVideo(
   db: D1Database, id: string, reference: string, alt: string,
-  facebook: boolean, bluesky: boolean, expectedVersion: string,
+  facebook: boolean, bluesky: boolean, expectedVersion: string, tiktok=false,
 ): Promise<string | null> {
   await ensureSchema(db);
-  if (!facebook && !bluesky) throw new Error("Select at least one platform.");
+  if (!facebook && !bluesky && !tiktok) throw new Error("Select at least one platform.");
   if (bluesky && !alt.trim()) throw new Error("Bluesky video requires alternative text.");
   const version = new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
   const blueskyGuard = bluesky
     ? " AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0)"
     : "";
-  const facebookGuard = facebook ? " AND json_array_length(images)=0" : "";
+  const facebookGuard = (facebook||tiktok) ? " AND json_array_length(images)=0" : "";
+  const tiktokGuard = tiktok ? " AND tiktok_enabled=1" : "";
   const statements = [
     db.prepare("UPDATE posts SET video=CASE WHEN ? THEN ? ELSE video END, updated_at=? "+
       "WHERE id=? AND updated_at=? AND approved_at IS NULL AND status IN ('draft','rejected')" +
-      facebookGuard + blueskyGuard)
-      .bind(facebook?1:0,reference,version,id,expectedVersion),
+      facebookGuard + tiktokGuard + blueskyGuard)
+      .bind(facebook||tiktok?1:0,reference,version,id,expectedVersion),
   ];
   if (bluesky) statements.push(db.prepare(
     "UPDATE bluesky_targets SET video=json_object('url',?,'alt',?) WHERE post_id=? AND status='draft' "+

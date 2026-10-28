@@ -10,7 +10,10 @@ import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
-import { publicPage, tiktokCallbackPlaceholder } from "./public-pages.ts";
+import { publicPage } from "./public-pages.ts";
+import { tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
+import { tiktokConnection } from "./tiktok.ts";
+import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
@@ -72,7 +75,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     const response = publicPage(path.slice(1) as "about" | "terms" | "privacy");
     return req.method === "HEAD" ? new Response(null,{status:response.status,headers:response.headers}) : response;
   }
-  if (path === "/tiktok/callback") return tiktokCallbackPlaceholder(req);
+  if (path === "/tiktok/callback") return tiktokCallback(req,env);
   if (path === "/robots.txt") return new Response(
     "User-agent: *\nAllow: /about\nAllow: /terms\nAllow: /privacy\nDisallow: /\n",
     {headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"public, max-age=3600"}});
@@ -89,6 +92,9 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const auth = await requireSession(env, req);
   if (auth instanceof Response) return auth;
   const session = auth;
+  if (path === "/tiktok/settings" && req.method === "GET") return tiktokSettings(env,session,url.searchParams.get("notice")||"");
+  if (/^\/tiktok\/(connect|disconnect)$/.test(path) && req.method === "POST")
+    return tiktokSettingsAction(req,env,session,path.split("/").pop()!);
 
   if (path === "/new-draft.js" && req.method === "GET") return new Response(NEW_DRAFT_JS, {headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
   if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
@@ -98,7 +104,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
   if (path === "/new" && (req.method === "GET" || req.method === "POST")) return newDraftPage(req,env,session);
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -304,7 +310,7 @@ async function dashboard(env: Env, session: Session, requestedWeek: string | nul
 
   const body = `
     ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
-    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><a class="btn" href="/new">+ New draft</a></div>
+    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><div class="row"><a class="btn" href="/tiktok/settings">TikTok settings</a><a class="btn" href="/new">+ New draft</a></div></div>
     ${calendar}
     ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
     ${section("Scheduled", scheduled, "Nothing scheduled.")}
@@ -337,7 +343,7 @@ async function newDraftPage(req: Request,env:Env,session:Session):Promise<Respon
   const fields:NewDraftFields={
     label:str("label"),release:str("release"),message:str("message"),
     bsCaption:str("bs_caption"),facebook:form.get("facebook")==="1",
-    bluesky:form.get("bluesky")==="1",when:form.get("asap")==="1" ? soonestDraftTime(env.TIMEZONE) : str("when"),
+    bluesky:form.get("bluesky")==="1",tiktok:form.get("tiktok")==="1",when:form.get("asap")==="1" ? soonestDraftTime(env.TIMEZONE) : str("when"),
     contentKind:str("content_kind") as NewDraftFields["contentKind"],
   };
   try{
@@ -368,6 +374,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const p = await getPost(env.DB, id);
   if (!p) return html(page("Not found", `<p class="empty">That post does not exist (it may have been deleted).</p><p><a href="/">Back</a></p>`, { login: session.login }), { status: 404 });
   const csrf = await csrfToken(env, session);
+  const tiktokConn = await tiktokConnection(env.DB);
+  const tiktokTransfer = await getTikTokInboxTransfer(env.DB,p.id);
   const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at
     ? await getFacebookUploadProgress(env.DB, p.id, p.images.length) : null;
   const message = state.message ?? p.message;
@@ -398,8 +406,36 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
 
 
   let actions = "";
-  if (p.status === "draft") {
-    actions = `
+  const postVideo=p.video || p.bluesky?.video?.url;
+  if (postVideo && p.tiktok_enabled && !tiktokConn) {
+    actions += '<div class="card"><h2>TikTok inbox</h2><p>Connect your TikTok account first to send this video for manual publication.</p><p><a href="/tiktok/settings">Connect TikTok</a></p></div>';
+  }
+  if (postVideo && p.tiktok_enabled && tiktokConn) {
+    if (!tiktokTransfer && ["draft","scheduled","published"].includes(p.status) && !["publishing","published"].includes(p.bluesky?.status||"")) {
+      actions += `<form method="post" action="/post/${p.id}/tiktok-upload" class="card">
+        ${hidden}
+        <h2>Send video to TikTok inbox</h2>
+        <p>This sends the MP4 to your connected TikTok account for you to review and publish in TikTok. It does not automatically post or schedule a TikTok release.</p>
+        <label><input type="checkbox" name="confirm_tiktok" value="1" required>
+          I understand that TikTok publication is manual and may occur at a different time from this calendar slot.</label>
+        <label for="tiktok-pin">Approval PIN</label><input id="tiktok-pin" type="password" name="pin" required>
+        <button class="primary" type="submit">Send video to TikTok inbox</button>
+      </form>`;
+    }
+    if (tiktokTransfer) {
+      actions += `<div class="card"><h2>TikTok inbox transfer</h2>
+        <p>Status: <strong>${esc(tiktokTransfer.status.replaceAll("_"," "))}</strong></p>
+        ${tiktokTransfer.error ? `<p class="notice err">${esc(tiktokTransfer.error)}</p>` : ""}
+        <p class="hint">Check the TikTok app inbox to complete editing and publication. GS Poster does not publish this video automatically.</p>
+        ${tiktokTransfer.publish_id?`<form method="post" action="/post/${p.id}/tiktok-status">
+          ${hidden}<label for="tiktok-status-pin">Approval PIN</label>
+          <input id="tiktok-status-pin" name="pin" type="password" required>
+          <button type="submit">Refresh TikTok transfer status</button></form>`:""}
+      </div>`;
+    }
+  }
+  if (p.status === "draft" && (p.facebook_enabled || p.bluesky)) {
+    actions += `
       <form method="post" action="/post/${p.id}/approve" class="card">
         ${hidden}
         <p class="hint">Select one or both targets. Every selected target is authorized by this approval and PIN.</p>
@@ -530,8 +566,9 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     <div class="card preview">
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
-        <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""}</span></div>
+        <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""} ${p.tiktok_enabled ? "TikTok inbox (manual publishing)" : ""}</span></div>
       ${p.facebook_enabled ? `<p class="hint">Facebook caption and media</p><p class="caption">${esc(p.message)}</p>${p.video ? videoPreview("facebook") : thumbs}` : ""}
+      ${p.tiktok_enabled && !p.facebook_enabled && p.video ? `<p class="hint">TikTok MP4 preview, upload to inbox only</p>${videoPreview("facebook")}` : ""}
       ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
         ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
         ${bs.video ? `<p class="hint">Bluesky video: ${esc(bs.video.alt)}</p>${videoPreview("bluesky")}` : ""}
@@ -583,8 +620,10 @@ async function draftImageAction(
       const alt = String(input.alt || "").trim();
       const facebook = input.facebook === true;
       const bluesky = input.bluesky === true;
+      const tiktok = input.tiktok === true;
       const version = String(input.expected_updated_at || "");
-      if (!facebook && !bluesky) return fail("Select at least one video target.");
+      if (!facebook && !bluesky && !tiktok) return fail("Select at least one video target.");
+      if (tiktok && !current.tiktok_enabled) return fail("TikTok is not selected for this draft.");
       if (facebook && !current.facebook_enabled) return fail("Facebook is not selected for this draft.");
       if (bluesky && !current.bluesky) return fail("Bluesky is not selected for this draft.");
       if (bluesky && !alt) return fail("Provide alternative text for Bluesky video.");
@@ -592,7 +631,7 @@ async function draftImageAction(
       if (version !== current.updated_at) return fail("The draft changed. Reload.",409);
       if (!(await isStoredOwnerVideo(env.DB,reference,session.login)))
         return fail("This private video is not stored or does not belong to your account.");
-      const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version);
+      const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version,tiktok);
       if (!updated) return fail("A target already has media or the draft changed. Reload.",409);
       await audit(env.DB,session.login,"draft-video-attached",id,
         (facebook?"facebook ":"")+(bluesky?"bluesky":""));
@@ -648,6 +687,16 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    if (action === "tiktok-upload") {
+      if (form.get("confirm_tiktok") !== "1")
+        return postPage(env,session,id,{error:"Confirm that TikTok publication is manual."},400);
+      await startTikTokInboxTransfer(env,id,String(form.get("expected_updated_at")||""),session.login);
+      return postPage(env,session,id,{notice:"Video transferred to TikTok. Open your TikTok inbox to complete publication."});
+    }
+    if (action === "tiktok-status") {
+      const checked=await refreshTikTokInboxTransfer(env,id,session.login);
+      return postPage(env,session,id,{notice:"TikTok transfer: "+checked.status.replaceAll("_"," ")+". Publication still requires your action in TikTok."});
+    }
     if (action === "restore-cancelled") {
       if (form.get("confirmed_cancelled") !== "1") {
         return postPage(env,session,id,{error:"Confirm both targets are cancelled before reopening."},400);

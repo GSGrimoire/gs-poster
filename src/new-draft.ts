@@ -7,11 +7,11 @@ import type { NewPost } from "./db.ts";
 
 export interface NewDraftFields {
   label: string; release: string; message: string; bsCaption: string;
-  facebook: boolean; bluesky: boolean; when: string;
+  facebook: boolean; bluesky: boolean; tiktok?: boolean; when: string;
   contentKind?: "text" | "images" | "video";
 }
 export function blankNewDraft(when = ""): NewDraftFields {
-  return {label:"",release:"",message:"",bsCaption:"",facebook:true,bluesky:true,when,contentKind:"text"};
+  return {label:"",release:"",message:"",bsCaption:"",facebook:true,bluesky:true,tiktok:false,when,contentKind:"text"};
 }
 /** Reject forged, stale or non-existent local times, including DST gaps. */
 export function newDraftTime(value: string, zone: string, now = new Date()): Date | null {
@@ -37,7 +37,8 @@ export function newDraftPrefill(value: string | null, zone: string, now = new Da
 export function parseNewDraft(
   fields: NewDraftFields, zone: string, actor: string, now = new Date(),
 ): NewPost {
-  if (!fields.facebook && !fields.bluesky) throw new Error("Select Facebook, Bluesky, or both.");
+  if (!fields.facebook && !fields.bluesky && !fields.tiktok) throw new Error("Select Facebook, Bluesky, or TikTok.");
+  if(fields.tiktok && fields.contentKind !== "video") throw new Error("TikTok currently supports video only. Select Video.");
   if (fields.contentKind && !["text","images","video"].includes(fields.contentKind)) throw new Error("Choose a supported content type.");
   if(fields.label.length>120 || fields.release.length>120)
     throw new Error("Name and release must each be 120 characters or fewer.");
@@ -52,6 +53,7 @@ export function parseNewDraft(
     images:[],video:null,link:null,
     scheduled_at:scheduledAt?.toISOString() || null,
     facebook_enabled:fields.facebook,
+    tiktok_enabled:fields.tiktok===true,
     bluesky:fields.bluesky ? {caption:fields.bsCaption,images:[],video:null,patreon:null} : null,
     created_by:"GS Poster web (via "+actor+")",
   };
@@ -84,8 +86,9 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
     <div class="new-choice-group">
       <label><input type="checkbox" name="facebook" value="1" ${fields.facebook?"checked":""}> Facebook</label>
       <label><input type="checkbox" name="bluesky" value="1" ${fields.bluesky?"checked":""}> Bluesky</label>
+      <label><input type="checkbox" name="tiktok" value="1" ${fields.tiktok?"checked":""}> TikTok (send to inbox)</label>
     </div>
-    <p class="hint">TikTok integration is planned, but not yet connected. No post will be sent there.</p>
+    <p class="hint">TikTok videos are uploaded to your TikTok inbox for manual publication. This does not schedule publication at the calendar time. Connect the account in <a href="/tiktok/settings">TikTok settings</a> first.</p>
     <h3>2. Content type</h3>
     <div class="new-choice-group" role="group" aria-label="Post content type">
       <label><input type="radio" name="content_kind" value="text" ${kind==="text"?"checked":""}> Text</label>

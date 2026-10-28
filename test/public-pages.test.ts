@@ -17,11 +17,12 @@ test("public terms, privacy and service description have no login requirement or
     assert.doesNotMatch(body,/fb_page_token|FB_PAGE_TOKEN|access_token=/i);
   }
 });
-test("privacy page explains actual storage and connected providers without promising TikTok access",async()=>{
+test("privacy page discloses encrypted TikTok account authorization and manual inbox transfer",async()=>{
   const text=await publicPage("privacy").text();
   for(const phrase of ["GitHub","Cloudflare","Facebook","Bluesky","45-day","TikTok","request","session cookies"])
     assert.ok(text.includes(phrase), "Missing policy section: "+phrase);
-  assert.match(text,/If TikTok is added/);
+  assert.match(text,/If an editor connects TikTok/);
+  assert.match(text,/completes publication inside TikTok/);
 });
 test("public terms explain human review, media responsibility and third party rules",async()=>{
   const text=await publicPage("terms").text();
