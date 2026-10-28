@@ -343,7 +343,7 @@ async function newDraftPage(req: Request,env:Env,session:Session):Promise<Respon
   const fields:NewDraftFields={
     label:str("label"),release:str("release"),message:str("message"),
     bsCaption:str("bs_caption"),facebook:form.get("facebook")==="1",
-    bluesky:form.get("bluesky")==="1",when:form.get("asap")==="1" ? soonestDraftTime(env.TIMEZONE) : str("when"),
+    bluesky:form.get("bluesky")==="1",tiktok:form.get("tiktok")==="1",when:form.get("asap")==="1" ? soonestDraftTime(env.TIMEZONE) : str("when"),
     contentKind:str("content_kind") as NewDraftFields["contentKind"],
   };
   try{
@@ -616,8 +616,10 @@ async function draftImageAction(
       const alt = String(input.alt || "").trim();
       const facebook = input.facebook === true;
       const bluesky = input.bluesky === true;
+      const tiktok = input.tiktok === true;
       const version = String(input.expected_updated_at || "");
-      if (!facebook && !bluesky) return fail("Select at least one video target.");
+      if (!facebook && !bluesky && !tiktok) return fail("Select at least one video target.");
+      if (tiktok && !current.tiktok_enabled) return fail("TikTok is not selected for this draft.");
       if (facebook && !current.facebook_enabled) return fail("Facebook is not selected for this draft.");
       if (bluesky && !current.bluesky) return fail("Bluesky is not selected for this draft.");
       if (bluesky && !alt) return fail("Provide alternative text for Bluesky video.");
@@ -625,7 +627,7 @@ async function draftImageAction(
       if (version !== current.updated_at) return fail("The draft changed. Reload.",409);
       if (!(await isStoredOwnerVideo(env.DB,reference,session.login)))
         return fail("This private video is not stored or does not belong to your account.");
-      const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version);
+      const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version,tiktok);
       if (!updated) return fail("A target already has media or the draft changed. Reload.",409);
       await audit(env.DB,session.login,"draft-video-attached",id,
         (facebook?"facebook ":"")+(bluesky?"bluesky":""));
