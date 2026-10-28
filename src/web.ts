@@ -8,7 +8,8 @@ import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, listPos
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
-import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, type NewDraftFields } from "./new-draft.ts";
+import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
+import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
@@ -78,6 +79,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (auth instanceof Response) return auth;
   const session = auth;
 
+  if (path === "/new-draft.js" && req.method === "GET") return new Response(NEW_DRAFT_JS, {headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
   if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
@@ -324,15 +326,23 @@ async function newDraftPage(req: Request,env:Env,session:Session):Promise<Respon
   const fields:NewDraftFields={
     label:str("label"),release:str("release"),message:str("message"),
     bsCaption:str("bs_caption"),facebook:form.get("facebook")==="1",
-    bluesky:form.get("bluesky")==="1",when:str("when"),
+    bluesky:form.get("bluesky")==="1",when:form.get("asap")==="1" ? soonestDraftTime(env.TIMEZONE) : str("when"),
+    contentKind:str("content_kind") as NewDraftFields["contentKind"],
   };
   try{
     const input=parseNewDraft(fields,env.TIMEZONE,session.login);
     const created=await createPost(env.DB,input);
-    await audit(env.DB,session.login,"web-drafted",created.id,created.scheduled_at || undefined);
+    await audit(env.DB,session.login,"web-drafted",created.id,created.scheduled_at || undefined).catch(()=>undefined);
+    if ((req.headers.get("accept") || "").includes("application/json")) {
+      return Response.json({id:created.id,updated_at:created.updated_at,status:"draft"}, {headers:{"Cache-Control":"no-store"}});
+    }
     return redirect("/post/"+encodeURIComponent(created.id));
   }catch(error){
-    return show(fields,error instanceof Error?error.message:"Could not save draft.",400);
+    const message=error instanceof Error?error.message:"Could not save draft.";
+    if ((req.headers.get("accept") || "").includes("application/json")) {
+      return Response.json({error:message},{status:400,headers:{"Cache-Control":"no-store"}});
+    }
+    return show(fields,message,400);
   }
 }
 
