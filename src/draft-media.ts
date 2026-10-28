@@ -26,7 +26,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
     <input type="file" id="media-files" accept=".jpg,.jpeg,.png,.gif,image/jpeg,image/png,image/gif" multiple hidden>
   </div>
   <div id="media-upload-items" class="media-files" aria-live="polite"></div>
-  <p class="hint">Provide descriptive alternative text for each Bluesky image. Maximum 4 Bluesky images, 80 Facebook images. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
+  <p class="hint">Provide descriptive alternative text for each Bluesky image. Maximum 4 Bluesky images, 35 TikTok images or 80 Facebook images. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
   <h2>${post.video || post.bluesky?.video ? "Replace video in this draft" : "Add a video to this draft"}</h2>
@@ -117,7 +117,7 @@ export const DRAFT_MEDIA_JS = `
         status.textContent = "Only JPG, PNG or GIF files between 1 byte and 10 MB can be uploaded.";
         continue;
       }
-      const record = { file, node: null, alt: null, facebook: null, bluesky: null, result: null };
+      const record = { file, node: null, alt: null, facebook: null, bluesky: null, tiktok: null, result: null };
       const item = document.createElement("div");
       item.className = "media-upload-item";
       const preview = document.createElement("img");
@@ -131,13 +131,16 @@ export const DRAFT_MEDIA_JS = `
       targets.className = "media-targets";
       for (const [kind, enabled, label] of [
         ["facebook",panel.dataset.facebook==="1","Facebook"],
-        ["bluesky",panel.dataset.bluesky==="1","Bluesky"]
+        ["bluesky",panel.dataset.bluesky==="1","Bluesky"],
+        ["tiktok",panel.dataset.tiktok==="1","TikTok carousel"]
       ]) {
         if (!enabled) continue;
         const text = document.createElement("label");
         const box = document.createElement("input");
         box.type = "checkbox";box.checked = true;
-        if (kind === "facebook") record.facebook = box; else record.bluesky = box;
+        if (kind === "facebook") record.facebook = box;
+        else if (kind === "bluesky") record.bluesky = box;
+        else record.tiktok = box;
         text.append(box, document.createTextNode(label)); targets.append(text);
       }
       const altLabel = document.createElement("label");
@@ -213,8 +216,9 @@ export const DRAFT_MEDIA_JS = `
       try {
         const facebook = !!item.facebook?.checked;
         const bluesky = !!item.bluesky?.checked;
+        const tiktok = !!item.tiktok?.checked;
         const alt = item.alt.value.trim();
-        if (!facebook && !bluesky) throw new Error("Choose at least one platform.");
+        if (!facebook && !bluesky && !tiktok) throw new Error("Choose at least one platform.");
         if (bluesky && !alt) throw new Error("Bluesky needs image alternative text.");
         item.result.textContent = "Creating private upload...";
         const grant = await api("upload-link", {filename:item.file.name});
@@ -223,7 +227,7 @@ export const DRAFT_MEDIA_JS = `
         const uploadedBody = await uploaded.json().catch(() => ({}));
         if (!uploaded.ok || !uploadedBody.ok) throw new Error(uploadedBody.error || "Upload transfer failed.");
         item.result.textContent = "Attaching to draft...";
-        const result = await api("attach-image", {reference:uploadedBody.reference, alt,facebook,bluesky,expected_updated_at:currentVersion});
+        const result = await api("attach-image", {reference:uploadedBody.reference, alt,facebook,bluesky,tiktok,expected_updated_at:currentVersion});
         currentVersion = result.updated_at;
         item.result.textContent = "Attached";
         completed++;

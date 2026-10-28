@@ -30,8 +30,8 @@ before(async()=>{
 });
 after(async()=>await worker.dispose());
 
-test("video.upload is only posting permission requested, no direct publication scope",()=>{
-  assert.deepEqual([...TIKTOK_SCOPES],["user.info.basic","video.upload"]);
+test("TikTok Login Kit optionally requests both video.upload and video.publish",()=>{
+  assert.deepEqual([...TIKTOK_SCOPES],["user.info.basic","video.upload","video.publish"]);
   assert.equal(tiktokRedirect(env),"https://gs-poster.goofyspook.workers.dev/tiktok/callback");
 });
 test("token ciphertext is authenticated, not readable, and tampering fails",async()=>{
@@ -57,7 +57,7 @@ test("TikTok connection validates session-bound single-use state and stores encr
   };
   try {
     const link=await beginTikTokConnection(env,session,["video.upload","video.publish"]);
-    assert.equal(new URL(link.url).searchParams.get("scope"),"user.info.basic,video.upload");
+    assert.equal(new URL(link.url).searchParams.get("scope"),"user.info.basic,video.upload,video.publish");
     const callbackUrl="https://gs-poster.goofyspook.workers.dev/tiktok/callback?state="+encodeURIComponent(link.state)+"&code=fake-code";
     const req=new Request(callbackUrl,{headers:{Cookie:"__Host-gsp_tiktok_state="+link.state}});
     const result=await finishTikTokConnection(env,session,req);
@@ -159,9 +159,11 @@ test("TikTok-only video drafts remain unapproved and cannot trigger Facebook pos
   });
   assert.equal(await attachDraftVideo(env.DB,noTikTok.id,ref,"",false,false,noTikTok.updated_at,true),null);
 });
-test("TikTok requires video content, not text-only or gallery",()=>{
+test("TikTok supports images and video, not text-only drafts",()=>{
   assert.throws(()=>parseNewDraft({...blankNewDraft(),facebook:false,bluesky:false,
-    tiktok:true,contentKind:"images"},"Europe/Copenhagen","reviewer"),/video only/i);
+    tiktok:true,contentKind:"text"},"Europe/Copenhagen","reviewer"),/select Images or Video/i);
+  assert.equal(parseNewDraft({...blankNewDraft(),facebook:false,bluesky:false,
+    tiktok:true,contentKind:"images"},"Europe/Copenhagen","reviewer").tiktok_enabled,true);
 });
 
 test("TikTok OAuth does not follow token endpoint redirects",async()=>{

@@ -12,6 +12,7 @@ import {
   TIKTOK_SCOPES,tiktokConfigured,tiktokConnection,tiktokRedirect,tiktokStateCookie,
 } from "./tiktok.ts";
 import {tiktokCallbackPlaceholder} from "./public-pages.ts";
+import {saveTikTokVerificationFile,TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
 const redirect=(location:string,cookieValue?:string):Response=>{
   const h=new Headers({Location:location,"Cache-Control":"no-store","Referrer-Policy":"no-referrer"});
@@ -76,6 +77,21 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
     <p>Login Kit redirect URI:</p><code>${esc(tiktokRedirect(env))}</code>
     <p><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/about">Public About page</a></p>
   </div>
+  <div class="card">
+    <h3>TikTok photo and video URL verification</h3>
+    <p>Verify the exact URL prefix below in TikTok Developer Portal → URL properties:</p>
+    <code>${esc(TIKTOK_MEDIA_PREFIX)}</code>
+    <p class="hint">Download TikTok's verification .txt file, then enter its filename and contents here. This creates a public verification file without exposing private draft images.</p>
+    <form method="post" action="/tiktok/verify">
+      <input name="csrf" type="hidden" value="${esc(csrf)}">
+      <label for="tt-verify-filename">Verification filename from TikTok</label>
+      <input type="text" name="filename" id="tt-verify-filename" placeholder="tiktok_...txt" required>
+      <label for="tt-verify-content">Contents of TikTok verification file</label>
+      <textarea name="contents" id="tt-verify-content" maxlength="8192" style="min-height:100px" required></textarea>
+      <button type="submit">Host verification file</button>
+    </form>
+    <p class="hint">Once hosted, complete ownership verification in TikTok. This is required for photo carousels and URL-based video publishing.</p>
+  </div>
   ${conn?
     `<div class="card">
       <h3>Connected TikTok account</h3>
@@ -83,7 +99,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <p><strong>Account identifier:</strong> ${esc(conn.open_id)}</p>
       <p><strong>Granted permissions:</strong> ${esc(granted.join(", "))}</p>
       <p><strong>Connected by:</strong> ${esc(conn.connected_by)}</p>
-      <p class="hint">This page never shows access or refresh tokens. TikTok uploads require a separate editor action. Manual publication happens in TikTok.</p>
+      <p class="hint">This page never shows access or refresh tokens. TikTok uploads require a separate editor action. Manual inbox publication happens in TikTok. Direct Post requires separate user confirmation.</p>
       <form method="post" action="/tiktok/disconnect">
         <input name="csrf" type="hidden" value="${esc(csrf)}">
         <label><input type="checkbox" name="confirm" value="yes" required> Disconnect this TikTok account and revoke its access</label>
@@ -95,11 +111,12 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <p>The TikTok consent screen will show the exact permissions requested. Only select permissions enabled in your TikTok developer application.</p>
       <input name="csrf" type="hidden" value="${esc(csrf)}">
       <p><label><input type="checkbox" checked disabled> Read basic account profile (required)</label></p>
-      <p><label><input type="checkbox" name="video.upload" value="1" checked> Upload videos to your TikTok inbox for manual publication</label></p>
+      <p><label><input type="checkbox" name="video.upload" value="1" checked> Upload videos and photo carousels to your TikTok inbox for manual publication</label></p>
+      <p><label><input type="checkbox" name="video.publish" value="1"> Request direct publishing access (private testing; separate explicit consent required)</label></p>
       <button class="primary" type="submit" ${enabled?"":"disabled"}>Connect TikTok</button>
       <p class="hint">Connecting only grants access. No content is posted until a separate explicit publishing action is implemented and approved.</p>
     </form>`}
-  <p class="hint">The first integration sends videos to your TikTok inbox. You must complete publication in TikTok. Direct scheduled publishing is not yet implemented.</p>`;
+  <p class="hint">Video and photo inbox uploads are available. Direct Post tests require additional permissions and explicit approval; unaudited applications are restricted to private posts. Automatic TikTok scheduling is not enabled.</p>`;
   // Templates contain only escaped account fields or fixed server-defined strings.
   return html(page("TikTok settings",body,{login:session.login}));
 }
@@ -138,6 +155,19 @@ export async function tiktokSettingsAction(
       response.headers.set("Cache-Control","no-store");
       response.headers.set("Referrer-Policy","no-referrer");
       return response;
+    }
+    if(action==="verify") {
+      const filename=String(form.get("filename")||"");
+      const contents=String(form.get("contents")||"");
+      await saveTikTokVerificationFile(env.DB,filename,contents);
+      await audit(env.DB,session.login,"tiktok-verification-hosted",null,
+        "Public URL prefix verification file hosted").catch(()=>undefined);
+      return html(page("TikTok verification file hosted",
+        `<h2>Verification file hosted</h2>
+          <p>Open the public file and complete verification in your TikTok developer portal:</p>
+          <p><a href="${esc(TIKTOK_MEDIA_PREFIX+filename)}">${esc(TIKTOK_MEDIA_PREFIX+filename)}</a></p>
+          <p><a href="/tiktok/settings">Back to TikTok settings</a></p>`,
+        {login:session.login}));
     }
     if(action==="disconnect") {
       if(form.get("confirm")!=="yes")throw new Error("Please confirm disconnection.");

@@ -5,7 +5,7 @@ import {getCookie,randomToken,safeEqual,sha256,cookie} from "./session.ts";
 
 export const TIKTOK_STATE_COOKIE="__Host-gsp_tiktok_state";
 export const TIKTOK_CALLBACK="https://gs-poster.goofyspook.workers.dev/tiktok/callback";
-export const TIKTOK_SCOPES=["user.info.basic","video.upload"] as const;
+export const TIKTOK_SCOPES=["user.info.basic","video.upload","video.publish"] as const;
 const STATE_TTL=600;
 const textEncoder=new TextEncoder(),textDecoder=new TextDecoder();
 const aad=textEncoder.encode("gs-poster/tiktok/v1");
@@ -183,5 +183,37 @@ export async function disconnectTikTok(env:Env):Promise<{revoked:boolean}> {
     .bind(row.token_cipher).run();
   return {revoked};
 }
+/** TikTok mandates a fresh creator-info query before every direct post. */
+export interface TikTokCreatorOptions {
+  creator_username:string;
+  creator_nickname:string;
+  privacy_level_options:string[];
+  comment_disabled:boolean;
+  duet_disabled:boolean;
+  stitch_disabled:boolean;
+  max_video_post_duration_sec:number;
+}
+export async function getTikTokCreatorOptions(env:Env):Promise<TikTokCreatorOptions> {
+  const token=await tiktokAccessToken(env,"video.publish");
+  const response=await fetch("https://open.tiktokapis.com/v2/post/publish/creator_info/query/",{
+    method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json; charset=UTF-8"},
+    body:"{}",redirect:"manual",
+  });
+  const result=await response.json().catch(()=>({})) as {
+    data?:Partial<TikTokCreatorOptions>;error?:{code?:string}
+  };
+  if(!response.ok||result.error?.code!=="ok"||!result.data||
+    !Array.isArray(result.data.privacy_level_options))
+    throw new Error("TikTok creator privacy options could not be retrieved. Reconnect or check Direct Post permissions.");
+  const x=result.data;
+  return {
+    creator_username:String(x.creator_username||""),creator_nickname:String(x.creator_nickname||""),
+    privacy_level_options:(x.privacy_level_options||[]).filter(v=>typeof v==="string"),
+    comment_disabled:x.comment_disabled===true,duet_disabled:x.duet_disabled===true,
+    stitch_disabled:x.stitch_disabled===true,
+    max_video_post_duration_sec:Number(x.max_video_post_duration_sec)||0,
+  };
+}
+
 export function tiktokStateCookie(state:string):string {return cookie(TIKTOK_STATE_COOKIE,state,STATE_TTL);}
 export function clearTikTokStateCookie():string {return cookie(TIKTOK_STATE_COOKIE,"",0);}

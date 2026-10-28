@@ -350,19 +350,20 @@ export async function attachDraftVideo(
 /** Append a stored private image to one or both pending targets, in one D1 transaction. */
 export async function attachDraftImage(
   db: D1Database, id: string, reference: string, alt: string,
-  facebook: boolean, bluesky: boolean, expectedVersion: string,
+  facebook: boolean, bluesky: boolean, expectedVersion: string, tiktok=false,
 ): Promise<string | null> {
   await ensureSchema(db);
-  if (!facebook && !bluesky) throw new Error("Select at least one platform.");
+  if (!facebook && !bluesky && !tiktok) throw new Error("Select at least one platform.");
   if (bluesky && !alt.trim()) throw new Error("Alternative text is required for Bluesky.");
   const next = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
   const blueskyGuard = bluesky ? " AND EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND b.status = 'draft' AND b.video IS NULL AND json_array_length(b.images) < 4)" : "";
   const updatePost = db.prepare(
     "UPDATE posts SET images = CASE WHEN ? THEN json_insert(images, '$[#]', ?) ELSE images END, updated_at = ? " +
     "WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL" +
-    (facebook ? " AND video IS NULL AND json_array_length(images) < 80" : "") + blueskyGuard +
-    (facebook ? "" : " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = posts.id)")
-  ).bind(facebook ? 1 : 0, reference, next, id, expectedVersion);
+    ((facebook||tiktok) ? " AND video IS NULL AND json_array_length(images) < "+(tiktok?35:80) : "") +
+    (tiktok ? " AND tiktok_enabled=1" : "") + blueskyGuard +
+    ((facebook||tiktok) ? "" : " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = posts.id)")
+  ).bind((facebook||tiktok) ? 1 : 0, reference, next, id, expectedVersion);
   const mutations = [updatePost];
   if (bluesky) mutations.push(db.prepare(
     "UPDATE bluesky_targets SET images = json_insert(images, '$[#]', json_object('url', ?, 'alt', ?)) " +

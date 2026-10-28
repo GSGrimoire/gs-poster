@@ -13,6 +13,9 @@ import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { publicPage } from "./public-pages.ts";
 import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
 import { tiktokConnection } from "./tiktok.ts";
+import { tiktokOptionsPage } from "./tiktok-options.ts";
+import { serveTikTokMedia } from "./tiktok-media.ts";
+import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
 import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
@@ -76,6 +79,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     return req.method === "HEAD" ? new Response(null,{status:response.status,headers:response.headers}) : response;
   }
   if (path === "/tiktok/callback") return tiktokCallback(req,env);
+  if (path.startsWith("/tiktok/media/")) return serveTikTokMedia(req,env);
   if (path === "/robots.txt") return new Response(
     "User-agent: *\nAllow: /about\nAllow: /terms\nAllow: /privacy\nDisallow: /\n",
     {headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"public, max-age=3600"}});
@@ -98,7 +102,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
       "Cache-Control":"no-store","X-Content-Type-Options":"nosniff"
     }});
   if (path === "/tiktok/settings" && req.method === "GET") return tiktokSettings(env,session,url.searchParams.get("notice")||"");
-  if (/^\/tiktok\/(connect|disconnect)$/.test(path) && req.method === "POST")
+  if (/^\/tiktok\/(connect|disconnect|verify)$/.test(path) && req.method === "POST")
     return tiktokSettingsAction(req,env,session,path.split("/").pop()!);
 
   if (path === "/new-draft.js" && req.method === "GET") return new Response(NEW_DRAFT_JS, {headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
@@ -109,7 +113,9 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
   if (path === "/new" && (req.method === "GET" || req.method === "POST")) return newDraftPage(req,env,session);
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status))?$/.exec(path);
+  const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
+  if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -412,12 +418,13 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
 
   let actions = "";
   const postVideo=p.video || p.bluesky?.video?.url;
-  if (postVideo && p.tiktok_enabled && !tiktokConn) {
+  if ((postVideo||p.images.length) && p.tiktok_enabled && !tiktokConn) {
     actions += '<div class="card"><h2>TikTok inbox</h2><p>Connect your TikTok account first to send this video for manual publication.</p><p><a href="/tiktok/settings">Connect TikTok</a></p></div>';
   }
-  if (postVideo && p.tiktok_enabled && tiktokConn) {
+  if ((postVideo||p.images.length) && p.tiktok_enabled && tiktokConn) {
+    if(!tiktokTransfer) actions += `<div class="card"><h2>TikTok publishing choices</h2><p>Choose inbox upload or an explicit private Direct Post test for the ${p.video?"video":"photo carousel"}.</p><p><a class="btn" href="/post/${p.id}/tiktok-options">Review TikTok posting options</a></p></div>`;
     if (!tiktokTransfer && ["draft","scheduled","published"].includes(p.status) && !["publishing","published"].includes(p.bluesky?.status||"")) {
-      actions += `<form method="post" action="/post/${p.id}/tiktok-upload" class="card">
+      if(postVideo) actions += `<form method="post" action="/post/${p.id}/tiktok-upload" class="card">
         ${hidden}
         <h2>Send video to TikTok inbox</h2>
         <p>This sends the MP4 to your connected TikTok account for you to review and publish in TikTok. It does not automatically post or schedule a TikTok release.</p>
@@ -431,7 +438,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       actions += `<div class="card"><h2>TikTok inbox transfer</h2>
         <p>Status: <strong>${esc(tiktokTransfer.status.replaceAll("_"," "))}</strong></p>
         ${tiktokTransfer.error ? `<p class="notice err">${esc(tiktokTransfer.error)}</p>` : ""}
-        <p class="hint">Check the TikTok app inbox to complete editing and publication. GS Poster does not publish this video automatically.</p>
+        <p class="hint">${tiktokTransfer.post_mode==="DIRECT_POST"?"TikTok is processing a private Direct Post.":"Open TikTok to finish editing and publishing if this was an inbox transfer."}</p>
         ${tiktokTransfer.publish_id?`<form method="post" action="/post/${p.id}/tiktok-status">
           ${hidden}<label for="tiktok-status-pin">Approval PIN</label>
           <input id="tiktok-status-pin" name="pin" type="password" required>
@@ -573,7 +580,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
         <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""} ${p.tiktok_enabled ? "TikTok inbox (manual publishing)" : ""}</span></div>
       ${p.facebook_enabled ? `<p class="hint">Facebook caption and media</p><p class="caption">${esc(p.message)}</p>${p.video ? videoPreview("facebook") : thumbs}` : ""}
-      ${p.tiktok_enabled && !p.facebook_enabled && p.video ? `<p class="hint">TikTok MP4 preview, upload to inbox only</p>${videoPreview("facebook")}` : ""}
+      ${p.tiktok_enabled && !p.facebook_enabled && p.video ? `<p class="hint">TikTok video preview</p>${videoPreview("facebook")}` : ""}
+      ${p.tiktok_enabled && !p.facebook_enabled && !p.video && p.images.length ? `<p class="hint">TikTok photo carousel (${p.images.length} images)</p>${thumbs}` : ""}
       ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
         ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
         ${bs.video ? `<p class="hint">Bluesky video: ${esc(bs.video.alt)}</p>${videoPreview("bluesky")}` : ""}
@@ -647,8 +655,10 @@ async function draftImageAction(
       const alt = String(input.alt || "").trim();
       const facebook = input.facebook === true;
       const bluesky = input.bluesky === true;
+      const tiktok = input.tiktok === true;
       const expected = String(input.expected_updated_at || "");
-      if (!facebook && !bluesky) return fail("Select Facebook, Bluesky or both.");
+      if (!facebook && !bluesky && !tiktok) return fail("Select Facebook, Bluesky or TikTok.");
+      if (tiktok && !current.tiktok_enabled) return fail("TikTok is not a selected draft target.");
       if (facebook && !current.facebook_enabled) return fail("Facebook is not a selected draft target.");
       if (bluesky && !current.bluesky) return fail("Bluesky is not a selected draft target.");
       if (alt.length > 1000) return fail("Alternative text exceeds 1,000 characters.");
@@ -656,7 +666,7 @@ async function draftImageAction(
       if (!expected || expected !== current.updated_at) return fail("Draft changed. Reload before attaching.",409);
       if (!(await isStoredOwnerUpload(env.DB,reference,session.login)))
         return fail("The private image is missing, incomplete, or belongs to a different session.", 400);
-      const updated = await attachDraftImage(env.DB,id,reference,alt,facebook,bluesky,expected);
+      const updated = await attachDraftImage(env.DB,id,reference,alt,facebook,bluesky,expected,tiktok);
       if (!updated) return fail("Draft changed or image limit exceeded. Reload.",409);
       await audit(env.DB,session.login,"draft-media-attached",id,
         (facebook?"facebook ":"")+(bluesky?"bluesky":""));
@@ -692,6 +702,36 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    if (action === "tiktok-send") {
+      if(form.get("confirm_tiktok")!=="1")
+        return postPage(env,session,id,{error:"Confirm TikTok transfer consent."},400);
+      const mode=String(form.get("post_mode")||"");
+      const mediaType=String(form.get("media_type")||"");
+      if(mode==="DIRECT_POST"&&form.get("confirm_direct")!=="1")
+        return postPage(env,session,id,{error:"Direct publication requires separate explicit consent."},400);
+      if(mode!=="MEDIA_UPLOAD"&&mode!=="DIRECT_POST"||
+         mediaType!=="PHOTO"&&mediaType!=="VIDEO")
+        return postPage(env,session,id,{error:"Invalid TikTok publishing option."},400);
+      const options:TikTokPostOptions={
+        mode,mediaType,caption:String(form.get("tiktok_caption")||""),
+        title:String(form.get("tiktok_title")||""),
+        privacy:String(form.get("privacy_level")||""),
+        disableComment:form.get("disable_comment")==="1",
+        disableDuet:form.get("disable_duet")==="1",
+        disableStitch:form.get("disable_stitch")==="1",
+        autoMusic:form.get("auto_music")==="1",
+        brandOrganic:form.get("brand_organic")==="1",
+        brandContent:form.get("brand_content")==="1",
+        aiGenerated:form.get("is_aigc")==="1",
+      };
+      const version=String(form.get("expected_updated_at")||"");
+      const result=mode==="MEDIA_UPLOAD"&&mediaType==="VIDEO"
+        ? await startTikTokInboxTransfer(env,id,version,session.login)
+        : await startTikTokContentTransfer(env,id,version,session.login,options);
+      return postPage(env,session,id,{notice:
+        "TikTok "+result.media_type+" transfer started. "+
+        (mode==="DIRECT_POST"?"This private post is processing.":"Complete publication in the TikTok app.")});
+    }
     if (action === "tiktok-upload") {
       if (form.get("confirm_tiktok") !== "1")
         return postPage(env,session,id,{error:"Confirm that TikTok publication is manual."},400);

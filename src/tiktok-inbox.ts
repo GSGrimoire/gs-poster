@@ -11,6 +11,7 @@ export interface TikTokInboxTransfer {
   post_id:string;status:TikTokInboxStatus;publish_id:string|null;
   media_ref:string;created_at:string;updated_at:string;sent_by:string;error:string|null;
   remote_status:string|null;
+  post_mode?: "MEDIA_UPLOAD"|"DIRECT_POST"; media_type?: "VIDEO"|"PHOTO";
 }
 const API="https://open.tiktokapis.com";
 export function allowedTikTokUploadUrl(value:string):boolean {
@@ -29,14 +30,21 @@ export async function ensureTikTokInboxSchema(db:D1Database):Promise<void> {
     "(post_id TEXT PRIMARY KEY,status TEXT NOT NULL,publish_id TEXT,media_ref TEXT NOT NULL,"+
     "created_at TEXT NOT NULL,updated_at TEXT NOT NULL,sent_by TEXT NOT NULL,error TEXT,remote_status TEXT)"
   ).run();
+  const columns=await db.prepare("PRAGMA table_info(tiktok_inbox_transfers)").all<{name:string}>();
+  for(const [col,definition] of [["post_mode","TEXT NOT NULL DEFAULT 'MEDIA_UPLOAD'"],["media_type","TEXT NOT NULL DEFAULT 'VIDEO'"]]) {
+    if(!columns.results.some(x=>x.name===col)) {
+      try{await db.prepare("ALTER TABLE tiktok_inbox_transfers ADD COLUMN "+col+" "+definition).run();}
+      catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
+    }
+  }
 }
 export async function getTikTokInboxTransfer(db:D1Database,id:string):Promise<TikTokInboxTransfer|null> {
   await ensureTikTokInboxSchema(db);
   return await db.prepare("SELECT * FROM tiktok_inbox_transfers WHERE post_id=?")
     .bind(id).first<TikTokInboxTransfer>()??null;
 }
-async function postJson<T>(env:Env,path:string,payload:object):Promise<T> {
-  const access=await tiktokAccessToken(env,"video.upload");
+async function postJson<T>(env:Env,path:string,payload:object,scope:"video.upload"|"video.publish"="video.upload"):Promise<T> {
+  const access=await tiktokAccessToken(env,scope);
   const res=await fetch(API+path,{
     method:"POST",
     headers:{"Authorization":"Bearer "+access,"Content-Type":"application/json; charset=UTF-8"},
@@ -114,7 +122,7 @@ export async function refreshTikTokInboxTransfer(env:Env,id:string,actor:string)
   const row=await getTikTokInboxTransfer(env.DB,id);
   if(!row||!row.publish_id)throw new Error("No TikTok publish ID is recorded for this post.");
   const data=await postJson<{status?:string;fail_reason?:string}>(
-    env,"/v2/post/publish/status/fetch/",{publish_id:row.publish_id});
+    env,"/v2/post/publish/status/fetch/",{publish_id:row.publish_id},row.post_mode==="DIRECT_POST"?"video.publish":"video.upload");
   const remote=String(data.status||"");
   const status:TikTokInboxStatus=remote==="SEND_TO_USER_INBOX"?"inbox_ready":
     remote==="PUBLISH_COMPLETE"?"published_by_creator":
