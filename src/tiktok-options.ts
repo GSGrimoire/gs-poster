@@ -55,6 +55,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const inbox=scopes.includes("video.upload")?`<form method="post" action="/post/${esc(p.id)}/tiktok-send" class="card">
       <h2>Send to TikTok inbox</h2>
       <p>Send ${type==="PHOTO"?"the photo carousel":"the video"} to TikTok for manual editing and publication.</p>
+      ${type==="VIDEO"?'<p class="hint">TikTok does not accept video inbox captions through this endpoint. Set the final caption inside TikTok.</p>':""}
       ${fields("MEDIA_UPLOAD")}
       <button class="primary" type="submit">Send to TikTok inbox</button>
     </form>`:
@@ -71,10 +72,10 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
       <label for="tt-privacy">Privacy choices reported by TikTok</label>
       <select name="privacy_level" id="tt-privacy" required>${privacy}</select>
       <p class="hint">Comments ${creator.comment_disabled?"disabled":"available"}, Duets ${creator.duet_disabled?"disabled":"available"}, Stitches ${creator.stitch_disabled?"disabled":"available"}.</p>
-      <label><input type="checkbox" name="disable_comment" value="1" ${creator.comment_disabled?"checked disabled":""}> Disable comments</label>
+      <label><input type="checkbox" name="disable_comment" value="1" ${creator.comment_disabled?"checked":""}> Disable comments</label>
       ${type==="VIDEO"?`
-        <label><input type="checkbox" name="disable_duet" value="1" ${creator.duet_disabled?"checked disabled":""}> Disable Duets</label>
-        <label><input type="checkbox" name="disable_stitch" value="1" ${creator.stitch_disabled?"checked disabled":""}> Disable Stitches</label>`:
+        <label><input type="checkbox" name="disable_duet" value="1" ${creator.duet_disabled?"checked":""}> Disable Duets</label>
+        <label><input type="checkbox" name="disable_stitch" value="1" ${creator.stitch_disabled?"checked":""}> Disable Stitches</label>`:
         '<label><input type="checkbox" name="auto_music" value="1"> Add TikTok recommended music</label>'}
       <label><input type="checkbox" name="brand_organic" value="1"> Promoting my own business</label>
       <label><input type="checkbox" name="brand_content" value="1"> Paid third-party partnership</label>
