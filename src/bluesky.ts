@@ -114,8 +114,30 @@ async function uploadImage(env: Env, session: Session, url: string): Promise<unk
 }
 
 /** Stable record keys make retries safe even if Bluesky accepted a write but the response was lost. */
+const TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";
+
+/** AT Protocol feed post rkeys must be 13-character time identifiers (TIDs).
+ * The GS Poster ID encodes creation milliseconds, which lets retries derive the
+ * same key rather than creating duplicate records.
+ */
 export function blueskyRecordKey(id: string, card = false): string {
-  return (card ? "gspcard" : "gsp") + id.replace(/^p_/, "");
+  const match = /^p_([0-9a-z]+)([0-9a-f]{10})$/.exec(id);
+  if (!match) throw new Error("Invalid GS Poster post ID for Bluesky.");
+  const millis = parseInt(match[1], 36);
+  if (!Number.isSafeInteger(millis)) throw new Error("Invalid GS Poster creation timestamp.");
+  const micros = BigInt(millis) * 1000n;
+  // 10-bit deterministic clock component, with a separate value for reply cards.
+  let hash = 0;
+  for (const char of match[2]) hash = (Math.imul(hash, 33) ^ char.charCodeAt(0)) & 1023;
+  const clock = (hash & 1022) | (card ? 1 : 0);
+  let tid = (micros << 10n) | BigInt(clock);
+  let encoded = "";
+  for (let i = 0; i < 13; i++) {
+    encoded = TID_ALPHABET[Number(tid & 31n)] + encoded;
+    tid >>= 5n;
+  }
+  if (tid !== 0n) throw new Error("GS Poster timestamp is outside the TID range.");
+  return encoded;
 }
 
 async function createRecord(session: Session, rkey: string, record: Record<string, unknown>): Promise<RecordResult> {
