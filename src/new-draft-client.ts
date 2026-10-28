@@ -40,7 +40,7 @@ export const NEW_DRAFT_JS = String.raw`
     const k = kind(), fb = target("facebook"), bs = target("bluesky");
     $("new-images-panel").hidden = k !== "images";
     $("new-video-panel").hidden = k !== "video";
-    $("new-facebook-panel").hidden = !fb;
+    $("new-facebook-panel").hidden = !(fb || target("tiktok"));
     $("new-bluesky-panel").hidden = !bs;
     $("new-video-alt-label").hidden = !(bs && k === "video");
     imageList.querySelectorAll("input").forEach(input => input.required = bs && k === "images");
@@ -99,11 +99,11 @@ export const NEW_DRAFT_JS = String.raw`
 
   function verify(k,bs) {
     if (!target("facebook") && !bs && !target("tiktok")) throw new Error("Select Facebook, Bluesky, or TikTok.");
-    if(target("tiktok") && k!=="video") throw new Error("TikTok currently supports video uploads only.");
+    if(target("tiktok") && !["video","images"].includes(k)) throw new Error("TikTok requires video or images.");
     if (k === "images") {
       if (!images.length) throw new Error("Choose at least one image.");
-      if (images.length > (bs ? 4 : 80))
-        throw new Error(bs ? "Bluesky permits up to four images." : "Facebook permits up to 80 images.");
+      if (images.length > (bs ? 4 : (target("tiktok")?35:80)))
+        throw new Error(bs ? "Bluesky permits up to four images." : (target("tiktok") ? "TikTok permits up to 35 images." : "Facebook permits up to 80 images."));
       for (const [i, item] of images.entries()) {
         if (!/\.(jpe?g|png|gif)$/i.test(item.file.name) || item.file.size <= 0 ||
             item.file.size > 10 * 1024 * 1024)
@@ -178,7 +178,7 @@ export const NEW_DRAFT_JS = String.raw`
         for (const [i,item] of images.entries()) {
           if (item.attached) continue;
           statusText("Uploading image "+(i+1)+" of "+images.length+"...");
-          await upload(item.file,"images",item.alt.value.trim(),fb,bs);
+          await upload(item.file,"images",item.alt.value.trim(),fb,bs,target("tiktok"));
           item.attached = true;
         }
       } else if (k === "video" && !videoAttached) {
