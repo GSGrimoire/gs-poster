@@ -10,6 +10,7 @@ import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
+import { publicPage, tiktokCallbackPlaceholder } from "./public-pages.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
@@ -64,8 +65,18 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
-  if (path === "/health") return Response.json({ ok: true });
-  if (path === "/robots.txt") return new Response("User-agent: *\nDisallow: /\n");
+  if (path === "/health") return Response.json({ok:true});
+  // Public legal/app-review URLs are deliberately outside the GitHub login wall.
+  if (path === "/about" || path === "/terms" || path === "/privacy") {
+    if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed",{status:405,headers:{"Allow":"GET, HEAD"}});
+    const response = publicPage(path.slice(1) as "about" | "terms" | "privacy");
+    return req.method === "HEAD" ? new Response(null,{status:response.status,headers:response.headers}) : response;
+  }
+  if (path === "/tiktok/callback") return tiktokCallbackPlaceholder(req);
+  if (path === "/robots.txt") return new Response(
+    "User-agent: *\\nAllow: /about\\nAllow: /terms\\nAllow: /privacy\\nDisallow: /\\n",
+    {headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"public, max-age=3600"}});
+
   if (path === "/login") return login(req, env);
   if (path === "/callback") return callback(req, env);
   if (path === "/logout") {
