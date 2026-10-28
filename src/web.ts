@@ -4,10 +4,12 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
+import { audit, attachDraftImage, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
+import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
+import { createUpload, isStoredOwnerUpload } from "./upload.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
 import {
@@ -75,6 +77,9 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (auth instanceof Response) return auth;
   const session = auth;
 
+  if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+  const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image)$/.exec(path);
+  if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
 
@@ -462,8 +467,60 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
       <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} · ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} · ${esc(p.id)}</p>
     </div>
+    ${draftMediaPanel(p, csrf)}
     ${actions}`;
   return html(page(p.label || "Post", body, { login: session.login }), { status });
+}
+
+/** Private draft upload actions are authenticated, same-origin and CSRF checked.
+ * They never invoke approval or release paths. */
+async function draftImageAction(
+  req: Request, env: Env, session: Session, id: string, action: string,
+): Promise<Response> {
+  const fail = (error: string, status = 400) =>
+    Response.json({error}, {status, headers:{"Cache-Control":"no-store"}});
+  if (!sameOrigin(req)) return fail("Cross-site upload refused.", 403);
+  if (Number(req.headers.get("content-length") || 0) > 8192) return fail("Request too large.", 413);
+  const input = await req.json().catch(() => null) as Record<string, unknown> | null;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return fail("Invalid upload request.");
+  if (!(await checkCsrf(env, session, String(input.csrf || "")))) return fail("Session expired. Reload the draft.", 403);
+  const current = await getPost(env.DB,id);
+  if (!current) return fail("Post not found.",404);
+  if (!["draft","rejected"].includes(current.status) || current.approved_at)
+    return fail("Media cannot be changed after approval.",409);
+  try {
+    if (action === "upload-link") {
+      const filename = String(input.filename || "");
+      if (filename.length < 3 || filename.length > 200 ||
+          !/\.(jpe?g|png|gif)$/i.test(filename)) return fail("Select a JPG, PNG or GIF image.");
+      const grant = await createUpload(env, new URL(req.url).origin, {filename,actor:session.login});
+      return Response.json({reference:grant.reference,upload_url:grant.upload_url,max_bytes:grant.max_bytes},
+        {headers:{"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}});
+    }
+    if (action === "attach-image") {
+      const reference = String(input.reference || "");
+      const alt = String(input.alt || "").trim();
+      const facebook = input.facebook === true;
+      const bluesky = input.bluesky === true;
+      const expected = String(input.expected_updated_at || "");
+      if (!facebook && !bluesky) return fail("Select Facebook, Bluesky or both.");
+      if (facebook && !current.facebook_enabled) return fail("Facebook is not a selected draft target.");
+      if (bluesky && !current.bluesky) return fail("Bluesky is not a selected draft target.");
+      if (alt.length > 1000) return fail("Alternative text exceeds 1,000 characters.");
+      if (bluesky && !alt) return fail("Bluesky requires image alternative text.");
+      if (!expected || expected !== current.updated_at) return fail("Draft changed. Reload before attaching.",409);
+      if (!(await isStoredOwnerUpload(env.DB,reference,session.login)))
+        return fail("The private image is missing, incomplete, or belongs to a different session.", 400);
+      const updated = await attachDraftImage(env.DB,id,reference,alt,facebook,bluesky,expected);
+      if (!updated) return fail("Draft changed or image limit exceeded. Reload.",409);
+      await audit(env.DB,session.login,"draft-media-attached",id,
+        (facebook?"facebook ":"")+(bluesky?"bluesky":""));
+      return Response.json({ok:true,updated_at:updated},{headers:{"Cache-Control":"no-store"}});
+    }
+    return fail("Unknown media action.",404);
+  } catch(error) {
+    return fail(error instanceof Error ? error.message : "Upload failed.",400);
+  }
 }
 
 async function postAction(req: Request, env: Env, session: Session, id: string, action: string): Promise<Response> {
