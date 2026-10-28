@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editFbCaption, rescheduleFbPost } from "../src/facebook.ts";
+import { editFbCaption, rescheduleFbPost, normalizeCaption } from "../src/facebook.ts";
 import type { Env } from "../src/env.ts";
 
 const env = {FB_PAGE_ID:"page",FB_PAGE_TOKEN:"fake-for-test",
@@ -51,4 +51,23 @@ test("Facebook refuses a schedule that does not match the locally saved version"
     await assert.rejects(rescheduleFbPost(env,"page_post",1980000000,1980010000),/differs/);
     assert.equal(writes,0);
   }finally{globalThis.fetch=originalFetch;}
+});
+
+test("Facebook caption normalization accepts browser CRLF and Meta line breaks", async () => {
+  assert.equal(normalizeCaption("first\r\nsecond   \r\n"),"first\nsecond");
+  const originalFetch=globalThis.fetch;
+  let message="first\nsecond";
+  let writes=0;
+  globalThis.fetch=async (_input,init)=>{
+    if (init?.method==="POST") {
+      writes++;
+      message=String((init.body as URLSearchParams).get("message")||"").replace(/\r\n/g,"\n").trimEnd();
+    }
+    return Response.json({is_published:false,scheduled_publish_time:1980000000,message});
+  };
+  try {
+    await editFbCaption(env,"page_post",1980000000,"first\r\nsecond  \n","first\r\nchanged  \r\n");
+    assert.equal(message,"first\nchanged");
+    assert.equal(writes,1);
+  } finally {globalThis.fetch=originalFetch;}
 });
