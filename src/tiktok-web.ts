@@ -8,7 +8,7 @@ import {checkCsrf,csrfToken,readSession,type Session} from "./session.ts";
 import {isSameOrigin} from "./origin.ts";
 import {
   beginTikTokConnection,clearTikTokStateCookie,disconnectTikTok,
-  finishTikTokConnection,queryTikTokCreatorInfo,
+  finishTikTokConnection,
   TIKTOK_SCOPES,tiktokConfigured,tiktokConnection,tiktokRedirect,tiktokStateCookie,
 } from "./tiktok.ts";
 import {tiktokCallbackPlaceholder} from "./public-pages.ts";
@@ -66,12 +66,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <p><strong>Account identifier:</strong> ${esc(conn.open_id)}</p>
       <p><strong>Granted permissions:</strong> ${esc(granted.join(", "))}</p>
       <p><strong>Connected by:</strong> ${esc(conn.connected_by)}</p>
-      <p class="hint">This page never shows access or refresh tokens. Direct publishing and scheduled TikTok delivery are not activated.</p>
-      ${granted.includes("video.publish")?
-      `<form method="post" action="/tiktok/creator-info">
-        <input name="csrf" type="hidden" value="${esc(csrf)}">
-        <button type="submit">Check TikTok creator publishing options</button>
-      </form>`:""}
+      <p class="hint">This page never shows access or refresh tokens. TikTok uploads require a separate editor action. Manual publication happens in TikTok.</p>
       <form method="post" action="/tiktok/disconnect">
         <input name="csrf" type="hidden" value="${esc(csrf)}">
         <label><input type="checkbox" name="confirm" value="yes" required> Disconnect this TikTok account and revoke its access</label>
@@ -83,12 +78,11 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <p>The TikTok consent screen will show the exact permissions requested. Only select permissions enabled in your TikTok developer application.</p>
       <input name="csrf" type="hidden" value="${esc(csrf)}">
       <p><label><input type="checkbox" checked disabled> Read basic account profile (required)</label></p>
-      <p><label><input type="checkbox" name="video.upload" value="1" checked> Upload video drafts to the TikTok inbox</label></p>
-      <p><label><input type="checkbox" name="video.publish" value="1" checked> Allow direct video publication</label></p>
+      <p><label><input type="checkbox" name="video.upload" value="1" checked> Upload videos to your TikTok inbox for manual publication</label></p>
       <button class="primary" type="submit" ${enabled?"":"disabled"}>Connect TikTok</button>
       <p class="hint">Connecting only grants access. No content is posted until a separate explicit publishing action is implemented and approved.</p>
     </form>`}
-  <p class="hint">For real public publishing, TikTok app review, content posting approval, and creator privacy controls are still required.</p>`;
+  <p class="hint">The first integration sends videos to your TikTok inbox. You must complete publication in TikTok. Direct scheduled publishing is not yet implemented.</p>`;
   // Templates contain only escaped account fields or fixed server-defined strings.
   return html(page("TikTok settings",body,{login:session.login}));
 }
@@ -117,16 +111,6 @@ export async function tiktokSettingsAction(
       await audit(env.DB,session.login,"tiktok-account-disconnected",null,
         result.revoked?"remote authorization revoked":"remote revocation unconfirmed").catch(()=>undefined);
       return redirect(result.revoked?"/tiktok/settings?notice=disconnected":"/tiktok/settings?notice=revoke-warning");
-    }
-    if(action==="creator-info") {
-      const info=await queryTikTokCreatorInfo(env);
-      const body=`<p><a href="/tiktok/settings">← TikTok settings</a></p>
-        <h2>TikTok creator check</h2>
-        <p><strong>Account:</strong> ${esc(info.creator_nickname)} (${esc(info.creator_username)})</p>
-        <p><strong>Allowed privacy settings:</strong> ${esc(info.privacy_level_options.join(", "))}</p>
-        <p><strong>Maximum video length:</strong> ${Number(info.max_video_post_duration_sec)||0} seconds</p>
-        <p class="hint">This is a read-only check. It does not upload or publish any content.</p>`;
-      return html(page("TikTok creator check",body,{login:session.login}));
     }
     return new Response("Not found",{status:404});
   }catch(error) {
