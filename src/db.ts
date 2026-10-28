@@ -221,7 +221,7 @@ export async function updateCalendarTime(
   db: D1Database, id: string, when: string, version: string, approved: boolean,
 ): Promise<boolean> {
   await ensureSchema(db);
-  const now = new Date().toISOString();
+  const now = new Date(Math.max(Date.now(), Date.parse(version) + 1)).toISOString();
   const sql = approved
     ? "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status = 'scheduled' AND approved_at IS NOT NULL"
     : "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL";
