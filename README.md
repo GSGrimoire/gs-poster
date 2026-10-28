@@ -17,7 +17,7 @@ GS Poster exposes public product and legal information for external platform rev
 - [Privacy Policy](https://gs-poster.goofyspook.workers.dev/privacy)
 - Reserved Login Kit callback: `https://gs-poster.goofyspook.workers.dev/tiktok/callback`
 
-The callback is reserved only, **not a working TikTok sign-in**. No TikTok tokens or permissions are in place, and GS Poster does not yet publish to TikTok. Public photo URLs must not be implemented by exposing private unapproved media. See [TIKTOK_SETUP.md](./TIKTOK_SETUP.md) for domain verification, permissions, privacy contact and public-website requirements.
+TikTok Login Kit and manual inbox uploads are implemented, with optional private-only Direct Post tests for videos and photo carousels. TikTok does not follow GS Poster's calendar automatically. All TikTok transfers require explicit approval PIN and only granted TikTok permissions are used. Photos and direct-post videos require URL-prefix verification for short-lived public media links. See [TIKTOK_SETUP.md](./TIKTOK_SETUP.md) and [TIKTOK_APP_REVIEW.md](./TIKTOK_APP_REVIEW.md) for configuration and app-review limitations.
 
 ## Who can do what
 
