@@ -648,7 +648,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
 
 async function mediaProxy(env: Env, id: string, n: number): Promise<Response> {
   const p = await getPost(env.DB, id);
-  const url = p?.images[n];
+  const url = p?.images[n] ?? p?.bluesky?.images[n]?.url;
   if (!url) return new Response("Not found", { status: 404 });
   try {
     const img = await fetchImage(env, url);
