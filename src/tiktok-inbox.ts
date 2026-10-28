@@ -11,6 +11,7 @@ export interface TikTokInboxTransfer {
   post_id:string;status:TikTokInboxStatus;publish_id:string|null;
   media_ref:string;created_at:string;updated_at:string;sent_by:string;error:string|null;
   remote_status:string|null;
+  post_mode?: "MEDIA_UPLOAD"|"DIRECT_POST"; media_type?: "VIDEO"|"PHOTO";
 }
 const API="https://open.tiktokapis.com";
 export function allowedTikTokUploadUrl(value:string):boolean {
@@ -29,6 +30,13 @@ export async function ensureTikTokInboxSchema(db:D1Database):Promise<void> {
     "(post_id TEXT PRIMARY KEY,status TEXT NOT NULL,publish_id TEXT,media_ref TEXT NOT NULL,"+
     "created_at TEXT NOT NULL,updated_at TEXT NOT NULL,sent_by TEXT NOT NULL,error TEXT,remote_status TEXT)"
   ).run();
+  const columns=await db.prepare("PRAGMA table_info(tiktok_inbox_transfers)").all<{name:string}>();
+  for(const [col,definition] of [["post_mode","TEXT NOT NULL DEFAULT 'MEDIA_UPLOAD'"],["media_type","TEXT NOT NULL DEFAULT 'VIDEO'"]]) {
+    if(!columns.results.some(x=>x.name===col)) {
+      try{await db.prepare("ALTER TABLE tiktok_inbox_transfers ADD COLUMN "+col+" "+definition).run();}
+      catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
+    }
+  }
 }
 export async function getTikTokInboxTransfer(db:D1Database,id:string):Promise<TikTokInboxTransfer|null> {
   await ensureTikTokInboxSchema(db);
