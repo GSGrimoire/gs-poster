@@ -43,8 +43,8 @@ export async function getTikTokInboxTransfer(db:D1Database,id:string):Promise<Ti
   return await db.prepare("SELECT * FROM tiktok_inbox_transfers WHERE post_id=?")
     .bind(id).first<TikTokInboxTransfer>()??null;
 }
-async function postJson<T>(env:Env,path:string,payload:object):Promise<T> {
-  const access=await tiktokAccessToken(env,"video.upload");
+async function postJson<T>(env:Env,path:string,payload:object,scope:"video.upload"|"video.publish"="video.upload"):Promise<T> {
+  const access=await tiktokAccessToken(env,scope);
   const res=await fetch(API+path,{
     method:"POST",
     headers:{"Authorization":"Bearer "+access,"Content-Type":"application/json; charset=UTF-8"},
@@ -122,7 +122,7 @@ export async function refreshTikTokInboxTransfer(env:Env,id:string,actor:string)
   const row=await getTikTokInboxTransfer(env.DB,id);
   if(!row||!row.publish_id)throw new Error("No TikTok publish ID is recorded for this post.");
   const data=await postJson<{status?:string;fail_reason?:string}>(
-    env,"/v2/post/publish/status/fetch/",{publish_id:row.publish_id});
+    env,"/v2/post/publish/status/fetch/",{publish_id:row.publish_id},row.post_mode==="DIRECT_POST"?"video.publish":"video.upload");
   const remote=String(data.status||"");
   const status:TikTokInboxStatus=remote==="SEND_TO_USER_INBOX"?"inbox_ready":
     remote==="PUBLISH_COMPLETE"?"published_by_creator":
