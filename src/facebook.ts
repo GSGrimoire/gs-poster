@@ -79,6 +79,42 @@ export async function uploadUnpublishedPhoto(env: Env, img: ImageBytes, forSched
   return String(res.id);
 }
 
+/** Upload a private MP4 directly to the Page video endpoint, without a public file URL.
+ * Returns a Video ID, which is distinct from a normal Page feed post ID.
+ */
+export async function createPageVideo(
+  env: Env,
+  input: { bytes: Uint8Array; title: string; description: string; scheduledUnix?: number },
+): Promise<string> {
+  const { pageId } = need(env);
+  if (!input.bytes.length || input.bytes.length > 20_000_000) {
+    throw new FacebookError("Video must be between 1 byte and 20 MB.");
+  }
+  const form = new FormData();
+  form.set("source", new Blob([new Uint8Array(input.bytes)], { type:"video/mp4" }), "gs-poster.mp4");
+  form.set("title", input.title.slice(0,255) || "GS Grimoire video");
+  form.set("description", input.description);
+  if (input.scheduledUnix !== undefined) {
+    form.set("published", "false");
+    form.set("scheduled_publish_time", String(input.scheduledUnix));
+  }
+  const result = await post(env, pageId + "/videos", form);
+  if (!result.id) throw new FacebookError("Facebook did not return a video identifier. Check Meta before retrying.");
+  return String(result.id);
+}
+
+/** Video objects expose 'published' and 'description', unlike feed posts. */
+export async function getPageVideoInfo(env: Env, videoId: string): Promise<PostInfo | null> {
+  try {
+    const raw = await get(env, videoId, { fields: "published,scheduled_publish_time,permalink_url,description" });
+    return {is_published: raw.published === true, scheduled_publish_time: raw.scheduled_publish_time,
+      permalink_url: raw.permalink_url, message: raw.description};
+  } catch(error) {
+    if (error instanceof FacebookError && (error.code === 100 || error.status === 404)) return null;
+    throw error;
+  }
+}
+
 export interface FeedPostInput {
   message: string;
   link?: string | null;
