@@ -68,7 +68,7 @@ test("publishes images and Patreon card as separate posts in one thread", async 
     assert.equal(created[1].record.embed.$type, "app.bsky.embed.external");
     assert.deepEqual(created[1].record.reply.parent, {
       uri: "at://did:plc:example/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1"),
-      cid: "cid-gspabc12",
+      cid: "cid-" + blueskyRecordKey("p_mvrslvbab2230330c1"),
     });
     assert.ok(result.permalink.endsWith(blueskyRecordKey("p_mvrslvbab2230330c1")));
   } finally {
