@@ -4,16 +4,17 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
+import { audit, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
+import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
 import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
   markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
 } from "./facebook-queue.ts";
-import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook } from "./publish.ts";
+import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost } from "./publish.ts";
 import {
   checkCsrf,
   cookie,
@@ -74,9 +75,10 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (auth instanceof Response) return auth;
   const session = auth;
 
-  if (path === "/" && req.method === "GET") return dashboard(env, session);
+  if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+  if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -257,9 +259,15 @@ function postCard(env: Env, p: Post): string {
     ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
 
-async function dashboard(env: Env, session: Session): Promise<Response> {
+async function dashboard(env: Env, session: Session, requestedWeek: string | null): Promise<Response> {
   await refreshScheduled(env).catch(() => undefined);
   const posts = await listPosts(env.DB, { limit: 100 });
+  const currentDate = toLocalInput(new Date(), env.TIMEZONE).slice(0, 10);
+  let start = weekStart(currentDate);
+  try { if (requestedWeek) start = weekStart(requestedWeek); } catch { /* invalid date: show current week */ }
+  const range = weekRange(start, env.TIMEZONE);
+  const onCalendar = await listCalendarPosts(env.DB, range.from, range.to);
+  const calendar = renderCalendar(env, onCalendar, await csrfToken(env, session), start);
   const drafts = posts.filter((p) => p.status === "draft").reverse();
   const scheduled = posts.filter((p) => p.status === "scheduled").sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
   const other = posts.filter((p) => !["draft", "scheduled"].includes(p.status)).slice(0, 15);
@@ -271,7 +279,9 @@ async function dashboard(env: Env, session: Session): Promise<Response> {
 
   const body = `
     ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
-    ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts. Claude's drafts show up here.")}
+    <h2>Weekly planner</h2>
+    ${calendar}
+    ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
     ${section("Scheduled", scheduled, "Nothing scheduled.")}
     ${section("Recent", other, "Nothing yet.")}
     <h2>Activity</h2>
@@ -373,6 +383,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
   }
+  if ((p.status === "scheduled" || p.status === "draft" || p.status === "rejected") && p.scheduled_at) {
+    actions += `<form method="post" action="/post/${p.id}/reschedule" class="card">${hidden}
+      <h2>Change release time</h2>
+      <p class="hint">Moves the pending schedule without creating another post. Facebook and Bluesky are updated together when both are pending.</p>
+      <label for="move-time">New release time (${esc(env.TIMEZONE)})</label>
+      <input id="move-time" type="datetime-local" name="when" value="${esc(whenValue)}" required>
+      <label for="move-pin">Approval PIN</label><input id="move-pin" type="password" name="pin" required autocomplete="off">
+      <div class="row"><button class="primary">Save new time</button></div></form>`;
+  }
   // Failed Facebook requests can have succeeded remotely despite a lost response.
   // Both recovery actions require a fresh PIN and explicit human reconciliation.
   if (p.status === "failed" && p.facebook_enabled && p.images.length <= BULK_FACEBOOK_THRESHOLD && p.approved_at && !p.fb_post_id) {
@@ -410,7 +429,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   }
 
   const body = `
-    <p><a href="/">← All posts</a></p>
+    <p><a href="/">← All posts and calendar</a></p>
     ${state.error ? `<div class="notice err">${esc(state.error)}</div>` : ""}
     ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
     ${p.error ? `<div class="notice err">Publishing error: ${esc(p.error)}</div>` : ""}
@@ -493,6 +512,21 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       return postPage(env, session, id, {
         notice: retried ? "Facebook-only retry completed." : "Facebook retry failed. Check Facebook before another attempt.",
       });
+    }
+    if (action === "reschedule") {
+      const current = await getPost(env.DB, id);
+      if (!current || current.updated_at !== String(form.get("expected_updated_at") || "")) {
+        return postPage(env, session, id, { error: "This post changed. Reload and choose the time again." }, 409);
+      }
+      if (!whenRaw) return postPage(env, session, id, { error: "Select a new release time." }, 400);
+      let next: Date;
+      try { next = localToUtc(whenRaw, env.TIMEZONE); }
+      catch { return postPage(env, session, id, { error: "Invalid date or time." }, 400); }
+      const error = checkWhen(next, new Date(), APPROVE_MIN_LEAD_MS);
+      if (error) return postPage(env, session, id, { error }, 400);
+      await reschedulePost(env, id, next, current.updated_at, session.login);
+      const returnTo = String(form.get("return_to") || "");
+      return redirect(returnTo.startsWith("/calendar?week=") ? safeNext(returnTo) : "/post/" + id);
     }
     if (action === "cancel") {
       await cancelScheduled(env, id, session.login);
