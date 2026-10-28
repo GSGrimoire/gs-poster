@@ -74,7 +74,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   }
   if (path === "/tiktok/callback") return tiktokCallbackPlaceholder(req);
   if (path === "/robots.txt") return new Response(
-    "User-agent: *\\nAllow: /about\\nAllow: /terms\\nAllow: /privacy\\nDisallow: /\\n",
+    "User-agent: *\nAllow: /about\nAllow: /terms\nAllow: /privacy\nDisallow: /\n",
     {headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"public, max-age=3600"}});
 
   if (path === "/login") return login(req, env);
