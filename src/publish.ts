@@ -5,7 +5,8 @@
 import type { Env } from "./env.ts";
 import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, type Post, type ApprovalSnapshot } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
-import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
+import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
+import { fetchVideo } from "./video.ts";
 import { fetchImage } from "./media.ts";
 import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload } from "./facebook-queue.ts";
 
@@ -24,7 +25,20 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
   let fbError: string | null = null;
   if (post.facebook_enabled) {
     try {
-      if (post.images.length > BULK_FACEBOOK_THRESHOLD) {
+      if (post.video) {
+        if (post.images.length) throw new Error("Facebook cannot publish a video and gallery in one post.");
+        const bytes = await fetchVideo(env, post.video);
+        // Retain an unknown-response failure as failed for human reconciliation.
+        const videoId = await createPageVideo(env, {
+          bytes, title: post.label || post.release || "GS Grimoire video",
+          description: post.message, scheduledUnix,
+        });
+        await updatePost(db, id, { fb_post_id: videoId, error: null }, ["publishing"]);
+        fbStatus = scheduledUnix ? "scheduled" : "published";
+        const permalink = scheduledUnix ? null : (await getPageVideoInfo(env, videoId).catch(() => null))?.permalink_url ?? null;
+        await updatePost(db, id, { permalink }, ["publishing"]);
+        await audit(db, input.actor, scheduledUnix ? "facebook-video-scheduled" : "facebook-video-published", id, videoId);
+      } else if (post.images.length > BULK_FACEBOOK_THRESHOLD) {
         // This claim was recorded by claimForPublish after PIN approval.
         // No remote Facebook request occurs here; cron consumes the durable job.
         await enqueueFacebookUpload(env, id);
@@ -36,7 +50,7 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
         mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
       }
       const fbPostId = await createFeedPost(env, { message: post.message, link: post.link, mediaIds, scheduledUnix });
-      const permalink = scheduledUnix ? null : (await getPostInfo(env, fbPostId).catch(() => null))?.permalink_url ?? null;
+      const permalink = scheduledUnix ? null : (await (p.video ? getPageVideoInfo(env,fbPostId) : getPostInfo(env, fbPostId)).catch(() => null))?.permalink_url ?? null;
       fbStatus = scheduledUnix ? "scheduled" : "published";
       await updatePost(db, id, { fb_post_id: fbPostId, permalink, error: null }, ["publishing"]);
       await audit(db, input.actor, scheduledUnix ? "facebook-scheduled" : "facebook-published", id, fbPostId);
@@ -141,14 +155,24 @@ export async function retryFailedFacebook(env: Env, id: string, actor: string): 
   if (!claim) throw new Error("This Facebook retry was already claimed.");
   const scheduledUnix = p.scheduled_at ? Math.floor(Date.parse(p.scheduled_at) / 1000) : undefined;
   try {
-    const mediaIds: string[] = [];
-    for (const url of p.images) {
-      const img = await fetchImage(env, url);
-      mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
+    let fbPostId: string;
+    if (p.video) {
+      if (p.images.length) throw new Error("A video and image gallery cannot be combined.");
+      const bytes = await fetchVideo(env,p.video);
+      fbPostId = await createPageVideo(env, {
+        bytes, title:p.label || p.release || "GS Grimoire video",
+        description:p.message,scheduledUnix,
+      });
+    } else {
+      const mediaIds: string[] = [];
+      for (const url of p.images) {
+        const img = await fetchImage(env, url);
+        mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
+      }
+      fbPostId = await createFeedPost(env, {
+        message:p.message,link:p.link,mediaIds,scheduledUnix,
+      });
     }
-    const fbPostId = await createFeedPost(env, {
-      message: p.message, link: p.link, mediaIds, scheduledUnix,
-    });
     // Save the returned Facebook identifier before making further calls.
     await updatePost(db, id, { fb_post_id: fbPostId }, ["publishing"]);
     const permalink = scheduledUnix ? null :
@@ -347,7 +371,7 @@ export async function refreshScheduled(env: Env): Promise<void> {
   );
   for (const p of due.slice(0, 10)) {
     try {
-      const info = await getPostInfo(env, p.fb_post_id!);
+      const info = p.video ? await getPageVideoInfo(env,p.fb_post_id!) : await getPostInfo(env,p.fb_post_id!);
       if (!info) {
         if (p.bluesky?.status === "scheduled") await setBlueskyStatus(env.DB, p.id, { status: "cancelled" }, ["scheduled"]);
         await updatePost(env.DB, p.id, { status: "cancelled", note: "Removed on Facebook" }, ["scheduled"]);
