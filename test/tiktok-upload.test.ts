@@ -49,6 +49,7 @@ test("TikTok connection validates session-bound single-use state and stores encr
     calls++;
     assert.equal(String(input),"https://open.tiktokapis.com/v2/oauth/token/");
     assert.equal(init?.method,"POST");
+    assert.equal(init?.redirect,"manual");
     const form=init?.body as URLSearchParams;
     assert.equal(form.get("grant_type"),"authorization_code");
     assert.equal(form.get("code"),"fake-code");
@@ -161,4 +162,15 @@ test("TikTok-only video drafts remain unapproved and cannot trigger Facebook pos
 test("TikTok requires video content, not text-only or gallery",()=>{
   assert.throws(()=>parseNewDraft({...blankNewDraft(),facebook:false,bluesky:false,
     tiktok:true,contentKind:"images"},"Europe/Copenhagen","reviewer"),/video only/i);
+});
+
+test("TikTok OAuth does not follow token endpoint redirects",async()=>{
+  const old=globalThis.fetch;
+  globalThis.fetch=async (_input,options)=>{
+    assert.equal(options?.redirect,"manual");
+    return new Response(null,{status:302,headers:{Location:"https://untrusted.example/token"}});
+  };
+  try {
+    await assert.rejects(tiktokAccessToken(env,"video.publish"),/not granted/);
+  }finally{globalThis.fetch=old;}
 });

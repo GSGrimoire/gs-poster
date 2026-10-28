@@ -91,7 +91,7 @@ async function tokenRequest(env:Env,data:Record<string,string>):Promise<TikTokTo
   const {key,secret}=configured(env);
   const response=await fetch("https://open.tiktokapis.com/v2/oauth/token/",{
     method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","Cache-Control":"no-store"},
-    body:new URLSearchParams({client_key:key,client_secret:secret,...data}),redirect:"error",
+    body:new URLSearchParams({client_key:key,client_secret:secret,...data}),redirect:"manual",
   });
   const token=await response.json().catch(()=>({})) as Record<string,unknown>;
   if(!response.ok||typeof token.access_token!=="string"||typeof token.refresh_token!=="string"||
@@ -174,7 +174,7 @@ export async function disconnectTikTok(env:Env):Promise<{revoked:boolean}> {
   try {
     const res=await fetch("https://open.tiktokapis.com/v2/oauth/revoke/",{
       method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
-      body:new URLSearchParams({client_key:key,client_secret:secret,token:old.access_token}),redirect:"error",
+      body:new URLSearchParams({client_key:key,client_secret:secret,token:old.access_token}),redirect:"manual",
     });
     const data=await res.json().catch(()=>({})) as {error?:{code?:string}};
     revoked=res.ok && data.error?.code==="ok";

@@ -40,7 +40,7 @@ async function postJson<T>(env:Env,path:string,payload:object):Promise<T> {
   const res=await fetch(API+path,{
     method:"POST",
     headers:{"Authorization":"Bearer "+access,"Content-Type":"application/json; charset=UTF-8"},
-    body:JSON.stringify(payload),redirect:"error",
+    body:JSON.stringify(payload),redirect:"manual",
   });
   const parsed=await res.json().catch(()=>({})) as {data?:T;error?:{code?:string}};
   if(!res.ok || parsed.error?.code!=="ok" || !parsed.data)
@@ -87,7 +87,7 @@ export async function startTikTokInboxTransfer(
     if(saved.meta.changes!==1)throw new Error("Upload state changed before transfer.");
     stage="transfer";
     const result=await fetch(data.upload_url,{
-      method:"PUT",redirect:"error",
+      method:"PUT",redirect:"manual",
       headers:{"Content-Type":"video/mp4","Content-Length":String(bytes.length),
         "Content-Range":"bytes 0-"+(bytes.length-1)+"/"+bytes.length},
       body:bytes,
