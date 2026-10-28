@@ -38,6 +38,8 @@ test("TikTok callback is a nonfunctional safe placeholder, never echoes sensitiv
   assert.match(body,/connection not configured/i);
   assert.doesNotMatch(body,/secret-auth-code|secret-state|access_token/);
   assert.doesNotMatch(body,/name="robots" content="noindex/);
+  const bare=tiktokCallbackPlaceholder(new Request("https://gs-poster.goofyspook.workers.dev/tiktok/callback"));
+  assert.equal(bare.status,200,"The exact registered callback is reachable without auth credentials.");
   const method=tiktokCallbackPlaceholder(new Request(url,{method:"POST"}));
   assert.equal(method.status,405);
   assert.equal(method.headers.get("Allow"),"GET");
