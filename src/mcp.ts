@@ -26,8 +26,15 @@ function fail(message: string, extra?: Record<string, unknown>) {
 }
 
 function actor(): string {
-  const login = getMcpAuthContext()?.props?.login;
-  return `claude (via ${typeof login === "string" ? login : "unknown"})`;
+  const props = getMcpAuthContext()?.props;
+  const login = typeof props?.login === "string" ? props.login : "unknown";
+  // The human-approved OAuth client name is stored in access-token props.
+  // Older connections remain unidentified until they reconnect.
+  const client = typeof props?.clientName === "string" && props.clientName.trim()
+    ? props.clientName.trim().slice(0, 80) : "MCP client (unidentified)";
+  const domain = typeof props?.clientDomain === "string" && props.clientDomain.trim()
+    ? props.clientDomain.trim().slice(0, 120) : "no verified domain";
+  return `${client} [client name self-declared; ${domain}] (via ${login})`;
 }
 
 function view(env: Env, origin: string, p: Post) {

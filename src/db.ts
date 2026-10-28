@@ -206,6 +206,62 @@ export async function listPosts(db: D1Database, opts: { status?: PostStatus; lim
   return results.map(fromRow);
 }
 
+/** Load a specific week by effective calendar time instead of the newest 200 records. */
+export async function listCalendarPosts(db: D1Database, from: string, to: string): Promise<Post[]> {
+  await ensureSchema(db);
+  const sql = POST_SELECT + " WHERE COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) >= ?"
+    + " AND COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) < ?"
+    + " ORDER BY COALESCE(p.scheduled_at, p.approved_at, p.created_at) LIMIT 500";
+  const { results } = await db.prepare(sql).bind(from, to).all<Row>();
+  return results.map(fromRow);
+}
+
+/** Optimistic, status-guarded schedule change. Never grants approval. */
+export async function updateCalendarTime(
+  db: D1Database, id: string, when: string, version: string, approved: boolean, hasBluesky = false,
+): Promise<boolean> {
+  await ensureSchema(db);
+  const now = new Date(Math.max(Date.now(), Date.parse(version) + 1)).toISOString();
+  const guard = approved && hasBluesky
+    ? " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = ? AND status = 'scheduled')"
+    : "";
+  const sql = approved
+    ? "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status = 'scheduled' AND approved_at IS NOT NULL" + guard
+    : "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL";
+  const args = approved && hasBluesky ? [when, now, id, version, id] : [when, now, id, version];
+  const r = await db.prepare(sql).bind(...args).run();
+  return (r.meta.changes ?? 0) === 1;
+}
+
+/** Version-guarded caption edit; Facebook and Bluesky captions update in one D1 batch. */
+export async function updateCalendarCaptions(
+  db: D1Database, post: Post, message: string, blueskyCaption: string | null, approved: boolean,
+): Promise<boolean> {
+  await ensureSchema(db);
+  const nextVersion = new Date(Math.max(Date.now(), Date.parse(post.updated_at) + 1)).toISOString();
+  const targetStatus = approved ? "scheduled" : "draft";
+  const conditions = approved
+    ? " AND status = 'scheduled' AND approved_at IS NOT NULL"
+    : " AND status IN ('draft','rejected') AND approved_at IS NULL";
+  const conditionForBluesky = post.bluesky
+    ? " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = ? AND status = ?)"
+    : "";
+  const args: unknown[] = [message, nextVersion, post.id, post.updated_at];
+  if (post.bluesky) args.push(post.id, targetStatus);
+  const statements = [
+    db.prepare("UPDATE posts SET message = ?, updated_at = ? WHERE id = ? AND updated_at = ?" +
+      conditions + conditionForBluesky).bind(...args),
+  ];
+  if (post.bluesky) {
+    statements.push(db.prepare("UPDATE bluesky_targets SET caption = ? WHERE post_id = ? AND status = ?" +
+      " AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ?)")
+      .bind(blueskyCaption ?? post.bluesky.caption, post.id, targetStatus, post.id, nextVersion));
+  }
+  const results = await db.batch(statements);
+  return (results[0].meta.changes ?? 0) === 1 &&
+    (!post.bluesky || (results[1].meta.changes ?? 0) === 1);
+}
+
 type Patch = Partial<Omit<Post, "id" | "created_at">>;
 
 export async function updatePost(db: D1Database, id: string, patch: Patch, onlyIfStatus?: PostStatus[]): Promise<boolean> {

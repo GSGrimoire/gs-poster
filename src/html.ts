@@ -11,6 +11,7 @@ html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 Georgia,"Iowan Old Style","Palatino Linotype",serif}
 a{color:var(--accent2)}
 .wrap{max-width:720px;margin:0 auto;padding:16px}
+.wrap.wide{max-width:1480px}
 header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:18px}
 header h1{font:600 20px/1.2 system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase;margin:0}
 header h1 a{color:var(--text);text-decoration:none}
@@ -51,19 +52,19 @@ details summary{cursor:pointer;font:14px system-ui,sans-serif;color:var(--muted)
 .empty{color:var(--muted);font:14px system-ui,sans-serif}
 `;
 
-export function page(title: string, body: string, opts: { login?: string } = {}): string {
+export function page(title: string, body: string, opts: { login?: string; wide?: boolean } = {}): string {
   const who = opts.login
     ? `<span class="who">Signed in as ${esc(opts.login)} · <a href="/logout">sign out</a></span>`
     : "";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>${esc(title)}</title><style>${CSS}</style></head>
-<body><div class="wrap"><header><h1><a href="/">GS Poster</a></h1>${who}</header>${body}</div></body></html>`;
+<body><div class="wrap${opts.wide ? " wide" : ""}"><header><h1><a href="/">GS Poster</a></h1>${who}</header>${body}</div></body></html>`;
 }
 
 export const SECURITY_HEADERS: Record<string, string> = {
   "Content-Type": "text/html; charset=utf-8",
-  "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "Content-Security-Policy": "default-src 'none'; img-src 'self'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
   "Cache-Control": "no-store",

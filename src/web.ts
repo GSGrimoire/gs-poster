@@ -4,16 +4,17 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, getPost, listPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
+import { audit, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
+import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
 import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
   markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
 } from "./facebook-queue.ts";
-import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook } from "./publish.ts";
+import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost, editPendingCaptions } from "./publish.ts";
 import {
   checkCsrf,
   cookie,
@@ -74,16 +75,17 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (auth instanceof Response) return auth;
   const session = auth;
 
-  if (path === "/" && req.method === "GET") return dashboard(env, session);
+  if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+  if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
     if (action && req.method === "POST") return postAction(req, env, session, id, action);
   }
   const media = /^\/media\/(p_[a-z0-9]+)\/(\d+)$/.exec(path);
-  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]));
+  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1");
 
   return html(page("Not found", `<p class="empty">Nothing here.</p>`, { login: session.login }), { status: 404 });
 }
@@ -207,12 +209,16 @@ async function authorize(req: Request, env: Env): Promise<Response> {
         return redirect(denied.redirectTo, new Headers(denied.headers));
       }
       const approved = await oauth.approveConsent(req, handle, { scope: form.getAll("scope").map(String) });
+      // Reuse the same consent descriptor rather than trusting the client name as an authenticated identity.
+      const connectingClient = await oauth.describeConsent(approved.request);
       const { redirectTo } = await oauth.completeAuthorization({
         request: approved.request,
         userId: encodeURIComponent(session.login.toLowerCase()),
-        metadata: { login: session.login, connectedAt: new Date().toISOString() },
+        metadata: { login: session.login, connectedAt: new Date().toISOString(),
+          clientName: connectingClient.clientName, clientDomain: connectingClient.clientDomain ?? null },
         scope: approved.request.scope,
-        props: { login: session.login },
+        props: { login: session.login, clientName: connectingClient.clientName,
+          clientDomain: connectingClient.clientDomain ?? null },
       });
       await audit(env.DB, session.login, "connected-app", null, approved.request.clientId);
       return redirect(redirectTo, new Headers(approved.headers));
@@ -256,9 +262,15 @@ function postCard(env: Env, p: Post): string {
     ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
 
-async function dashboard(env: Env, session: Session): Promise<Response> {
+async function dashboard(env: Env, session: Session, requestedWeek: string | null): Promise<Response> {
   await refreshScheduled(env).catch(() => undefined);
   const posts = await listPosts(env.DB, { limit: 100 });
+  const currentDate = toLocalInput(new Date(), env.TIMEZONE).slice(0, 10);
+  let start = weekStart(currentDate);
+  try { if (requestedWeek) start = weekStart(requestedWeek); } catch { /* invalid date: show current week */ }
+  const range = weekRange(start, env.TIMEZONE);
+  const onCalendar = await listCalendarPosts(env.DB, range.from, range.to);
+  const calendar = renderCalendar(env, onCalendar, await csrfToken(env, session), start);
   const drafts = posts.filter((p) => p.status === "draft").reverse();
   const scheduled = posts.filter((p) => p.status === "scheduled").sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
   const other = posts.filter((p) => !["draft", "scheduled"].includes(p.status)).slice(0, 15);
@@ -270,14 +282,16 @@ async function dashboard(env: Env, session: Session): Promise<Response> {
 
   const body = `
     ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
-    ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts. Claude's drafts show up here.")}
+    <h2>Weekly planner</h2>
+    ${calendar}
+    ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
     ${section("Scheduled", scheduled, "Nothing scheduled.")}
     ${section("Recent", other, "Nothing yet.")}
     <h2>Activity</h2>
     ${log.length ? `<table class="log">${log
       .map((a) => `<tr><td class="ts">${esc(shortTime(env, a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}${a.post_id ? ` <a href="/post/${esc(a.post_id)}">${esc(a.post_id)}</a>` : ""}</td></tr>`)
       .join("")}</table>` : `<p class="empty">No activity yet.</p>`}`;
-  return html(page("GS Poster", body, { login: session.login }));
+  return html(page("GS Poster", body, { login: session.login, wide: true }));
 }
 
 interface PageState {
@@ -352,7 +366,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       </form>
       <details class="card"><summary>Reject instead</summary>
         <form method="post" action="/post/${p.id}/reject">${hidden}
-          <label for="reason">What should Claude change? (optional)</label>
+          <label for="reason">What should the drafting assistant change? (optional)</label>
           <input id="reason" type="text" name="reason" maxlength="500">
           <div class="row"><button class="danger">Reject</button></div>
         </form>
@@ -371,6 +385,25 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <input id="cancel-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
       <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
+  }
+  if ((p.status === "scheduled" || p.status === "draft" || p.status === "rejected") && p.scheduled_at) {
+    actions += `<form method="post" action="/post/${p.id}/reschedule" class="card">${hidden}
+      <h2>Change release time</h2>
+      <p class="hint">Moves the pending schedule without creating another post. Facebook and Bluesky are updated together when both are pending.</p>
+      <label for="move-time">New release time (${esc(env.TIMEZONE)})</label>
+      <input id="move-time" type="datetime-local" name="when" value="${esc(whenValue)}" required>
+      <label for="move-pin">Approval PIN</label><input id="move-pin" type="password" name="pin" required autocomplete="off">
+      <div class="row"><button class="primary">Save new time</button></div></form>`;
+  }
+  if (p.status === "draft" || p.status === "rejected" || p.status === "scheduled") {
+    actions += `<form method="post" action="/post/${p.id}/edit-caption" class="card">${hidden}
+      <h2>Edit unreleased captions</h2>
+      <p class="hint">Save caption changes without publishing. Media and publishing targets are fixed after approval. An approved post will be updated on Facebook where supported.</p>
+      ${p.facebook_enabled ? `<label for="edit-message">Facebook caption</label><textarea id="edit-message" name="message">${esc(p.message)}</textarea>` :
+        `<input type="hidden" name="message" value="${esc(p.message)}">`}
+      ${p.bluesky ? `<label for="edit-bluesky">Bluesky caption (up to 300 characters)</label><textarea id="edit-bluesky" name="bs_caption">${esc(p.bluesky.caption)}</textarea>` : ""}
+      <label for="edit-pin">Approval PIN</label><input id="edit-pin" type="password" name="pin" required autocomplete="off">
+      <div class="row"><button class="primary">Save captions</button></div></form>`;
   }
   // Failed Facebook requests can have succeeded remotely despite a lost response.
   // Both recovery actions require a fresh PIN and explicit human reconciliation.
@@ -409,13 +442,13 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   }
 
   const body = `
-    <p><a href="/">← All posts</a></p>
+    <p><a href="/">← All posts and calendar</a></p>
     ${state.error ? `<div class="notice err">${esc(state.error)}</div>` : ""}
     ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
     ${p.error ? `<div class="notice err">Publishing error: ${esc(p.error)}</div>` : ""}
     ${p.bluesky?.error ? `<div class="notice err">Bluesky error: ${esc(p.bluesky.error)}</div>` : ""}
     ${fbQueue ? `<div class="notice">Facebook bulk upload: ${fbQueue.uploaded}/${fbQueue.total} photos. Status: ${esc(fbQueue.status)}.${fbQueue.error ? " " + esc(fbQueue.error) : ""}</div>` : ""}
-    ${p.status === "rejected" && p.note ? `<div class="notice">Your note to Claude: ${esc(p.note)}</div>` : ""}
+    ${p.status === "rejected" && p.note ? `<div class="notice">Your note for the drafting assistant: ${esc(p.note)}</div>` : ""}
     <div class="card preview">
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
@@ -492,6 +525,40 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       return postPage(env, session, id, {
         notice: retried ? "Facebook-only retry completed." : "Facebook retry failed. Check Facebook before another attempt.",
       });
+    }
+    if (action === "edit-caption") {
+      const current = await getPost(env.DB, id);
+      if (!current || current.updated_at !== String(form.get("expected_updated_at") || "")) {
+        return postPage(env, session, id, { error: "The post changed. Reload before editing." }, 409);
+      }
+      const nextMessage = String(form.get("message") ?? "");
+      const nextBluesky = current.bluesky ? String(form.get("bs_caption") ?? "") : null;
+      if (current.facebook_enabled && !nextMessage.trim() && !current.images.length) {
+        return postPage(env, session, id, { error: "Facebook requires a caption or image." }, 400);
+      }
+      if (current.bluesky) {
+        const issues = checkBluesky({ ...current.bluesky, caption: nextBluesky! });
+        if (issues.length) return postPage(env, session, id, { error: issues.join(" ") }, 400);
+      }
+      await editPendingCaptions(env, id, current.updated_at, nextMessage, nextBluesky, session.login);
+      return postPage(env, session, id, { notice: "Pending captions updated. No post was published." });
+    }
+    if (action === "reschedule") {
+      const current = await getPost(env.DB, id);
+      if (!current || current.updated_at !== String(form.get("expected_updated_at") || "")) {
+        return postPage(env, session, id, { error: "This post changed. Reload and choose the time again." }, 409);
+      }
+      if (!whenRaw) return postPage(env, session, id, { error: "Select a new release time." }, 400);
+      let next: Date;
+      try { next = localToUtc(whenRaw, env.TIMEZONE); }
+      catch { return postPage(env, session, id, { error: "Invalid date or time." }, 400); }
+      const minLead = current.facebook_enabled && current.images.length > BULK_FACEBOOK_THRESHOLD
+        ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
+      const error = checkWhen(next, new Date(), minLead);
+      if (error) return postPage(env, session, id, { error }, 400);
+      await reschedulePost(env, id, next, current.updated_at, session.login);
+      const returnTo = String(form.get("return_to") || "");
+      return redirect(returnTo.startsWith("/calendar?week=") ? safeNext(returnTo) : "/post/" + id);
     }
     if (action === "cancel") {
       await cancelScheduled(env, id, session.login);
@@ -584,12 +651,23 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 }
 
-async function mediaProxy(env: Env, id: string, n: number): Promise<Response> {
+async function mediaProxy(env: Env, id: string, n: number, thumbnail = false): Promise<Response> {
   const p = await getPost(env.DB, id);
-  const url = p?.images[n];
+  const url = p?.images[n] ?? p?.bluesky?.images[n]?.url;
   if (!url) return new Response("Not found", { status: 404 });
   try {
     const img = await fetchImage(env, url);
+    if (thumbnail) {
+      if (!env.IMAGES) return new Response("Thumbnail transformer unavailable", { status: 503 });
+      const reduced = await env.IMAGES.input(new Blob([img.bytes]).stream())
+        .transform({ width: 112, height: 112, fit: "cover" })
+        .output({ format: "image/webp", quality: 58, anim: false });
+      const response = await reduced.response();
+      return new Response(response.body, {
+        headers: { "Content-Type": "image/webp", "Cache-Control": "private, max-age=3600",
+          "X-Content-Type-Options": "nosniff" },
+      });
+    }
     return new Response(img.bytes, {
       headers: { "Content-Type": img.type, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" },
     });

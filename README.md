@@ -1,16 +1,16 @@
 # GS Poster
 
-GS Poster prepares Facebook and Bluesky posts for GS Grimoire. Each target requires approval on the site with GitHub sign-in and the approval PIN before it can go out.
+GS Poster prepares Facebook and Bluesky posts for GS Grimoire. Claude, ChatGPT and other authorized MCP clients can create drafts, but each target still requires approval on the site with GitHub sign-in and the approval PIN before it can go out.
 
 One Cloudflare Worker (free plan) does three jobs:
 
-- **MCP server** at `/mcp`. Claude connects to it as a custom connector and gets tools to draft, revise, list and delete drafts, and read the Page. **There is no publish tool.**
+- **MCP server** at `/mcp`. Claude or ChatGPT connects to it as a custom connector and gets tools to draft, revise, list and delete drafts, and read the Page. **There is no publish tool.**
 - **Approval site** at `/`. Gus signs in with GitHub, chooses Facebook, Bluesky or both, edits platform captions, image alternative text and publish time, and approves with a PIN. Facebook uses Meta scheduling. Bluesky uses an approved queue served by the Worker's cron trigger.
-- **OAuth server**. Connecting Claude requires Gus's GitHub sign-in plus a consent click.
+- **OAuth server**. Connecting an assistant requires Gus's GitHub sign-in plus a consent click.
 
 ## Who can do what
 
-| | Claude (MCP) | Gus (approval site) |
+| | Connected AI assistant (MCP) | Gus (approval site) |
 |---|---|---|
 | Draft, revise, delete drafts | yes | edit before approving |
 | Read Page posts and the schedule | yes | in Business Suite |
@@ -20,7 +20,7 @@ One Cloudflare Worker (free plan) does three jobs:
 
 Guards on the approval side: GitHub sign-in limited to `ALLOWED_GITHUB_LOGINS`, a PIN only Gus knows (5 wrong tries lock approvals for an hour), CSRF tokens and same-origin checks, and an atomic draft → publishing step so a double tap cannot post twice. Every action is logged in the Activity list.
 
-Claude's drafts must pass the house rules from the release-schedule skill (no em dashes, no prices, no tool names, current tier names). See `src/validate.ts`. On the approval page those rules show as warnings Gus can override.
+Assistant-created drafts must pass the house rules from the release-schedule skill (no em dashes, no prices, no tool names, current tier names). See `src/validate.ts`. On the approval page those rules show as warnings Gus can override.
 
 ## Setup
 
@@ -76,15 +76,15 @@ In your Meta app (Development mode is fine, since only your own Page is used):
 
 **Publishing safeguards:** Adding a Bluesky target does not add an MCP publishing tool. Only approval with the existing PIN changes a target to publishable. A Bluesky publish failure remains visible on the review page and can be retried there with the PIN; it never causes Facebook to be posted a second time. For a two-post gallery-and-card thread, deterministic Bluesky record keys guard against duplicates if a network response is lost.
 
-### 7. Connect Claude
+### 7. Connect an assistant
 1. Open the site URL and sign in with GitHub once.
-2. claude.ai → **Settings → Connectors → Add custom connector**, URL = site URL + `/mcp`. Connect, sign in, **Allow**.
-3. Ask Claude to run **check_setup**. It reports anything missing and whether the Page token works.
+2. For Claude: claude.ai → **Settings → Connectors → Add custom connector**, URL = site URL + `/mcp`. For ChatGPT: add a custom MCP server using the same URL in ChatGPT's plugin settings. Sign in with GitHub and choose **Allow**. Reconnect existing clients after a server update if you want the newly saved OAuth client name on future draft and audit records.
+3. Ask either assistant to run **check_setup**. It reports anything missing and whether the Page token works.
 
 ## Day to day
-1. After a Release Schedule session, Claude drafts the Facebook posts with their times.
+1. After a Release Schedule session, Claude or ChatGPT drafts posts for Facebook, Bluesky or both. GS Poster records the name of the connected OAuth client alongside the authorized GitHub account for newly connected sessions.
 2. You open the site (it works on a phone), check each draft, edit if needed, enter the PIN and approve. Or reject it with a note. Claude sees the note and revises.
-3. Facebook publishes at the set time; GS Poster publishes approved Bluesky targets through Cloudflare's scheduled trigger. You can cancel queued targets from the review site.
+3. The approval site's homepage shows a Sunday-through-Saturday calendar in Copenhagen time. Hover over posts for details, click to review or edit pending captions, and drag pending posts to another half-hour slot. Moving an approved schedule requires the PIN and verifies Facebook's updated time; no post is recreated. Times less than 12 minutes away or in the past are unavailable. Released posts remain in previous calendar weeks. Facebook publishes at the set time; GS Poster publishes approved Bluesky targets through Cloudflare's scheduled trigger. You can cancel queued targets from the review site.
 
 Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB each. Facebook drafts may contain up to **80 photos**. Bluesky supports up to four gallery images with reviewed alternative text; Bluesky images are converted and resized under the 2 MB upload cap.
 
