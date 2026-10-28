@@ -75,6 +75,8 @@ const STYLE = `
 .calendar-slot{height:30px;border-bottom:1px solid color-mix(in srgb,var(--line) 40%,transparent)}
 .calendar-slot:nth-child(even){border-bottom-color:var(--line)}
 .calendar-slot.disabled{background:color-mix(in srgb,var(--muted) 12%,transparent);cursor:not-allowed}
+.calendar-slot:not(.disabled){cursor:pointer}
+.calendar-slot:not(.disabled):hover,.calendar-slot:not(.disabled):focus{background:color-mix(in srgb,var(--accent2) 16%,transparent);outline:1px solid var(--accent2);outline-offset:-1px}
 .calendar-slot.drop{background:color-mix(in srgb,var(--accent2) 35%,transparent)}
 .calendar-post{position:absolute;top:0;left:4px;right:4px;z-index:3;height:66px;padding:5px;border:1px solid var(--line);border-left:4px solid var(--accent2);border-radius:7px;background:var(--bg);box-shadow:0 2px 5px #0003;font:12px/1.3 system-ui,sans-serif;color:var(--text);text-decoration:none;display:flex;gap:4px;overflow:visible}
 .calendar-post[data-status="scheduled"]{border-left-color:#6099df}
@@ -107,22 +109,34 @@ export const CALENDAR_JS = `
   if (!viewport) return;
   viewport.scrollTop = 12 * 60;
   let moving = null;
+  let ignoreSlotClicksUntil = 0;
   const dialog = document.getElementById("cal-dialog");
   const form = document.getElementById("cal-form");
   for (const card of document.querySelectorAll(".calendar-post[draggable=true]")) {
     card.addEventListener("dragstart", event => {
       moving = card;
+      ignoreSlotClicksUntil = Date.now() + 450;
       viewport.classList.add("is-dragging");
       event.dataTransfer.setData("text/plain", card.dataset.id);
       event.dataTransfer.effectAllowed = "move";
     });
     card.addEventListener("dragend", () => {
+      ignoreSlotClicksUntil = Date.now() + 450;
       moving = null;
       viewport.classList.remove("is-dragging");
       document.querySelectorAll(".calendar-slot.drop").forEach(s => s.classList.remove("drop"));
     });
   }
   for (const slot of document.querySelectorAll(".calendar-slot")) {
+    function openDraft() {
+      if (moving || Date.now() < ignoreSlotClicksUntil || slot.classList.contains("disabled")) return;
+      if (Date.parse(slot.dataset.utc) - Date.now() < 12 * 60000) return;
+      window.location.assign("/new?when=" + encodeURIComponent(slot.dataset.when));
+    }
+    slot.addEventListener("click", openDraft);
+    slot.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {event.preventDefault();openDraft();}
+    });
     slot.addEventListener("dragover", event => {
       if (!moving || slot.classList.contains("disabled")) return;
       event.preventDefault();
@@ -135,6 +149,7 @@ export const CALENDAR_JS = `
       event.preventDefault();
       if (Date.parse(slot.dataset.utc) - Date.now() < 12 * 60000) return;
       const post = moving;
+      ignoreSlotClicksUntil = Date.now() + 450;
       moving = null;
       viewport.classList.remove("is-dragging");
       form.action = "/post/" + encodeURIComponent(post.dataset.id) + "/reschedule";
@@ -162,9 +177,11 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
     const slots = Array.from({length:48},(_,i) => {
       const when = day + "T" + String(Math.floor(i/2)).padStart(2,"0") + ":" + (i%2?"30":"00");
       const utc = localToUtc(when, env.TIMEZONE).toISOString();
-      const disabled = Date.parse(utc) - now.getTime() < 12*60000;
+      const lead = Date.parse(utc) - now.getTime();
+      const disabled = lead < 12*60000 || lead > 30*24*60*60000;
       return '<div class="calendar-slot' + (disabled?' disabled':'') +
-        '" data-when="' + when + '" data-utc="' + utc + '"></div>';
+        '" data-when="' + when + '" data-utc="' + utc + '"' +
+        (disabled ? ' aria-disabled="true"' : ' role="button" tabindex="0" title="Create draft for ' + when.replace('T',' ') + '" aria-label="Create draft for ' + when.replace('T',' ') + '"') + '></div>';
     }).join("");
     const entries = posts.filter(p => {
       const t = postCalendarTime(p);
@@ -211,8 +228,8 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
     '<span><i class="calendar-swatch" style="background:var(--ok)"></i>Published</span></div>' +
     '<div class="calendar-window"><div class="calendar-inner">' + header + '<div class="calendar-days">' +
     timeAxis + cols + '</div></div></div>' +
-    '<p class="calendar-info">Copenhagen time. Hover for details, click to open, or drag a pending post to a half-hour slot. ' +
-    'Grey slots are past or less than 12 minutes away. Moving requires your approval PIN. Published posts remain visible.</p>' +
+    '<p class="calendar-info">Copenhagen time. Click an available empty timeslot to create a draft, hover for details, or drag a pending post to reschedule. ' +
+    'Grey slots are past, less than 12 minutes away, or beyond 30 days. Creating a draft never publishes; moving an approved post requires your PIN. Published posts remain visible.</p>' +
     '<dialog class="cal-modal" id="cal-dialog"><h2>Reschedule <span id="cal-moving"></span></h2>' +
     '<form method="post" id="cal-form"><input type="hidden" name="csrf" value="' + esc(csrf) + '">' +
     '<input type="hidden" name="expected_updated_at"><input type="hidden" name="return_to" value="/calendar?week=' + start + '">' +
