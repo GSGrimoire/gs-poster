@@ -14,7 +14,7 @@ import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
   markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
 } from "./facebook-queue.ts";
-import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost } from "./publish.ts";
+import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost, editPendingCaptions } from "./publish.ts";
 import {
   checkCsrf,
   cookie,
@@ -78,7 +78,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
 
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -363,7 +363,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       </form>
       <details class="card"><summary>Reject instead</summary>
         <form method="post" action="/post/${p.id}/reject">${hidden}
-          <label for="reason">What should Claude change? (optional)</label>
+          <label for="reason">What should the drafting assistant change? (optional)</label>
           <input id="reason" type="text" name="reason" maxlength="500">
           <div class="row"><button class="danger">Reject</button></div>
         </form>
@@ -391,6 +391,16 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <input id="move-time" type="datetime-local" name="when" value="${esc(whenValue)}" required>
       <label for="move-pin">Approval PIN</label><input id="move-pin" type="password" name="pin" required autocomplete="off">
       <div class="row"><button class="primary">Save new time</button></div></form>`;
+  }
+  if (p.status === "draft" || p.status === "rejected" || p.status === "scheduled") {
+    actions += `<form method="post" action="/post/${p.id}/edit-caption" class="card">${hidden}
+      <h2>Edit unreleased captions</h2>
+      <p class="hint">Save caption changes without publishing. Media and publishing targets are fixed after approval. An approved post will be updated on Facebook where supported.</p>
+      ${p.facebook_enabled ? `<label for="edit-message">Facebook caption</label><textarea id="edit-message" name="message">${esc(p.message)}</textarea>` :
+        `<input type="hidden" name="message" value="${esc(p.message)}">`}
+      ${p.bluesky ? `<label for="edit-bluesky">Bluesky caption (up to 300 characters)</label><textarea id="edit-bluesky" name="bs_caption">${esc(p.bluesky.caption)}</textarea>` : ""}
+      <label for="edit-pin">Approval PIN</label><input id="edit-pin" type="password" name="pin" required autocomplete="off">
+      <div class="row"><button class="primary">Save captions</button></div></form>`;
   }
   // Failed Facebook requests can have succeeded remotely despite a lost response.
   // Both recovery actions require a fresh PIN and explicit human reconciliation.
@@ -435,7 +445,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ${p.error ? `<div class="notice err">Publishing error: ${esc(p.error)}</div>` : ""}
     ${p.bluesky?.error ? `<div class="notice err">Bluesky error: ${esc(p.bluesky.error)}</div>` : ""}
     ${fbQueue ? `<div class="notice">Facebook bulk upload: ${fbQueue.uploaded}/${fbQueue.total} photos. Status: ${esc(fbQueue.status)}.${fbQueue.error ? " " + esc(fbQueue.error) : ""}</div>` : ""}
-    ${p.status === "rejected" && p.note ? `<div class="notice">Your note to Claude: ${esc(p.note)}</div>` : ""}
+    ${p.status === "rejected" && p.note ? `<div class="notice">Your note for the drafting assistant: ${esc(p.note)}</div>` : ""}
     <div class="card preview">
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
@@ -512,6 +522,23 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       return postPage(env, session, id, {
         notice: retried ? "Facebook-only retry completed." : "Facebook retry failed. Check Facebook before another attempt.",
       });
+    }
+    if (action === "edit-caption") {
+      const current = await getPost(env.DB, id);
+      if (!current || current.updated_at !== String(form.get("expected_updated_at") || "")) {
+        return postPage(env, session, id, { error: "The post changed. Reload before editing." }, 409);
+      }
+      const nextMessage = String(form.get("message") ?? "");
+      const nextBluesky = current.bluesky ? String(form.get("bs_caption") ?? "") : null;
+      if (current.facebook_enabled && !nextMessage.trim() && !current.images.length) {
+        return postPage(env, session, id, { error: "Facebook requires a caption or image." }, 400);
+      }
+      if (current.bluesky) {
+        const issues = checkBluesky({ ...current.bluesky, caption: nextBluesky! });
+        if (issues.length) return postPage(env, session, id, { error: issues.join(" ") }, 400);
+      }
+      await editPendingCaptions(env, id, current.updated_at, nextMessage, nextBluesky, session.login);
+      return postPage(env, session, id, { notice: "Pending captions updated. No post was published." });
     }
     if (action === "reschedule") {
       const current = await getPost(env.DB, id);
