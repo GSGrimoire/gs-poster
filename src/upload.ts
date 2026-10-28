@@ -218,6 +218,18 @@ export async function isStoredOwnerUpload(db: D1Database, reference: string, log
     row.created_by?.toLowerCase() === login.toLowerCase() && ref.ext !== "mp4";
 }
 
+/** The same completed, owner-bound upload check, restricted to MP4 video. */
+export async function isStoredOwnerVideo(db: D1Database, reference: string, login: string): Promise<boolean> {
+  const ref = parseUploadRef(reference);
+  if (!ref || ref.ext !== "mp4") return false;
+  await ensureUploads(db);
+  const row = await db.prepare(
+    "SELECT status, ext, created_by FROM uploads WHERE id = ?"
+  ).bind(ref.id).first<Pick<UploadRow,"status"|"ext"|"created_by">>();
+  return !!row && row.status === "stored" && row.ext === "mp4" &&
+    row.created_by?.toLowerCase() === login.toLowerCase();
+}
+
 /** Raw private object access for internal preflight, review preview and approved publication. */
 export async function readUpload(env: Env, ref: UploadRef): Promise<ArrayBuffer> {
   if (!env.UPLOADS) throw new Error("File uploads are not set up on this server.");

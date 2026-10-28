@@ -10,6 +10,7 @@ import { missingSecrets } from "./env.ts";
 import { audit, createPost, deletePost, getPost, listPosts, updatePost, type Post, type PostStatus, type BlueskyDraft, saveBlueskyDraft } from "./db.ts";
 import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
+import { checkVideoUrl } from "./video.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
@@ -45,6 +46,7 @@ function view(env: Env, origin: string, p: Post) {
     release: p.release,
     message: p.message,
     images: p.images,
+    video: p.video,
     facebook_enabled: p.facebook_enabled,
     bluesky: p.bluesky,
     link: p.link,
@@ -172,6 +174,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         facebook_enabled: z.boolean().default(true).describe("Whether to publish to Facebook. False requires a Bluesky target."),
         bluesky: blueskySchema.optional().describe("Optional Bluesky target with its own caption, image alt descriptions and free Patreon link card."),
         images: imageList.optional(),
+        video: z.string().optional().describe("Facebook MP4 GitHub URL or private upload:// reference (20 MB maximum). Cannot be combined with Facebook images."),
         link: z.string().url().optional().describe("Optional link preview. Only used when the post has no images."),
         publish_at: z.string().optional().describe("When to publish. Copenhagen time (2026-10-16T19:00) or ISO 8601 with offset. 30 minutes to 30 days ahead."),
         label: z.string().max(120).optional().describe('Short name shown to Gus, e.g. "Day 1 creature reveal".'),
@@ -179,18 +182,23 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ message, images = [], link, publish_at, label, release, facebook_enabled, bluesky }) => {
-      const checks = checkMessage(message, { hasImages: images.length > 0 || (!facebook_enabled && !!bluesky) });
+    async ({ message, images = [], video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
+      const checks = checkMessage(message, { hasImages: images.length > 0 || !!video || (!facebook_enabled && !!bluesky) });
       const time = readWhen(env, publish_at);
       const imgErrors = await checkImages(env, images);
       const bsHouse = bluesky ? checkMessage(bluesky.caption, { hasImages: bluesky.images.length > 0 }) : null;
       const bsErrors = bluesky ? [...checkBluesky(bluesky), ...bsHouse!.errors, ...(await checkImages(env, bluesky.images.map((i) => i.url)))] : [];
       const errors = [...checks.errors, ...(time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
       if (!facebook_enabled && !bluesky) errors.push("Select Facebook, Bluesky or both.");
+      if (video && !facebook_enabled) errors.push("A Facebook video requires the Facebook target.");
+      if (video && images.length) errors.push("Facebook videos cannot be combined with photos.");
+      if (video && link) errors.push("Facebook videos cannot also have a link preview.");
+      if (video && checkVideoUrl(video)) errors.push(checkVideoUrl(video)!);
       if (errors.length) return fail("Draft not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
       const p = await createPost(env.DB, {
         message,
         images,
+        video:video ?? null,
         link: link ?? null,
         scheduled_at: time.when?.toISOString() ?? null,
         label: label ?? null,
@@ -216,6 +224,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         facebook_enabled: z.boolean().optional(),
         bluesky: blueskySchema.nullable().optional(),
         images: imageList.optional(),
+        video: z.string().nullable().optional().describe("Facebook MP4 reference, or null to clear it."),
         link: z.string().url().nullable().optional(),
         publish_at: z.string().nullable().optional(),
         label: z.string().max(120).optional(),
@@ -223,21 +232,25 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, message, images, link, publish_at, label, release, facebook_enabled, bluesky }) => {
+    async ({ id, message, images, video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
       if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
       const nextMessage = message ?? cur.message;
       const nextImages = images ?? cur.images;
+      const nextVideo = video === undefined ? cur.video : video;
       const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
       const imgErrors = images ? await checkImages(env, images) : [];
       const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
-      const checks = checkMessage(nextMessage, { hasImages: nextImages.length > 0 || (!fbNext && !!bsNext) });
+      const checks = checkMessage(nextMessage, { hasImages: nextImages.length > 0 || !!nextVideo || (!fbNext && !!bsNext) });
       const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
       const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors, ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
       if (!fbNext && !bsNext) errors.push("Select Facebook, Bluesky or both.");
+      if (nextVideo && !fbNext) errors.push("A Facebook video requires the Facebook target.");
+      if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
+      if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
       const changed = await updatePost(
         env.DB,
@@ -246,6 +259,7 @@ export function buildServer(env: Env, origin: string): McpServer {
           status: "draft",
           message: nextMessage,
           images: nextImages,
+          video:nextVideo,
           link: link === undefined ? cur.link : link,
           scheduled_at: time.when?.toISOString() ?? null,
           label: label ?? cur.label,

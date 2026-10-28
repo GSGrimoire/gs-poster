@@ -18,7 +18,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
 </style>
 <div class="card" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
  data-version="${esc(post.updated_at)}" data-facebook="${post.facebook_enabled ? "1" : "0"}"
- data-bluesky="${post.bluesky ? "1" : "0"}">
+ data-bluesky="${post.bluesky ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}">
   <h2>Add images to this draft</h2>
   <p class="hint">Drop JPG, PNG or GIF images here, or select files. Files go into GS Poster's private storage and are attached to the chosen draft targets. No GitHub image commit and no publishing.</p>
   <div id="media-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop images">
@@ -29,6 +29,22 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <p class="hint">Provide descriptive alternative text for each Bluesky image. Maximum 4 Bluesky images, 80 Facebook images. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
+  <h2>Add a video to this draft</h2>
+  <p class="hint">MP4 up to 20 MB. Videos and image galleries cannot be combined on the same platform.</p>
+  <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
+    Drop MP4 here, or click to choose
+    <input type="file" id="video-file" accept=".mp4,video/mp4" hidden>
+  </div>
+  <video controls playsinline preload="metadata" id="video-preview" hidden style="max-width:100%;max-height:280px;margin-top:12px"></video>
+  <p id="video-filename" class="hint"></p>
+  <div class="media-targets">
+    <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.video && !post.images.length ? "checked" : "disabled"}>Facebook</label>
+    <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.video && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
+  </div>
+  <label for="video-alt">Bluesky video alternative text</label>
+  <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
+  <div class="row"><button type="button" class="primary" id="video-upload-submit" disabled>Upload and attach video</button></div>
+  <div id="video-upload-status" class="hint" role="status" aria-live="polite"></div>
 </div>
 <script src="/draft-media.js" defer></script>
 `;
@@ -50,12 +66,51 @@ export const DRAFT_MEDIA_JS = `
   const post = panel.dataset.post;
   const csrf = panel.dataset.csrf;
 
+  const videoInput = document.getElementById("video-file");
+  const videoDrop = document.getElementById("video-drop");
+  const videoPreview = document.getElementById("video-preview");
+  const videoName = document.getElementById("video-filename");
+  const videoSubmit = document.getElementById("video-upload-submit");
+  const videoStatus = document.getElementById("video-upload-status");
+  const videoFacebook = document.getElementById("video-facebook");
+  const videoBluesky = document.getElementById("video-bluesky");
+  const videoAlt = document.getElementById("video-alt");
+  let selectedVideo = null;
+  let previewUrl = null;
+  function chooseVideo(file) {
+    if (running || !file) return;
+    if (!file.name.toLowerCase().endsWith(".mp4") || file.size <= 0 || file.size > 20_000_000) {
+      videoStatus.textContent = "Choose a nonempty MP4 up to 20 MB.";return;
+    }
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    selectedVideo = file;
+    previewUrl = URL.createObjectURL(file);
+    videoPreview.src = previewUrl;videoPreview.hidden = false;
+    videoName.textContent = file.name+" ("+(file.size/1048576).toFixed(1)+" MB)";
+    videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled;
+    videoStatus.textContent = "";
+  }
+  videoDrop.addEventListener("click", () => videoInput.click());
+  videoDrop.addEventListener("keydown", e => {
+    if(e.key==="Enter" || e.key===" ") {e.preventDefault();videoInput.click();}
+  });
+  videoDrop.addEventListener("dragover", e=>{e.preventDefault();videoDrop.classList.add("drag-over");});
+  videoDrop.addEventListener("dragleave",()=>videoDrop.classList.remove("drag-over"));
+  videoDrop.addEventListener("drop",e=>{
+    e.preventDefault();videoDrop.classList.remove("drag-over");
+    chooseVideo(e.dataTransfer?.files?.[0]);
+  });
+  videoInput.addEventListener("change",()=>{
+    chooseVideo(videoInput.files?.[0]);videoInput.value="";
+  });
+
   function showError(error) { status.textContent = error instanceof Error ? error.message : String(error); }
   function choose(fileList) {
     if (running) return;
     const selected = Array.from(fileList);
     for (const file of selected) {
       const ext = (file.name.split(".").pop() || "").toLowerCase();
+      if (ext === "mp4") {chooseVideo(file);continue;}
       if (!["jpg","jpeg","png","gif"].includes(ext) || file.size <= 0 || file.size > 10 * 1024 * 1024) {
         status.textContent = "Only JPG, PNG or GIF files between 1 byte and 10 MB can be uploaded.";
         continue;
@@ -121,6 +176,32 @@ export const DRAFT_MEDIA_JS = `
     return v;
   }
 
+  videoSubmit.addEventListener("click",async()=>{
+    if(running || !selectedVideo)return;
+    const facebook=!!videoFacebook.checked,bluesky=!!videoBluesky.checked;
+    if (!facebook && !bluesky) {videoStatus.textContent="Choose at least one available platform.";return;}
+    const alt=videoAlt.value.trim();
+    if (bluesky && !alt) {videoStatus.textContent="Bluesky requires alternative text.";return;}
+    running=true;videoSubmit.disabled=true;
+    try {
+      videoStatus.textContent="Creating private upload...";
+      const grant=await api("video-link",{filename:selectedVideo.name});
+      videoStatus.textContent="Uploading video...";
+      const uploaded=await fetch(grant.upload_url,{method:"PUT",body:selectedVideo,credentials:"same-origin"});
+      const body=await uploaded.json().catch(()=>({}));
+      if (!uploaded.ok || !body.ok)throw new Error(body.error || "Video upload failed.");
+      videoStatus.textContent="Attaching video to the draft...";
+      const saved=await api("attach-video",{
+        reference:body.reference,alt,facebook,bluesky,expected_updated_at:currentVersion
+      });
+      currentVersion=saved.updated_at;
+      videoStatus.textContent="Video attached. Refreshing...";
+      location.reload();
+    } catch(error) {
+      videoStatus.textContent="Could not attach: "+(error instanceof Error?error.message:String(error));
+      videoSubmit.disabled=false;
+    } finally {running=false;}
+  });
   submit.addEventListener("click", async () => {
     if (running) return;
     running = true;submit.disabled = true;status.textContent = "";

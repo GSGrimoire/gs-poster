@@ -40,6 +40,8 @@ export interface Post {
   message: string;
   link: string | null;
   images: string[];
+  /** Facebook video URL or private upload reference, mutually exclusive with photos. */
+  video: string | null;
   scheduled_at: string | null;
   fb_post_id: string | null;
   permalink: string | null;
@@ -87,6 +89,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       message TEXT NOT NULL,
       link TEXT,
       images TEXT NOT NULL DEFAULT '[]',
+      video TEXT,
       scheduled_at TEXT,
       fb_post_id TEXT,
       permalink TEXT,
@@ -131,6 +134,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       if (!/duplicate column name/i.test(String(error))) throw error;
     }
   }
+  const postColumns = await db.prepare("PRAGMA table_info(posts)").all<{name:string}>();
+  if (!postColumns.results.some(column => column.name === "video")) {
+    try { await db.prepare("ALTER TABLE posts ADD COLUMN video TEXT").run(); }
+    catch(error) { if (!/duplicate column name/i.test(String(error))) throw error; }
+  }
   schemaReady = true;
 }
 
@@ -164,6 +172,7 @@ export interface NewPost {
   message: string;
   link?: string | null;
   images: string[];
+  video?: string | null;
   scheduled_at: string | null;
   label?: string | null;
   release?: string | null;
@@ -177,9 +186,9 @@ export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
   const now = new Date().toISOString();
   const id = newId();
   const inserts = [
-    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, link, images, scheduled_at, created_by)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.scheduled_at, p.created_by),
+    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, link, images, video, scheduled_at, created_by)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.video ?? null, p.scheduled_at, p.created_by),
   ];
   if (p.bluesky) inserts.push(db.prepare(`INSERT INTO bluesky_targets
       (post_id, caption, images, video, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?, ?)`)
@@ -262,6 +271,34 @@ export async function updateCalendarCaptions(
     (!post.bluesky || (results[1].meta.changes ?? 0) === 1);
 }
 
+/** Store one video for either or both targets in a draft-only D1 transaction. */
+export async function attachDraftVideo(
+  db: D1Database, id: string, reference: string, alt: string,
+  facebook: boolean, bluesky: boolean, expectedVersion: string,
+): Promise<string | null> {
+  await ensureSchema(db);
+  if (!facebook && !bluesky) throw new Error("Select at least one platform.");
+  if (bluesky && !alt.trim()) throw new Error("Bluesky video requires alternative text.");
+  const version = new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
+  const blueskyGuard = bluesky
+    ? " AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0 AND b.video IS NULL)"
+    : "";
+  const facebookGuard = facebook ? " AND json_array_length(images)=0 AND video IS NULL" : "";
+  const statements = [
+    db.prepare("UPDATE posts SET video=CASE WHEN ? THEN ? ELSE video END, updated_at=? "+
+      "WHERE id=? AND updated_at=? AND approved_at IS NULL AND status IN ('draft','rejected')" +
+      facebookGuard + blueskyGuard)
+      .bind(facebook?1:0,reference,version,id,expectedVersion),
+  ];
+  if (bluesky) statements.push(db.prepare(
+    "UPDATE bluesky_targets SET video=json_object('url',?,'alt',?) WHERE post_id=? AND status='draft' "+
+    "AND video IS NULL AND json_array_length(images)=0 "+
+    "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)")
+    .bind(reference,alt.trim(),id,id,version));
+  const r=await db.batch(statements);
+  return (r[0].meta.changes??0)===1 && (!bluesky||(r[1].meta.changes??0)===1) ? version : null;
+}
+
 /** Append a stored private image to one or both pending targets, in one D1 transaction. */
 export async function attachDraftImage(
   db: D1Database, id: string, reference: string, alt: string,
@@ -271,17 +308,17 @@ export async function attachDraftImage(
   if (!facebook && !bluesky) throw new Error("Select at least one platform.");
   if (bluesky && !alt.trim()) throw new Error("Alternative text is required for Bluesky.");
   const next = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
-  const blueskyGuard = bluesky ? " AND EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND b.status = 'draft' AND json_array_length(b.images) < 4)" : "";
+  const blueskyGuard = bluesky ? " AND EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND b.status = 'draft' AND b.video IS NULL AND json_array_length(b.images) < 4)" : "";
   const updatePost = db.prepare(
     "UPDATE posts SET images = CASE WHEN ? THEN json_insert(images, '$[#]', ?) ELSE images END, updated_at = ? " +
     "WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL" +
-    (facebook ? " AND json_array_length(images) < 80" : "") + blueskyGuard +
+    (facebook ? " AND video IS NULL AND json_array_length(images) < 80" : "") + blueskyGuard +
     (facebook ? "" : " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = posts.id)")
   ).bind(facebook ? 1 : 0, reference, next, id, expectedVersion);
   const mutations = [updatePost];
   if (bluesky) mutations.push(db.prepare(
     "UPDATE bluesky_targets SET images = json_insert(images, '$[#]', json_object('url', ?, 'alt', ?)) " +
-    "WHERE post_id = ? AND status = 'draft' AND json_array_length(images) < 4 " +
+    "WHERE post_id = ? AND status = 'draft' AND video IS NULL AND json_array_length(images) < 4 " +
     "AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ? AND approved_at IS NULL)"
   ).bind(reference, alt.trim(), id, id, next));
   const results = await db.batch(mutations);

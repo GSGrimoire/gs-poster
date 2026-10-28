@@ -5,7 +5,8 @@
 import type { Env } from "./env.ts";
 import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, type Post, type ApprovalSnapshot } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
-import { createFeedPost, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
+import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
+import { fetchVideo } from "./video.ts";
 import { fetchImage } from "./media.ts";
 import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload } from "./facebook-queue.ts";
 
@@ -24,7 +25,20 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
   let fbError: string | null = null;
   if (post.facebook_enabled) {
     try {
-      if (post.images.length > BULK_FACEBOOK_THRESHOLD) {
+      if (post.video) {
+        if (post.images.length) throw new Error("Facebook cannot publish a video and gallery in one post.");
+        const bytes = await fetchVideo(env, post.video);
+        // Retain an unknown-response failure as failed for human reconciliation.
+        const videoId = await createPageVideo(env, {
+          bytes, title: post.label || post.release || "GS Grimoire video",
+          description: post.message, scheduledUnix,
+        });
+        await updatePost(db, id, { fb_post_id: videoId, error: null }, ["publishing"]);
+        fbStatus = scheduledUnix ? "scheduled" : "published";
+        const permalink = scheduledUnix ? null : (await getPageVideoInfo(env, videoId).catch(() => null))?.permalink_url ?? null;
+        await updatePost(db, id, { permalink }, ["publishing"]);
+        await audit(db, input.actor, scheduledUnix ? "facebook-video-scheduled" : "facebook-video-published", id, videoId);
+      } else if (post.images.length > BULK_FACEBOOK_THRESHOLD) {
         // This claim was recorded by claimForPublish after PIN approval.
         // No remote Facebook request occurs here; cron consumes the durable job.
         await enqueueFacebookUpload(env, id);
@@ -141,14 +155,24 @@ export async function retryFailedFacebook(env: Env, id: string, actor: string): 
   if (!claim) throw new Error("This Facebook retry was already claimed.");
   const scheduledUnix = p.scheduled_at ? Math.floor(Date.parse(p.scheduled_at) / 1000) : undefined;
   try {
-    const mediaIds: string[] = [];
-    for (const url of p.images) {
-      const img = await fetchImage(env, url);
-      mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
+    let fbPostId: string;
+    if (p.video) {
+      if (p.images.length) throw new Error("A video and image gallery cannot be combined.");
+      const bytes = await fetchVideo(env,p.video);
+      fbPostId = await createPageVideo(env, {
+        bytes, title:p.label || p.release || "GS Grimoire video",
+        description:p.message,scheduledUnix,
+      });
+    } else {
+      const mediaIds: string[] = [];
+      for (const url of p.images) {
+        const img = await fetchImage(env, url);
+        mediaIds.push(await uploadUnpublishedPhoto(env, img, scheduledUnix !== undefined));
+      }
+      fbPostId = await createFeedPost(env, {
+        message:p.message,link:p.link,mediaIds,scheduledUnix,
+      });
     }
-    const fbPostId = await createFeedPost(env, {
-      message: p.message, link: p.link, mediaIds, scheduledUnix,
-    });
     // Save the returned Facebook identifier before making further calls.
     await updatePost(db, id, { fb_post_id: fbPostId }, ["publishing"]);
     const permalink = scheduledUnix ? null :
@@ -206,7 +230,7 @@ export async function reschedulePost(
   const before = Math.floor(Date.parse(p.scheduled_at) / 1000);
   const after = Math.floor(newTime.getTime() / 1000);
   if (p.facebook_enabled) {
-    try { await rescheduleFbPost(env, p.fb_post_id!, before, after); }
+    try { await rescheduleFbPost(env, p.fb_post_id!, before, after, !!p.video); }
     catch {
       // Facebook may have accepted the write before an uncertain read-back.
       await audit(env.DB, actor, "reschedule-reconciliation-required", id,
@@ -222,7 +246,7 @@ export async function reschedulePost(
     // Roll back when a concurrent edit wins. If this fails, do not pretend
     // both platforms are aligned: the user must reconcile in Meta.
     if (p.facebook_enabled) {
-      try { await rescheduleFbPost(env, p.fb_post_id!, after, before); }
+      try { await rescheduleFbPost(env, p.fb_post_id!, after, before, !!p.video); }
       catch (error) {
         await audit(env.DB, actor, "reschedule-reconciliation-required", id, nextIso);
         throw new Error("Facebook changed, but the GS Poster record did not. Check Meta Business Suite before retrying.");
@@ -264,7 +288,7 @@ export async function editPendingCaptions(
   }
   const facebookCaptionChanged = p.facebook_enabled && normalizeCaption(message) !== normalizeCaption(p.message);
   if (facebookCaptionChanged) {
-    try { await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message); }
+    try { await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), p.message, message, !!p.video); }
     catch {
       // A successful write followed by a failed read is an uncertain remote state.
       await audit(env.DB, actor, "caption-reconciliation-required", id).catch(() => undefined);
@@ -278,7 +302,7 @@ export async function editPendingCaptions(
   if (!saved) {
     if (facebookCaptionChanged) {
       try {
-        await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), message, p.message);
+        await editFbCaption(env, p.fb_post_id!, Math.floor(Date.parse(p.scheduled_at)/1000), message, p.message, !!p.video);
       } catch {
         await audit(env.DB, actor, "caption-reconciliation-required", id);
         throw new Error("Facebook changed, but GS Poster did not. Reconcile in Meta Business Suite.");
@@ -347,7 +371,7 @@ export async function refreshScheduled(env: Env): Promise<void> {
   );
   for (const p of due.slice(0, 10)) {
     try {
-      const info = await getPostInfo(env, p.fb_post_id!);
+      const info = p.video ? await getPageVideoInfo(env,p.fb_post_id!) : await getPostInfo(env,p.fb_post_id!);
       if (!info) {
         if (p.bluesky?.status === "scheduled") await setBlueskyStatus(env.DB, p.id, { status: "cancelled" }, ["scheduled"]);
         await updatePost(env.DB, p.id, { status: "cancelled", note: "Removed on Facebook" }, ["scheduled"]);

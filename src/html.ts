@@ -64,7 +64,7 @@ export function page(title: string, body: string, opts: { login?: string; wide?:
 
 export const SECURITY_HEADERS: Record<string, string> = {
   "Content-Type": "text/html; charset=utf-8",
-  "Content-Security-Policy": "default-src 'none'; img-src 'self' blob:; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "Content-Security-Policy": "default-src 'none'; img-src 'self' blob:; media-src 'self' blob:; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
   "Cache-Control": "no-store",
