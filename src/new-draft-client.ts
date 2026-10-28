@@ -46,7 +46,7 @@ export const NEW_DRAFT_JS = String.raw`
     imageList.querySelectorAll("input").forEach(input => input.required = bs && k === "images");
     $("new-video-alt").required = bs && k === "video";
   }
-  form.querySelectorAll('input[name="content_kind"],input[name="facebook"],input[name="bluesky"]')
+  form.querySelectorAll('input[name="content_kind"],input[name="facebook"],input[name="bluesky"],input[name="tiktok"]')
     .forEach(el => el.addEventListener("change", visible));
   visible();
 
@@ -98,7 +98,8 @@ export const NEW_DRAFT_JS = String.raw`
   videoInput.addEventListener("change", () => chooseVideo(videoInput.files?.[0]));
 
   function verify(k,bs) {
-    if (!target("facebook") && !bs) throw new Error("Select Facebook, Bluesky, or both.");
+    if (!target("facebook") && !bs && !target("tiktok")) throw new Error("Select Facebook, Bluesky, or TikTok.");
+    if(target("tiktok") && k!=="video") throw new Error("TikTok currently supports video uploads only.");
     if (k === "images") {
       if (!images.length) throw new Error("Choose at least one image.");
       if (images.length > (bs ? 4 : 80))
@@ -134,7 +135,7 @@ export const NEW_DRAFT_JS = String.raw`
     if (!res.ok || response.error) throw new Error(response.error || "Upload request failed ("+res.status+").");
     return response;
   }
-  async function upload(file, mediaKind, alt, fb, bs) {
+  async function upload(file, mediaKind, alt, fb, bs, tt=false) {
     const grant = await api(mediaKind === "video" ? "video-link" : "upload-link", {filename:file.name});
     const transfer = await fetch(grant.upload_url, {
       method:"PUT",credentials:"same-origin",body:file
@@ -142,7 +143,7 @@ export const NEW_DRAFT_JS = String.raw`
     const stored = await transfer.json().catch(() => ({}));
     if (!transfer.ok || !stored.ok) throw new Error(stored.error || "Private file transfer failed.");
     const attached = await api(mediaKind === "video" ? "attach-video" : "attach-image", {
-      reference:stored.reference,alt,facebook:fb,bluesky:bs,
+      reference:stored.reference,alt,facebook:fb,bluesky:bs,tiktok:tt,
       expected_updated_at:created.version
     });
     created.version = attached.updated_at;
@@ -170,7 +171,7 @@ export const NEW_DRAFT_JS = String.raw`
         const body = await res.json().catch(() => ({}));
         if (!res.ok || !body.id) throw new Error(body.error || "Could not create the draft.");
         created = {id:body.id,version:body.updated_at};
-        form.querySelectorAll('input[name="content_kind"],input[name="facebook"],input[name="bluesky"]')
+        form.querySelectorAll('input[name="content_kind"],input[name="facebook"],input[name="bluesky"],input[name="tiktok"]')
           .forEach(el => el.disabled = true);
       }
       if (k === "images") {
@@ -182,7 +183,7 @@ export const NEW_DRAFT_JS = String.raw`
         }
       } else if (k === "video" && !videoAttached) {
         statusText("Uploading and attaching video...");
-        await upload(video,"video",$("new-video-alt").value.trim(),fb,bs);
+        await upload(video,"video",$("new-video-alt").value.trim(),fb,bs,target("tiktok"));
         videoAttached = true;
       }
       window.location.assign("/post/" + encodeURIComponent(created.id));
