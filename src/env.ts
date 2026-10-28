@@ -39,6 +39,14 @@ export interface Env {
   IMAGES?: ImagesBinding;
   /** Optional: read-only GitHub token for images in private repos. */
   GITHUB_READ_TOKEN?: string;
+  /** TikTok developer Login Kit client key (Worker secret). */
+  TIKTOK_CLIENT_KEY?: string;
+  /** TikTok developer Login Kit client secret (Worker secret). */
+  TIKTOK_CLIENT_SECRET?: string;
+  /** Separate high-entropy key for encrypting TikTok tokens at rest (Worker secret, 32+ characters). */
+  TIKTOK_TOKEN_ENCRYPTION_KEY?: string;
+  /** Exact callback registered with TikTok. Defaults to the production workers.dev URL. */
+  TIKTOK_REDIRECT_URI?: string;
 }
 
 export const REQUIRED_SECRETS = [
