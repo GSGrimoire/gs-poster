@@ -7,7 +7,7 @@
 - GitHub-authenticated `/tiktok/settings` page with Connect and Disconnect.
 - TikTok login uses a session-bound, one-use authorization state; server-side access and refresh tokens are encrypted in Cloudflare D1 using a dedicated Worker secret.
 - Initially request only `user.info.basic` and `video.upload`, **not** `video.publish`.
-- An authenticated editor can send a GS Poster video to their TikTok inbox using a separate PIN-confirmed action on the post page. Videos are sent directly as binary MP4 files, so no public video URL or verified image domain is necessary for this phase.
+- An authenticated editor can create a TikTok-only video draft, attach a private MP4, and send it to their TikTok inbox using a separate PIN-confirmed action on the post page. Videos are sent directly as binary MP4 files, so no public video URL or verified image domain is necessary for this phase.
 - GS Poster records TikTok's upload ID and permits a manual status refresh. A repeated or uncertain transfer is not automatically retried.
 
 This **does not** publish to TikTok, synchronize TikTok posting times, or add TikTok to automatic calendar releases. The creator must open their TikTok inbox notification, finish editing and tap Publish inside TikTok.
