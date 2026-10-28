@@ -4,10 +4,11 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, attachDraftVideo, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
+import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
+import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, type NewDraftFields } from "./new-draft.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
@@ -82,6 +83,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
+  if (path === "/new" && (req.method === "GET" || req.method === "POST")) return newDraftPage(req,env,session);
 
   const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption))?$/.exec(path);
   if (m) {
@@ -289,7 +291,7 @@ async function dashboard(env: Env, session: Session, requestedWeek: string | nul
 
   const body = `
     ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
-    <h2>Weekly planner</h2>
+    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><a class="btn" href="/new">+ New draft</a></div>
     ${calendar}
     ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
     ${section("Scheduled", scheduled, "Nothing scheduled.")}
@@ -299,6 +301,39 @@ async function dashboard(env: Env, session: Session, requestedWeek: string | nul
       .map((a) => `<tr><td class="ts">${esc(shortTime(env, a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}${a.post_id ? ` <a href="/post/${esc(a.post_id)}">${esc(a.post_id)}</a>` : ""}</td></tr>`)
       .join("")}</table>` : `<p class="empty">No activity yet.</p>`}`;
   return html(page("GS Poster", body, { login: session.login, wide: true }));
+}
+
+/** Only creates a draft. No PIN, Graph or publishing calls are permitted here. */
+async function newDraftPage(req: Request,env:Env,session:Session):Promise<Response> {
+  const csrf=await csrfToken(env,session);
+  const show=(fields:NewDraftFields,error?:string,status=200)=>
+    html(page("New draft",renderNewDraft(fields,csrf,env.TIMEZONE,error),{login:session.login}),{status});
+  if(req.method==="GET"){
+    const when=newDraftPrefill(new URL(req.url).searchParams.get("when"),env.TIMEZONE);
+    return show(blankNewDraft(when));
+  }
+  if(!sameOrigin(req))return new Response("Cross-site request refused",{status:403});
+  if(Number(req.headers.get("content-length")||0)>160_000)
+    return show(blankNewDraft(),"Draft form exceeds its size limit.",413);
+  let form:FormData;
+  try{form=await req.formData();}
+  catch{return show(blankNewDraft(),"Invalid draft form.",400);}
+  if(!(await checkCsrf(env,session,String(form.get("csrf")||""))))
+    return show(blankNewDraft(),"Session expired. Refresh and try again.",403);
+  const str=(name:string)=>String(form.get(name)||"");
+  const fields:NewDraftFields={
+    label:str("label"),release:str("release"),message:str("message"),
+    bsCaption:str("bs_caption"),facebook:form.get("facebook")==="1",
+    bluesky:form.get("bluesky")==="1",when:str("when"),
+  };
+  try{
+    const input=parseNewDraft(fields,env.TIMEZONE,session.login);
+    const created=await createPost(env.DB,input);
+    await audit(env.DB,session.login,"web-drafted",created.id,created.scheduled_at || undefined);
+    return redirect("/post/"+encodeURIComponent(created.id));
+  }catch(error){
+    return show(fields,error instanceof Error?error.message:"Could not save draft.",400);
+  }
 }
 
 interface PageState {
