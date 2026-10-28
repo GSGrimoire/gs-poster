@@ -288,7 +288,7 @@ async function dashboard(env: Env, session: Session, requestedWeek: string | nul
     ${log.length ? `<table class="log">${log
       .map((a) => `<tr><td class="ts">${esc(shortTime(env, a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}${a.post_id ? ` <a href="/post/${esc(a.post_id)}">${esc(a.post_id)}</a>` : ""}</td></tr>`)
       .join("")}</table>` : `<p class="empty">No activity yet.</p>`}`;
-  return html(page("GS Poster", body, { login: session.login }));
+  return html(page("GS Poster", body, { login: session.login, wide: true }));
 }
 
 interface PageState {
