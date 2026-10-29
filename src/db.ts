@@ -274,6 +274,7 @@ export async function updateCalendarTime(
 /** Version-guarded caption edit; Facebook and Bluesky captions update in one D1 batch. */
 export async function updateCalendarCaptions(
   db: D1Database, post: Post, message: string, blueskyCaption: string | null, approved: boolean,
+  tiktokCaption: string | null = post.tiktok_caption,
 ): Promise<boolean> {
   await ensureSchema(db);
   const nextVersion = new Date(Math.max(Date.now(), Date.parse(post.updated_at) + 1)).toISOString();
@@ -284,10 +285,10 @@ export async function updateCalendarCaptions(
   const conditionForBluesky = post.bluesky
     ? " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = ? AND status = ?)"
     : "";
-  const args: unknown[] = [message, nextVersion, post.id, post.updated_at];
+  const args: unknown[] = [message,tiktokCaption,nextVersion, post.id, post.updated_at];
   if (post.bluesky) args.push(post.id, targetStatus);
   const statements = [
-    db.prepare("UPDATE posts SET message = ?, updated_at = ? WHERE id = ? AND updated_at = ?" +
+    db.prepare("UPDATE posts SET message = ?, tiktok_caption = ?, updated_at = ? WHERE id = ? AND updated_at = ?" +
       conditions + conditionForBluesky).bind(...args),
   ];
   if (post.bluesky) {
