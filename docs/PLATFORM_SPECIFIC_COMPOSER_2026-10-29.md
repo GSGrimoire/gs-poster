@@ -1,7 +1,7 @@
 # Platform-specific composition and review
 
 **Updated:** 29 October 2026  
-**Scope:** GS Poster new-draft editor, saved draft review, media storage, and TikTok transfer. This is an implemented design in the corresponding pull request, pending validation and deployment.
+**Scope:** GS Poster new-draft editor, saved draft review, media storage, and TikTok transfer. Implementation and validation history: [pull request 36](https://github.com/GSGrimoire/gs-poster/pull/36). Confirm current deployment state in GitHub Actions.
 
 ## Why this was necessary
 
