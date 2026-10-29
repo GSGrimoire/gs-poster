@@ -154,9 +154,10 @@ export const NEW_DRAFT_JS = String.raw`
 
   function chooseImages(files) {
     if(busy||created)return;
-    images=Array.from(files).map((file,index)=>({file,order:index,attached:false,alt:null,targets:{}}));
-    imageList.replaceChildren();
-    for(const item of images){
+    const offset=images.length;
+    const additions=Array.from(files).map((file,index)=>({file,order:offset+index,attached:false,alt:null,targets:{}}));
+    images.push(...additions);
+    for(const item of additions){
       const wrap=document.createElement("article");
       wrap.className="new-file";
       wrap.tabIndex=-1;
