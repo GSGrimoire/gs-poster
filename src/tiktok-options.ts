@@ -33,7 +33,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   }
   const csrf=await csrfToken(env,session);
   const title=(p.label||p.release||"GS Grimoire").slice(0,90);
-  const caption=p.message.slice(0,type==="PHOTO"?4000:2200);
+  const caption=(p.tiktok_caption ?? p.message).slice(0,type==="PHOTO"?4000:2200);
   const preview=type==="PHOTO"?
     '<div class="tiktok-carousel-preview">'+post.images.slice(0,35).map((_,i)=>
       '<figure class="tiktok-slide"><img src="/media/'+esc(p.id)+'/'+i+'" alt="Carousel image '+(i+1)+'" loading="lazy"><figcaption>'+String(i+1)+' / '+String(post.images.length)+'</figcaption></figure>').join("")+'</div>':
