@@ -52,7 +52,9 @@ export const NEW_DRAFT_JS = String.raw`
     else if(tt&&(ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000))warning="Shorten TikTok caption";
     else if(k==="images"&&!images.length)warning="Add artwork";
     else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&selectedCount(name)>platformLimits[name])) warning="Reduce images for the highlighted destination";
-    else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&!selectedCount(name))) warning="Assign at least one image to each selected platform";
+    else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&!selectedCount(name)&&
+      !(name==="facebook"&&mainCaption.value.trim())&&!(name==="bluesky"&&bsCaption.value.trim())))
+      warning="Assign media or write a text-only caption for each destination";
     else if(k==="images"&&bs&&images.some(x=>x.targets?.bluesky?.checked&&!x.alt?.value.trim()))warning="Describe selected Bluesky images";
     else if(k==="video"&&!video)warning="Add an MP4";
     else if(k==="video"&&bs&&!$("new-video-alt").value.trim())warning="Describe Bluesky video";
@@ -262,7 +264,11 @@ export const NEW_DRAFT_JS = String.raw`
       for(const name of ["facebook","tiktok","bluesky"]){
         if(!target(name))continue;
         const count=selectedCount(name);
-        if(!count)throw new Error("Choose at least one image for "+name+".");
+        if(!count){
+          if(name==="facebook"&&mainCaption.value.trim())continue;
+          if(name==="bluesky"&&bsCaption.value.trim())continue;
+          throw new Error("Choose an image or provide a text-only caption for "+name+".");
+        }
         if(count>platformLimits[name])throw new Error(name+" supports up to "+platformLimits[name]+" images.");
       }
       for(const [i,item] of images.entries()){
