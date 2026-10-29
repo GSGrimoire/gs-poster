@@ -94,23 +94,33 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   .new-file label{margin:0;grid-column:2}
   .new-file input{width:100%}
   .new-file .gallery-controls{grid-column:2}
-  .platform-editor-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:stretch}
+  .workspace-grid{grid-template-columns:minmax(0,1fr) minmax(210px,250px)}
+  .workspace-main{min-width:0}
+  .platform-editor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px;align-items:stretch}
+  .platform-editor-grid:has(.platform-editor:not([hidden]):only-child){grid-template-columns:1fr}
   .platform-editor{min-width:0;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--bg)}
   .platform-editor h3{margin:0 0 8px}
-  .platform-editor textarea{width:100%;min-height:175px}
+  .platform-editor textarea{display:block;width:100%;min-width:0;min-height:210px;resize:vertical;overflow-wrap:break-word;word-break:normal}
+  .platform-editor label{overflow-wrap:normal;word-break:normal}
+  .platform-editor h3{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .info-tip{position:relative;display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border:1px solid var(--muted);border-radius:50%;font:700 12px system-ui,sans-serif;color:var(--muted);cursor:help;flex-shrink:0}
+  .info-tip .info-tip-content{visibility:hidden;opacity:0;pointer-events:none;position:absolute;left:0;top:calc(100% + 9px);z-index:5;width:min(280px,calc(100vw - 65px));padding:11px 13px;border:1px solid var(--accent2);border-radius:8px;background:var(--panel);box-shadow:0 8px 24px #0008;color:var(--text);font:13px/1.5 system-ui,sans-serif;transition:opacity .12s}
+  .info-tip:hover .info-tip-content,.info-tip:focus .info-tip-content,.info-tip:focus-within .info-tip-content{visibility:visible;opacity:1}
+  .info-tip:focus-visible{outline:3px solid var(--accent2);outline-offset:2px}
   .platform-editor[hidden]{display:none!important}
   .platform-editor .field-meter{margin-top:5px}
   .new-target-choices{display:flex;gap:7px;flex-wrap:wrap;grid-column:2}
   .new-target-choices label{margin:0!important;font:600 12px system-ui,sans-serif;display:flex;align-items:center;gap:5px}
   .new-target-choices input{width:auto!important}
   .platform-total{font-size:12px;color:var(--muted)}
-  @media(max-width:980px){.platform-editor-grid{grid-template-columns:1fr}}
+  @media(max-width:1100px){.workspace-grid{grid-template-columns:minmax(0,1fr)}.workspace-rail{position:static}}
+  @media(max-width:600px){.platform-editor-grid{grid-template-columns:1fr}.platform-editor{padding:14px}}
   
   .new-file .file-title{font:600 13px/1.4 system-ui,sans-serif;min-width:0;overflow-wrap:anywhere}
   #new-video-preview{width:100%;max-height:340px;border-radius:10px;margin-top:8px}
   #new-draft-form .step-card label{margin-top:9px}
   #new-draft-form .choice-tile{margin:0!important}
-  #new-draft-form .step-card textarea{min-height:120px}
+  #new-draft-form .step-card textarea{min-height:210px}
   #new-draft-status:not(:empty){margin:12px 0 0;padding:12px;border-radius:9px;background:var(--surface2)}
   #new-asap-button[aria-pressed=true]{background:var(--surface2);border-color:var(--accent2)}
   </style>
@@ -163,23 +173,22 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
         <div class="step-heading"><span class="step-number">3</span><div><h3 id="draft-copy-title">Tell the story</h3><p class="hint">Tailor the caption to each destination.</p></div></div>
         <div class="platform-editor-grid" aria-label="Platform-specific captions">
         <section id="new-facebook-panel" class="platform-editor">
-          <h3>Facebook</h3>
-          <label for="new-message">Facebook caption</label>
+          <h3>Facebook <span class="info-tip" tabindex="0" aria-label="Facebook caption guidance">i<span class="info-tip-content" role="tooltip">Up to 63,206 characters. Facebook uses its own caption and assigned gallery. Publishing requires separate approval.</span></span></h3>
+          <label for="new-message">Caption</label>
           <textarea id="new-message" name="message" maxlength="63206" placeholder="Your story, hook or announcement...">${v(fields.message)}</textarea>
           <div class="field-meter" id="new-main-count">0 characters</div>
           <p class="form-info" id="new-tiktok-caption-advice" hidden>TikTok photo descriptions can contain up to 4,000 characters. Review the final caption again in TikTok posting options.</p>
         </section>
         <section id="new-tiktok-panel" class="platform-editor" ${fields.tiktok?"":"hidden"}>
-          <h3>TikTok</h3>
-          <label for="new-tiktok-caption">TikTok caption and hashtags</label>
-          <textarea id="new-tiktok-caption" name="tiktok_caption" maxlength="4000" style="min-height:120px" placeholder="Tailor your TikTok caption, hooks and hashtags here...">${v(fields.tiktokCaption||"")}</textarea>
-          <p class="form-info">Leave blank to use the shared caption above. Photo limit: 4,000 characters. Video limit: 2,200 characters.</p>
+          <h3>TikTok <span class="info-tip" tabindex="0" aria-label="TikTok caption guidance">i<span class="info-tip-content" role="tooltip">Include hashtags here. Up to 4,000 characters for photos or 2,200 for video. An empty caption falls back to the Facebook caption. TikTok transfer always needs separate approval.</span></span></h3>
+          <label for="new-tiktok-caption">Caption and hashtags</label>
+          <textarea id="new-tiktok-caption" name="tiktok_caption" maxlength="4000" placeholder="Tailor your TikTok caption, hooks and hashtags here...">${v(fields.tiktokCaption||"")}</textarea>
           <div class="field-meter" id="new-tiktok-count">0 characters</div>
         </section>
         <section id="new-bluesky-panel" class="platform-editor">
-          <h3>Bluesky</h3>
-          <label for="new-bs">Bluesky caption (up to 300 characters)</label>
-          <textarea id="new-bs" name="bs_caption" maxlength="300" style="min-height:110px" placeholder="A shorter companion caption...">${v(fields.bsCaption)}</textarea>
+          <h3>Bluesky <span class="info-tip" tabindex="0" aria-label="Bluesky caption guidance">i<span class="info-tip-content" role="tooltip">Up to 300 characters. Bluesky can use four selected images, each with descriptive alternative text. The caption is independent of other platforms.</span></span></h3>
+          <label for="new-bs">Caption</label>
+          <textarea id="new-bs" name="bs_caption" maxlength="300" placeholder="A shorter companion caption...">${v(fields.bsCaption)}</textarea>
           <div class="field-meter" id="new-bs-count">0 / 300</div>
         </section>
         </div>
