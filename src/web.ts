@@ -463,26 +463,33 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     actions += `
       <form method="post" action="/post/${p.id}/approve" class="card">
         ${hidden}
-        <p class="hint">Select one or both targets. Every selected target is authorized by this approval and PIN.</p>
-        <label><input type="checkbox" name="target_facebook" value="1" ${p.facebook_enabled ? "checked" : ""}> Publish to Facebook</label>
+        <p class="hint">Approve Facebook and Bluesky independently. TikTok always requires a separate transfer and PIN.</p>
+        <div class="platform-preview-grid">
+        ${p.facebook_enabled?`<section class="platform-preview"><h3>Facebook approval</h3>
+        <label><input type="checkbox" name="target_facebook" value="1" checked> Publish to Facebook</label>
         <label for="message">Facebook caption</label>
         <textarea id="message" name="message">${esc(message)}</textarea>
-        <label><input type="checkbox" name="target_bluesky" value="1" ${bs ? "checked" : ""}> Publish to Bluesky</label>
+        <p class="hint">${p.video?"Video":p.images.length+" images"}</p></section>`:
+        `<input type="hidden" name="message" value="${esc(message)}">`}
+        ${bs?`<section class="platform-preview"><h3>Bluesky approval</h3>
+        <label><input type="checkbox" name="target_bluesky" value="1" checked> Publish to Bluesky</label>
         <label for="bs_caption">Bluesky caption (300 characters)</label>
-        <textarea id="bs_caption" name="bs_caption">${esc(bs?.caption ?? message.slice(0, 300))}</textarea>
-        <p class="hint">Provide alternative text for each Bluesky image. When images and a Patreon card are selected, the link card appears as a reply in the same thread.</p>
+        <textarea id="bs_caption" name="bs_caption">${esc(bs.caption)}</textarea>
+        <p class="hint">Alt text is required for every selected Bluesky image. The optional Patreon card appears as a reply.</p>
         ${bsMediaFields}
-        <label for="bs_video_url">Bluesky video (optional MP4 GitHub URL or private upload)</label>
-        <input id="bs_video_url" type="text" name="bs_video_url" value="${esc(bs?.video?.url ?? "")}">
+        <label for="bs_video_url">Bluesky video (MP4 GitHub URL or private upload)</label>
+        <input id="bs_video_url" type="text" name="bs_video_url" value="${esc(bs.video?.url??"")}">
         <label for="bs_video_alt">Video accessibility description</label>
-        <input id="bs_video_alt" type="text" name="bs_video_alt" value="${esc(bs?.video?.alt ?? "")}">
-        <p class="hint">A Bluesky post can have either a video or an image gallery, not both.</p>
-        <label for="bs_patreon_url">Free Patreon post URL (optional)</label>
-        <input id="bs_patreon_url" type="text" name="bs_patreon_url" value="${esc(patreon?.url ?? "")}">
+        <input id="bs_video_alt" type="text" name="bs_video_alt" value="${esc(bs.video?.alt??"")}">
+        <p class="hint">Choose video or images, not both.</p>
+        <label for="bs_patreon_url">Free Patreon post URL</label>
+        <input id="bs_patreon_url" name="bs_patreon_url" type="text" value="${esc(patreon?.url??"")}">
         <label for="bs_patreon_title">Patreon card title</label>
-        <input id="bs_patreon_title" type="text" name="bs_patreon_title" value="${esc(patreon?.title ?? "")}">
+        <input id="bs_patreon_title" name="bs_patreon_title" type="text" value="${esc(patreon?.title??"")}">
         <label for="bs_patreon_description">Patreon card description</label>
-        <input id="bs_patreon_description" type="text" name="bs_patreon_description" value="${esc(patreon?.description ?? "")}">
+        <input id="bs_patreon_description" name="bs_patreon_description" type="text" value="${esc(patreon?.description??"")}">
+        </section>`:""}
+        </div>
         <label for="when">Publish time (${esc(env.TIMEZONE)})</label>
         <input id="when" type="datetime-local" name="when" value="${esc(whenValue)}">
         <p class="hint">Leave empty to post the moment you approve. Otherwise between 12 minutes and 30 days from now.</p>
@@ -538,9 +545,16 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     actions += `<form method="post" action="/post/${p.id}/edit-caption" class="card">${hidden}
       <h2>Edit unreleased captions</h2>
       <p class="hint">Save caption changes without publishing. Media and publishing targets are fixed after approval. An approved post will be updated on Facebook where supported.</p>
-      ${p.facebook_enabled ? `<label for="edit-message">Facebook caption</label><textarea id="edit-message" name="message">${esc(p.message)}</textarea>` :
+      <div class="platform-preview-grid">
+      ${p.facebook_enabled ? `<section class="platform-preview"><h3>Facebook</h3><label for="edit-message">Caption</label><textarea id="edit-message" name="message">${esc(p.message)}</textarea></section>` :
         `<input type="hidden" name="message" value="${esc(p.message)}">`}
-      ${p.bluesky ? `<label for="edit-bluesky">Bluesky caption (up to 300 characters)</label><textarea id="edit-bluesky" name="bs_caption">${esc(p.bluesky.caption)}</textarea>` : ""}
+      ${p.tiktok_enabled ? `<section class="platform-preview"><h3>TikTok</h3>
+        <label for="edit-tiktok">Caption and hashtags</label>
+        <textarea id="edit-tiktok" name="tiktok_caption">${esc(p.tiktok_caption??"")}</textarea>
+        <p class="hint">Blank uses the shared caption. Already transferred TikTok content cannot be edited here.</p></section>` : ""}
+      ${p.bluesky ? `<section class="platform-preview"><h3>Bluesky</h3><label for="edit-bluesky">Caption (300 characters)</label>
+        <textarea id="edit-bluesky" name="bs_caption">${esc(p.bluesky.caption)}</textarea></section>` : ""}
+      </div>
       <label for="edit-pin">Approval PIN</label><input id="edit-pin" type="password" name="pin" required autocomplete="off">
       <div class="row"><button class="primary">Save captions</button></div></form>`;
   }
@@ -822,6 +836,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       }
       const nextMessage = String(form.get("message") ?? "");
       const nextBluesky = current.bluesky ? String(form.get("bs_caption") ?? "") : null;
+      const nextTikTok = current.tiktok_enabled ? (String(form.get("tiktok_caption")??"").trim()||null) : null;
       if (current.facebook_enabled && !nextMessage.trim() && !current.images.length) {
         return postPage(env, session, id, { error: "Facebook requires a caption or image." }, 400);
       }
@@ -829,7 +844,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         const issues = checkBluesky({ ...current.bluesky, caption: nextBluesky! });
         if (issues.length) return postPage(env, session, id, { error: issues.join(" ") }, 400);
       }
-      await editPendingCaptions(env, id, current.updated_at, nextMessage, nextBluesky, session.login);
+      await editPendingCaptions(env, id, current.updated_at, nextMessage, nextBluesky, session.login,nextTikTok);
       return postPage(env, session, id, { notice: "Pending captions updated. No post was published." });
     }
     if (action === "reschedule") {
