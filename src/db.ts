@@ -38,6 +38,8 @@ export interface Post {
   label: string | null;
   release: string | null;
   message: string;
+  /** Optional TikTok-specific description; falls back to the general caption. */
+  tiktok_caption: string | null;
   link: string | null;
   images: string[];
   /** Facebook video URL or private upload reference, mutually exclusive with photos. */
@@ -91,6 +93,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       label TEXT,
       release TEXT,
       message TEXT NOT NULL,
+      tiktok_caption TEXT,
       link TEXT,
       images TEXT NOT NULL DEFAULT '[]',
       video TEXT,
@@ -146,7 +149,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     catch(error) { if (!/duplicate column name/i.test(String(error))) throw error; }
   }
   const platformColumns=await db.prepare("PRAGMA table_info(posts)").all<{name:string}>();
-  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"]]) {
+  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"],["tiktok_caption","TEXT"]]) {
     if(!platformColumns.results.some(column=>column.name===name)) {
       try {await db.prepare("ALTER TABLE posts ADD COLUMN "+name+" "+definition).run();}
       catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
@@ -184,6 +187,7 @@ export function newId(): string {
 
 export interface NewPost {
   message: string;
+  tiktok_caption?: string | null;
   link?: string | null;
   images: string[];
   video?: string | null;
@@ -201,9 +205,9 @@ export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
   const now = new Date().toISOString();
   const id = newId();
   const inserts = [
-    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, link, images, video, facebook_enabled, tiktok_enabled, scheduled_at, created_by)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.link ?? null, JSON.stringify(p.images), p.video ?? null, p.facebook_enabled===false?0:1, p.tiktok_enabled?1:0, p.scheduled_at, p.created_by),
+    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, tiktok_caption, link, images, video, facebook_enabled, tiktok_enabled, scheduled_at, created_by)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.tiktok_caption ?? null, p.link ?? null, JSON.stringify(p.images), p.video ?? null, p.facebook_enabled===false?0:1, p.tiktok_enabled?1:0, p.scheduled_at, p.created_by),
   ];
   if (p.bluesky) inserts.push(db.prepare(`INSERT INTO bluesky_targets
       (post_id, caption, images, video, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?, ?)`)
