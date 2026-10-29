@@ -3,7 +3,7 @@
  * Does not schedule TikTok posts or bypass creator consent.
  */
 import type {Env} from "./env.ts";
-import {getPost,audit} from "./db.ts";
+import {getPost,audit,tiktokMedia} from "./db.ts";
 import {tiktokAccessToken,getTikTokCreatorOptions} from "./tiktok.ts";
 import {createTikTokMediaGrant,ensureTikTokMediaSchema} from "./tiktok-media.ts";
 import {ensureTikTokInboxSchema,getTikTokInboxTransfer,type TikTokInboxTransfer} from "./tiktok-inbox.ts";
@@ -88,8 +88,8 @@ export async function startTikTokContentTransfer(
     throw Error("TikTok target changed. Reload before posting.");
   if(!["draft","scheduled","published"].includes(p.status))
     throw Error("This post cannot be sent to TikTok in its current state.");
-  const refs=options.mediaType==="PHOTO"?p.images:
-    p.video?[p.video]:[];
+  const media=tiktokMedia(p);
+  const refs=options.mediaType==="PHOTO"?media.images:media.video?[media.video]:[];
   if(!refs.length)throw Error(options.mediaType==="PHOTO"?
     "Attach images to the TikTok draft first.":"Attach an MP4 to the TikTok draft first.");
   if(options.mediaType==="PHOTO"&&refs.length>35)
