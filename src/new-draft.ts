@@ -13,6 +13,14 @@ export interface NewDraftFields {
 export function blankNewDraft(when = ""): NewDraftFields {
   return {label:"",release:"",message:"",bsCaption:"",facebook:true,bluesky:true,tiktok:false,when,contentKind:"text"};
 }
+
+/** Explicit presets only, selected through GET links. No preset approves or publishes. */
+export function presetNewDraft(preset: string | null, when = ""): NewDraftFields {
+  const base=blankNewDraft(when);
+  if(preset==="tiktok-carousel") return {...base,facebook:false,bluesky:false,tiktok:true,contentKind:"images"};
+  if(preset==="tiktok-video") return {...base,facebook:false,bluesky:false,tiktok:true,contentKind:"video"};
+  return base;
+}
 /** Reject forged, stale or non-existent local times, including DST gaps. */
 export function newDraftTime(value: string, zone: string, now = new Date()): Date | null {
   if (!value) return null;
