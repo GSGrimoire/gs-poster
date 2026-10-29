@@ -109,7 +109,7 @@ label:has(> input[type="checkbox"]) input{margin:3px 0 0;flex-shrink:0;accent-co
 .gallery-controls button{font-size:12px;padding:6px 9px}
 .gallery-number{font:750 12px system-ui,sans-serif;color:var(--accent2)}
 .choice-advice{font:13px/1.55 system-ui,sans-serif;border-left:3px solid var(--accent2);background:var(--surface2);padding:9px 12px;margin-top:14px;border-radius:0 8px 8px 0}
-@media(max-width:830px){.workspace-grid{grid-template-columns:1fr}.workspace-rail{position:static;order:-1}.app-nav a.nav-create{margin-left:0}}
+@media(max-width:830px){.workspace-grid{grid-template-columns:1fr}.workspace-rail{position:static}.app-nav a.nav-create{margin-left:0}}
 @media(max-width:600px){header{align-items:flex-start;flex-wrap:wrap}.app-nav{gap:4px}.app-nav a{padding:8px}.hero{padding:19px}.choice-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.row button,.row .btn{max-width:100%}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
 `;
