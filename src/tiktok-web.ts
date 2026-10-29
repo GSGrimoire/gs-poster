@@ -133,7 +133,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   <div class="step-card"><div class="eyebrow">Next step</div>
     <h3 style="margin:8px 0">Create your next post</h3>
     <p class="hint">Try a two-image carousel first. Sending to the TikTok inbox is safer for initial testing than immediate Direct Post.</p>
-    <p class="inline-actions"><a class="btn" href="/new">+ Create a draft</a><a class="btn" href="/">Open planner</a></p>
+    <p class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/new?preset=tiktok-video">+ TikTok video</a><a class="btn" href="/">Open planner</a></p>
     <p class="rail-note">Automatic TikTok scheduling is not enabled. Every TikTok transfer is a separate approval action, independent of your planner time.</p>
   </div>`;
   // Templates contain only escaped account fields or fixed server-defined strings.
