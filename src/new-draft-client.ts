@@ -139,6 +139,7 @@ export const NEW_DRAFT_JS = String.raw`
     $("new-video-alt-label").hidden=!(bs&&k==="video");
     for(const item of images){
       item.alt.required=bs&&k==="images"&&!!item.targets?.bluesky?.checked;
+      if(item.label)item.label.hidden=!item.alt.required;
       if(item.targetContainer)for(const [name,node] of Object.entries(item.targetLabels)) node.hidden=!target(name);
     }
     $("new-video-alt").required=bs&&k==="video";
@@ -153,7 +154,7 @@ export const NEW_DRAFT_JS = String.raw`
 
   function chooseImages(files) {
     if(busy||created)return;
-    images=Array.from(files).map(file=>({file,attached:false,alt:null,targets:{}}));
+    images=Array.from(files).map((file,index)=>({file,order:index,attached:false,alt:null,targets:{}}));
     imageList.replaceChildren();
     for(const item of images){
       const wrap=document.createElement("article");
@@ -197,7 +198,8 @@ export const NEW_DRAFT_JS = String.raw`
         const platformLabel=document.createElement("label");
         platformLabel.hidden=!target(name);
         const check=document.createElement("input");
-        check.type="checkbox";check.checked=target(name);
+        check.type="checkbox";
+        check.checked=target(name)&&(name==="bluesky"?item.order<4:name==="tiktok"?item.order<35:true);
         check.setAttribute("aria-label",title+" for "+item.file.name);
         check.addEventListener("change",()=>{
           item.alt.required=target("bluesky")&&!!item.targets.bluesky.checked;
