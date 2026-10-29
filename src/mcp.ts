@@ -15,7 +15,7 @@ import { checkImageUrl, fetchImage } from "./media.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
-import { createUpload, getUploadUsage } from "./upload.ts";
+import { createUpload, getUploadUsage, uploadStatusForOwner } from "./upload.ts";
 
 const STATUSES = ["draft", "rejected", "publishing", "scheduled", "published", "failed", "cancelled"] as const;
 
@@ -26,6 +26,10 @@ function fail(message: string, extra?: Record<string, unknown>) {
   return { isError: true, content: [{ type: "text" as const, text: JSON.stringify({ error: message, ...extra }, null, 2) }] };
 }
 
+function ownerLogin():string {
+  const login=getMcpAuthContext()?.props?.login;
+  return typeof login==="string" ? login : "";
+}
 function actor(): string {
   const props = getMcpAuthContext()?.props;
   const login = typeof props?.login === "string" ? props.login : "unknown";
@@ -48,6 +52,7 @@ function view(env: Env, origin: string, p: Post) {
     images: p.images,
     video: p.video,
     facebook_enabled: p.facebook_enabled,
+    tiktok_enabled: p.tiktok_enabled===true,
     bluesky: p.bluesky,
     link: p.link,
     publish_at: p.scheduled_at,
@@ -129,7 +134,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     "request_upload",
     {
       title: "Get a private one-time file upload link",
-      description: "Create one private JPG, PNG, GIF (up to 10 MB) or MP4 (up to 20 MB) upload link, valid for 10 minutes. Run the returned curl command, then use its upload:// reference in a draft. Uploaded files expire after 45 days. Uploading is NOT publishing.",
+      description: "Create a one-time private JPG, PNG, GIF (up to 10 MB) or MP4 (up to 20 MB) upload link, valid for 10 minutes. Return upload_page_url to the editor: it opens a drag-and-drop uploader from Claude or ChatGPT, with no GitHub staging. If the assistant has direct access to file bytes in a code tool, it may PUT the original file to upload_url. Then check_upload before drafting. No publishing.",
       inputSchema: z.object({
         filename: z.string().min(1).max(200).describe("File name with extension. Only extension is retained."),
       }),
@@ -139,7 +144,10 @@ export function buildServer(env: Env, origin: string): McpServer {
       try {
         const grant = await createUpload(env, origin, { filename, actor: actor() });
         await audit(env.DB, actor(), "upload-link", null, grant.reference);
-        return ok({ ...grant, next: "Upload the local file with curl, then use the reference in draft_post." });
+        return ok({
+          ...grant,upload_page_url:grant.upload_url,
+          next:"Open upload_page_url, select the file and upload privately. In a coding environment, PUT the file bytes to upload_url instead. Then call check_upload with reference and use the stored upload:// reference in draft_post or update_draft. Never share the bearer upload URL publicly."
+        });
       } catch (error) {
         return fail(error instanceof Error ? error.message : String(error));
       }
@@ -147,6 +155,25 @@ export function buildServer(env: Env, origin: string): McpServer {
   );
 
 
+
+  server.registerTool(
+    "check_upload",
+    {
+      title:"Check a private chat media upload",
+      description:"After request_upload, check whether a JPG, PNG, GIF or MP4 upload actually arrived in private storage. Only the editor who requested the upload can inspect it. A stored upload:// reference can be passed to draft_post or update_draft. This does not publish.",
+      inputSchema:z.object({
+        reference:z.string().describe("The upload:// reference returned by request_upload."),
+      }),
+      annotations:{readOnlyHint:true,openWorldHint:false},
+    },
+    async ({reference})=>{
+      const login=ownerLogin();
+      if(!login)return fail("Your authenticated account could not be identified. Reconnect GS Poster.");
+      const result=await uploadStatusForOwner(env.DB,reference,login);
+      return result ? ok({...result,ready:result.status==="stored"}) :
+        fail("Upload not found or not owned by this account.");
+    },
+  );
 
   server.registerTool(
     "check_upload_usage",
@@ -168,10 +195,11 @@ export function buildServer(env: Env, origin: string): McpServer {
     {
       title: "Draft a GS Poster post",
       description:
-        "Save a Facebook, Bluesky or combined GS Grimoire DRAFT for approval. Nothing is published until Gus approves the target(s) on the review page with his PIN. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
+        "Save a Facebook, Bluesky, TikTok or combined GS Grimoire DRAFT for approval. Nothing is published until Gus approves the target(s) on the review page with his PIN. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
       inputSchema: z.object({
         message: z.string().max(63206).describe("Facebook caption or shared descriptive caption."),
-        facebook_enabled: z.boolean().default(true).describe("Whether to publish to Facebook. False requires a Bluesky target."),
+        facebook_enabled: z.boolean().default(true).describe("Select Facebook target. False is allowed when Bluesky or TikTok is selected."),
+        tiktok_enabled: z.boolean().default(false).describe("Select TikTok as an independent draft target. Upload or direct publication on TikTok is a separate explicit PIN-approved web action. GS Poster does not automatically schedule TikTok releases."),
         bluesky: blueskySchema.optional().describe("Optional Bluesky target with its own caption, image alt descriptions and free Patreon link card."),
         images: imageList.optional(),
         video: z.string().optional().describe("Facebook MP4 GitHub URL or private upload:// reference (20 MB maximum). Cannot be combined with Facebook images."),
@@ -182,15 +210,16 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ message, images = [], video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
+    async ({ message, images = [], video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
       const checks = checkMessage(message, { hasImages: images.length > 0 || !!video || (!facebook_enabled && !!bluesky) });
       const time = readWhen(env, publish_at);
       const imgErrors = await checkImages(env, images);
       const bsHouse = bluesky ? checkMessage(bluesky.caption, { hasImages: bluesky.images.length > 0 }) : null;
       const bsErrors = bluesky ? [...checkBluesky(bluesky), ...bsHouse!.errors, ...(await checkImages(env, bluesky.images.map((i) => i.url)))] : [];
       const errors = [...checks.errors, ...(time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
-      if (!facebook_enabled && !bluesky) errors.push("Select Facebook, Bluesky or both.");
-      if (video && !facebook_enabled) errors.push("A Facebook video requires the Facebook target.");
+      if (!facebook_enabled && !bluesky && !tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
+       if (tiktok_enabled && images.length > 35) errors.push("TikTok carousels support at most 35 images.");
+      if (video && !facebook_enabled && !tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
       if (video && images.length) errors.push("Facebook videos cannot be combined with photos.");
       if (video && link) errors.push("Facebook videos cannot also have a link preview.");
       if (video && checkVideoUrl(video)) errors.push(checkVideoUrl(video)!);
@@ -205,6 +234,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         release: release ?? null,
         created_by: actor(),
         facebook_enabled,
+        tiktok_enabled,
         bluesky: bluesky ?? null,
       });
       await audit(env.DB, actor(), "drafted", p.id, label);
@@ -247,8 +277,9 @@ export function buildServer(env: Env, origin: string): McpServer {
       const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
       const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors, ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
-      if (!fbNext && !bsNext) errors.push("Select Facebook, Bluesky or both.");
-      if (nextVideo && !fbNext) errors.push("A Facebook video requires the Facebook target.");
+      if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
+      if (cur.tiktok_enabled && nextImages.length > 35) errors.push("TikTok carousels support at most 35 images.");
+      if (nextVideo && !fbNext && !cur.tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
       if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
       if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
