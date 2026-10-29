@@ -42,6 +42,9 @@ export interface Post {
   tiktok_caption: string | null;
   link: string | null;
   images: string[];
+  /** Null means a legacy shared gallery; [] means explicitly independent TikTok media. */
+  tiktok_images: string[] | null;
+  tiktok_video: string | null;
   /** Facebook video URL or private upload reference, mutually exclusive with photos. */
   video: string | null;
   scheduled_at: string | null;
@@ -57,10 +60,11 @@ export interface Post {
   bluesky: BlueskyTarget | null;
 }
 
-interface Row extends Omit<Post, "images" | "facebook_enabled" | "tiktok_enabled" | "bluesky"> {
+interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky"> {
   facebook_enabled: number;
   tiktok_enabled: number;
   images: string;
+  tiktok_images: string | null;
   bs_caption: string | null;
   bs_images: string | null;
   bs_video: string | null;
@@ -96,6 +100,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       tiktok_caption TEXT,
       link TEXT,
       images TEXT NOT NULL DEFAULT '[]',
+      tiktok_images TEXT,
+      tiktok_video TEXT,
       video TEXT,
       facebook_enabled INTEGER NOT NULL DEFAULT 1,
       tiktok_enabled INTEGER NOT NULL DEFAULT 0,
@@ -149,7 +155,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     catch(error) { if (!/duplicate column name/i.test(String(error))) throw error; }
   }
   const platformColumns=await db.prepare("PRAGMA table_info(posts)").all<{name:string}>();
-  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"],["tiktok_caption","TEXT"]]) {
+  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"],["tiktok_caption","TEXT"],["tiktok_images","TEXT"],["tiktok_video","TEXT"]]) {
     if(!platformColumns.results.some(column=>column.name===name)) {
       try {await db.prepare("ALTER TABLE posts ADD COLUMN "+name+" "+definition).run();}
       catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
@@ -162,6 +168,8 @@ function fromRow(r: Row): Post {
   return {
     ...r,
     images: JSON.parse(r.images || "[]"),
+    tiktok_images: r.tiktok_images===null ? null : JSON.parse(r.tiktok_images),
+    tiktok_video: r.tiktok_video ?? null,
     facebook_enabled: r.bs_caption === null ? r.facebook_enabled !== 0 : r.bs_facebook_enabled !== 0,
     tiktok_enabled: r.tiktok_enabled !== 0,
     bluesky: r.bs_caption === null ? null : {
@@ -190,6 +198,8 @@ export interface NewPost {
   tiktok_caption?: string | null;
   link?: string | null;
   images: string[];
+  tiktok_images?: string[] | null;
+  tiktok_video?: string | null;
   video?: string | null;
   scheduled_at: string | null;
   label?: string | null;
@@ -205,9 +215,9 @@ export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
   const now = new Date().toISOString();
   const id = newId();
   const inserts = [
-    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, tiktok_caption, link, images, video, facebook_enabled, tiktok_enabled, scheduled_at, created_by)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.tiktok_caption ?? null, p.link ?? null, JSON.stringify(p.images), p.video ?? null, p.facebook_enabled===false?0:1, p.tiktok_enabled?1:0, p.scheduled_at, p.created_by),
+    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, tiktok_caption, link, images, tiktok_images, tiktok_video, video, facebook_enabled, tiktok_enabled, scheduled_at, created_by)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.tiktok_caption ?? null, p.link ?? null, JSON.stringify(p.images),p.tiktok_images===undefined || p.tiktok_images===null ? null : JSON.stringify(p.tiktok_images),p.tiktok_video??null, p.video ?? null, p.facebook_enabled===false?0:1, p.tiktok_enabled?1:0, p.scheduled_at, p.created_by),
   ];
   if (p.bluesky) inserts.push(db.prepare(`INSERT INTO bluesky_targets
       (post_id, caption, images, video, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?, ?)`)
@@ -323,61 +333,70 @@ export async function reopenCancelledDraft(
 }
 
 /** Store one video for either or both targets in a draft-only D1 transaction. */
-export async function attachDraftVideo(
-  db: D1Database, id: string, reference: string, alt: string,
-  facebook: boolean, bluesky: boolean, expectedVersion: string, tiktok=false,
-): Promise<string | null> {
-  await ensureSchema(db);
-  if (!facebook && !bluesky && !tiktok) throw new Error("Select at least one platform.");
-  if (bluesky && !alt.trim()) throw new Error("Bluesky video requires alternative text.");
-  const version = new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
-  const blueskyGuard = bluesky
-    ? " AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0)"
-    : "";
-  const facebookGuard = (facebook||tiktok) ? " AND json_array_length(images)=0" : "";
-  const tiktokGuard = tiktok ? " AND tiktok_enabled=1" : "";
-  const statements = [
-    db.prepare("UPDATE posts SET video=CASE WHEN ? THEN ? ELSE video END, updated_at=? "+
-      "WHERE id=? AND updated_at=? AND approved_at IS NULL AND status IN ('draft','rejected')" +
-      facebookGuard + tiktokGuard + blueskyGuard)
-      .bind(facebook||tiktok?1:0,reference,version,id,expectedVersion),
-  ];
-  if (bluesky) statements.push(db.prepare(
-    "UPDATE bluesky_targets SET video=json_object('url',?,'alt',?) WHERE post_id=? AND status='draft' "+
-    "AND json_array_length(images)=0 "+
-    "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)")
-    .bind(reference,alt.trim(),id,id,version));
-  const r=await db.batch(statements);
-  return (r[0].meta.changes??0)===1 && (!bluesky||(r[1].meta.changes??0)===1) ? version : null;
+/** Distinguish new independent TikTok galleries from legacy shared media records. */
+export function tiktokMedia(post:Post):{images:string[];video:string|null} {
+  return post.tiktok_images===null
+    ? {images:post.images,video:post.video}
+    : {images:post.tiktok_images,video:post.tiktok_video};
 }
 
-/** Append a stored private image to one or both pending targets, in one D1 transaction. */
-export async function attachDraftImage(
-  db: D1Database, id: string, reference: string, alt: string,
-  facebook: boolean, bluesky: boolean, expectedVersion: string, tiktok=false,
-): Promise<string | null> {
+/** Attach video only to explicitly selected targets, without modifying other platforms. */
+export async function attachDraftVideo(
+  db:D1Database,id:string,reference:string,alt:string,
+  facebook:boolean,bluesky:boolean,expectedVersion:string,tiktok=false,
+):Promise<string|null> {
   await ensureSchema(db);
-  if (!facebook && !bluesky && !tiktok) throw new Error("Select at least one platform.");
-  if (bluesky && !alt.trim()) throw new Error("Alternative text is required for Bluesky.");
-  const next = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
-  const blueskyGuard = bluesky ? " AND EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND b.status = 'draft' AND b.video IS NULL AND json_array_length(b.images) < 4)" : "";
-  const updatePost = db.prepare(
-    "UPDATE posts SET images = CASE WHEN ? THEN json_insert(images, '$[#]', ?) ELSE images END, updated_at = ? " +
-    "WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL" +
-    ((facebook||tiktok) ? " AND video IS NULL AND json_array_length(images) < "+(tiktok?35:80) : "") +
-    (tiktok ? " AND tiktok_enabled=1" : "") + blueskyGuard +
-    ((facebook||tiktok) ? "" : " AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id = posts.id)")
-  ).bind((facebook||tiktok) ? 1 : 0, reference, next, id, expectedVersion);
-  const mutations = [updatePost];
-  if (bluesky) mutations.push(db.prepare(
-    "UPDATE bluesky_targets SET images = json_insert(images, '$[#]', json_object('url', ?, 'alt', ?)) " +
-    "WHERE post_id = ? AND status = 'draft' AND video IS NULL AND json_array_length(images) < 4 " +
-    "AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ? AND approved_at IS NULL)"
-  ).bind(reference, alt.trim(), id, id, next));
-  const results = await db.batch(mutations);
-  const changed = (results[0].meta.changes ?? 0) === 1 &&
-    (!bluesky || (results[1].meta.changes ?? 0) === 1);
-  return changed ? next : null;
+  if(!facebook&&!bluesky&&!tiktok)throw Error("Select at least one platform.");
+  if(bluesky&&!alt.trim())throw Error("Bluesky video requires alternative text.");
+  const version=new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
+  const blueGuard=bluesky?" AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0)":"";
+  const update=db.prepare(
+    "UPDATE posts SET video=CASE WHEN ? OR (? AND tiktok_images IS NULL) THEN ? ELSE video END, "+
+    "tiktok_video=CASE WHEN ? AND tiktok_images IS NOT NULL THEN ? ELSE tiktok_video END, updated_at=? "+
+    "WHERE id=? AND updated_at=? AND approved_at IS NULL AND status IN ('draft','rejected') "+
+    (facebook?" AND facebook_enabled=1 AND json_array_length(images)=0":"")+
+    (tiktok?" AND tiktok_enabled=1 AND ((tiktok_images IS NULL AND json_array_length(images)=0) OR "+
+      "(tiktok_images IS NOT NULL AND json_array_length(tiktok_images)=0))":"")+
+    blueGuard
+  ).bind(facebook?1:0,tiktok?1:0,reference,tiktok?1:0,reference,version,id,expectedVersion);
+  const mutations=[update];
+  if(bluesky)mutations.push(db.prepare(
+    "UPDATE bluesky_targets SET video=json_object('url',?,'alt',?) WHERE post_id=? "+
+    "AND status='draft' AND json_array_length(images)=0 "+
+    "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
+  ).bind(reference,alt.trim(),id,id,version));
+  const result=await db.batch(mutations);
+  return result[0].meta.changes===1&&(!bluesky||result[1].meta.changes===1)?version:null;
+}
+
+/** Append a photo only to each selected platform's gallery, preserving order. */
+export async function attachDraftImage(
+  db:D1Database,id:string,reference:string,alt:string,
+  facebook:boolean,bluesky:boolean,expectedVersion:string,tiktok=false,
+):Promise<string|null> {
+  await ensureSchema(db);
+  if(!facebook&&!bluesky&&!tiktok)throw Error("Select at least one platform.");
+  if(bluesky&&!alt.trim())throw Error("Alternative text is required for Bluesky.");
+  const next=new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
+  const blueGuard=bluesky?" AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND b.video IS NULL AND json_array_length(b.images)<4)":"";
+  const mainGuard=facebook?" AND facebook_enabled=1 AND video IS NULL AND json_array_length(images)<80":"";
+  const ttGuard=tiktok?" AND tiktok_enabled=1 AND ((tiktok_images IS NULL AND video IS NULL AND json_array_length(images)<35) "+
+    "OR (tiktok_images IS NOT NULL AND tiktok_video IS NULL AND json_array_length(tiktok_images)<35))":"";
+  const postUpdate=db.prepare(
+    "UPDATE posts SET images=CASE WHEN ? OR (? AND tiktok_images IS NULL) THEN json_insert(images,'$[#]',?) ELSE images END, "+
+    "tiktok_images=CASE WHEN ? AND tiktok_images IS NOT NULL THEN json_insert(tiktok_images,'$[#]',?) ELSE tiktok_images END, updated_at=? "+
+    "WHERE id=? AND updated_at=? AND status IN ('draft','rejected') AND approved_at IS NULL "+
+    mainGuard+ttGuard+blueGuard+
+    ((!facebook&&!tiktok)?" AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id=posts.id AND status='draft')":"")
+  ).bind(facebook?1:0,tiktok?1:0,reference,tiktok?1:0,reference,next,id,expectedVersion);
+  const mutations=[postUpdate];
+  if(bluesky)mutations.push(db.prepare(
+    "UPDATE bluesky_targets SET images=json_insert(images,'$[#]',json_object('url',?, 'alt',?)) "+
+    "WHERE post_id=? AND status='draft' AND video IS NULL AND json_array_length(images)<4 "+
+    "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
+  ).bind(reference,alt.trim(),id,id,next));
+  const result=await db.batch(mutations);
+  return result[0].meta.changes===1&&(!bluesky||result[1].meta.changes===1)?next:null;
 }
 
 type Patch = Partial<Omit<Post, "id" | "created_at">>;
