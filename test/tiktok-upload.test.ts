@@ -91,7 +91,7 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
   } as unknown as R2Bucket;
   const p=await createPost(env.DB,{
     message:"Video post",images:[],video:ref,scheduled_at:null,
-    created_by:"test",facebook_enabled:true,bluesky:null,
+    created_by:"test",facebook_enabled:true,tiktok_enabled:true,bluesky:null,
   });
   const previous=globalThis.fetch;
   let initCount=0,putCount=0;
@@ -149,7 +149,9 @@ test("TikTok-only video drafts remain unapproved and cannot trigger Facebook pos
   const revision=await attachDraftVideo(env.DB,p.id,ref,"",false,false,p.updated_at,true);
   assert.ok(revision);
   const after=(await getPost(env.DB,p.id))!;
-  assert.equal(after.video,ref);
+  assert.equal(after.video,null);
+  assert.equal(after.tiktok_video,ref);
+  assert.deepEqual(after.tiktok_images,[]);
   assert.equal(after.status,"draft");
   assert.equal(after.approved_at,null);
   assert.equal(after.facebook_enabled,false);

@@ -2,7 +2,7 @@
 import type {Env} from "./env.ts";
 import type {Session} from "./session.ts";
 import {csrfToken} from "./session.ts";
-import {getPost} from "./db.ts";
+import {getPost,tiktokMedia} from "./db.ts";
 import {tiktokConnection,getTikTokCreatorOptions,type TikTokCreatorOptions} from "./tiktok.ts";
 import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
 import {esc,html,page} from "./html.ts";
@@ -20,7 +20,8 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
       '<p>A TikTok transfer already exists. Review it on the post page before sending again.</p>'+
       '<p><a href="/post/'+esc(postId)+'">Back to post</a></p>',
       {login:session.login}),{status:409});
-  const type=p.video?"VIDEO":p.images.length?"PHOTO":null;
+  const media=tiktokMedia(p);
+  const type=media.video?"VIDEO":media.images.length?"PHOTO":null;
   if(!type)return html(page("Attach media",
     '<p>Attach a video or images before sending to TikTok.</p><p><a href="/post/'+esc(postId)+'">Back</a></p>',
     {login:session.login}),{status:409});
@@ -35,9 +36,9 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const title=(p.label||p.release||"GS Grimoire").slice(0,90);
   const caption=(p.tiktok_caption ?? p.message).slice(0,type==="PHOTO"?4000:2200);
   const preview=type==="PHOTO"?
-    '<div class="tiktok-carousel-preview">'+post.images.slice(0,35).map((_,i)=>
-      '<figure class="tiktok-slide"><img src="/media/'+esc(p.id)+'/'+i+'" alt="Carousel image '+(i+1)+'" loading="lazy"><figcaption>'+String(i+1)+' / '+String(post.images.length)+'</figcaption></figure>').join("")+'</div>':
-    '<video controls playsinline preload="metadata" style="width:100%;max-height:420px;border-radius:12px" src="/video/'+esc(p.id)+'/facebook"></video>';
+    '<div class="tiktok-carousel-preview">'+media.images.slice(0,35).map((_,i)=>
+      '<figure class="tiktok-slide"><img src="/media/'+esc(p.id)+'/'+i+'?platform=tiktok" alt="Carousel image '+(i+1)+'" loading="lazy"><figcaption>'+String(i+1)+' / '+String(media.images.length)+'</figcaption></figure>').join("")+'</div>':
+    '<video controls playsinline preload="metadata" style="width:100%;max-height:420px;border-radius:12px" src="/video/'+esc(p.id)+'/tiktok"></video>';
   function fields(mode:"MEDIA_UPLOAD"|"DIRECT_POST") {
     return `
       <input type="hidden" name="csrf" value="${esc(csrf)}">
@@ -88,7 +89,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const body=`<div class="hero">
     <div class="hero-kicker">GS Grimoire · Final review</div>
     <h2>Choose how to share on TikTok.</h2>
-    <p>${type==="PHOTO"?p.images.length+" images in carousel order":"One MP4 video"} · ${esc(p.label||"Untitled post")}. Both methods require a separate approval PIN. Your calendar date does not trigger TikTok posting.</p>
+    <p>${type==="PHOTO"?media.images.length+" images in carousel order":"One MP4 video"} · ${esc(p.label||"Untitled post")}. Both methods require a separate approval PIN. Your calendar date does not trigger TikTok posting.</p>
     </div>
     <p><a href="/post/${esc(p.id)}">← Back to post</a></p>
     <style>

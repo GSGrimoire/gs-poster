@@ -3,7 +3,8 @@
  * approval page after Gus's GitHub sign-in and PIN check, never from an MCP tool.
  */
 import type { Env } from "./env.ts";
-import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, type Post, type ApprovalSnapshot } from "./db.ts";
+import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
+import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, type Post, type ApprovalSnapshot, tiktokMedia } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchVideo } from "./video.ts";
@@ -261,17 +262,24 @@ export async function reschedulePost(
 /** Change unreleased captions through the same human-authenticated, PIN-gated path. */
 export async function editPendingCaptions(
   env: Env, id: string, version: string, message: string, blueskyCaption: string | null, actor: string,
+  tiktokCaption: string | null = null,
 ): Promise<void> {
   const p = await getPost(env.DB, id);
   if (!p || p.updated_at !== version) throw new Error("Post changed. Reload before editing.");
   if (message.length > 63_206) throw new Error("Facebook caption is too long.");
-  if (p.bluesky && blueskyCaption === null) throw new Error("Bluesky caption is missing.");
+  if(p.tiktok_enabled){
+    const content=tiktokCaption ?? message;
+    const max=tiktokMedia(p).video ? 2200 : 4000;
+    if(content.length>max)throw new Error("TikTok caption exceeds its format limit.");
+    if(tiktokCaption!==p.tiktok_caption && await getTikTokInboxTransfer(env.DB,id))
+      throw new Error("TikTok transfer already started. Its caption cannot be changed here.");
+  }
   if (blueskyCaption !== null &&
       [...new Intl.Segmenter("en", {granularity:"grapheme"}).segment(blueskyCaption)].length > 300) {
     throw new Error("Bluesky caption is over 300 characters.");
   }
   if ((p.status === "draft" || p.status === "rejected") && !p.approved_at) {
-    const saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, false);
+    const saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, false,tiktokCaption);
     if (!saved) throw new Error("The draft changed while saving. Reload.");
     await audit(env.DB, actor, "draft-caption-edited", id);
     return;
@@ -297,7 +305,7 @@ export async function editPendingCaptions(
   }
   let saved = false;
   let saveError: unknown = null;
-  try { saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, true); }
+  try { saved = await updateCalendarCaptions(env.DB, p, message, blueskyCaption, true,tiktokCaption); }
   catch (error) { saveError = error; }
   if (!saved) {
     if (facebookCaptionChanged) {

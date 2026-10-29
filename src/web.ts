@@ -4,7 +4,7 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post } from "./db.ts";
+import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
@@ -127,10 +127,10 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     if (!action && req.method === "GET") return postPage(env, session, id, {});
     if (action && req.method === "POST") return postAction(req, env, session, id, action);
   }
-  const video = /^\/video\/(p_[a-z0-9]+)\/(facebook|bluesky)$/.exec(path);
+  const video = /^\/video\/(p_[a-z0-9]+)\/(facebook|bluesky|tiktok)$/.exec(path);
   if (video && req.method === "GET") return videoProxy(req,env,video[1],video[2]);
   const media = /^\/media\/(p_[a-z0-9]+)\/(\d+)$/.exec(path);
-  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1");
+  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1",url.searchParams.get("platform"));
 
   return html(page("Not found", `<p class="empty">Nothing here.</p>`, { login: session.login }), { status: 404 });
 }
@@ -399,24 +399,31 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const csrf = await csrfToken(env, session);
   const tiktokConn = await tiktokConnection(env.DB);
   const tiktokTransfer = await getTikTokInboxTransfer(env.DB,p.id);
+  const ttMedia=tiktokMedia(p);
   const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at
     ? await getFacebookUploadProgress(env.DB, p.id, p.images.length) : null;
   const message = state.message ?? p.message;
-  const checks = checkMessage(message, { hasImages: p.images.length > 0 || !!p.video || (!p.facebook_enabled && !!p.bluesky) });
+  const checks = p.facebook_enabled ? checkMessage(message, {hasImages:p.images.length>0||!!p.video}) : {errors:[],warnings:[]};
   const bsChecks = p.bluesky ? checkMessage(p.bluesky.caption, { hasImages: p.bluesky.images.length > 0 || !!p.bluesky.video }) : null;
   const checkList = [
     ...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`),
     ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`),
+    ...(p.tiktok_enabled && (p.tiktok_caption??p.message).length>(ttMedia.video?2200:4000)
+      ? ['<li class="e">TikTok caption is too long for this format.</li>'] : []),
     ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
   const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="Photo ${i + 1}">`).join("")}</div>${p.images.length > 12 ? `<details class="card"><summary>Review remaining ${p.images.length - 12} photos in order</summary><div class="thumbs">${p.images.slice(12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i + 12}" alt="Photo ${i + 13}">`).join("")}</div></details>` : ""}` : "";
-  const videoPreview = (target:"facebook"|"bluesky") =>
+  const videoPreview = (target:"facebook"|"bluesky"|"tiktok") =>
     '<video controls playsinline preload="metadata" style="max-width:100%;max-height:440px;border-radius:8px" src="/video/' +
     esc(p.id) + '/' + target + '"></video>';
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">`;
   const bs = p.bluesky;
+  const ttThumbs=ttMedia.images.length?'<div class="thumbs">'+ttMedia.images.map((_,i)=>
+    '<img loading="lazy" src="/media/'+p.id+'/'+i+'?platform=tiktok" alt="TikTok image '+(i+1)+'">').join("")+'</div>':"";
+  const bsThumbs=bs?.images.length?'<div class="thumbs">'+bs.images.map((_,i)=>
+    '<img loading="lazy" src="/media/'+p.id+'/'+i+'?platform=bluesky" alt="Bluesky image '+(i+1)+'">').join("")+'</div>':"";
   const bsMedia = bs?.images ?? p.images.slice(0, 4).map((url) => ({ url, alt: "" }));
   const bsMediaFields = Array.from({ length: 4 }, (_, i) => {
     const item = bsMedia[i];
@@ -429,15 +436,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
 
 
   let actions = "";
-  const postVideo=p.video || p.bluesky?.video?.url;
-  if ((postVideo||p.images.length) && p.tiktok_enabled && !tiktokConn) {
+  const postVideo=ttMedia.video;
+  if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && !tiktokConn) {
     actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to the inbox or initiating a private direct test.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
   }
-  if ((postVideo||p.images.length) && p.tiktok_enabled && tiktokConn) {
+  if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
     if(!tiktokTransfer && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
       <div class="eyebrow">TikTok · Ready for review</div>
       <h3 style="margin:8px 0">Choose your TikTok publishing path</h3>
-      <p class="hint">Review the ${p.video?"video":"carousel"} before sending it to TikTok's inbox or starting a private Direct Post test. Both require a separate approval PIN. The calendar time does not trigger TikTok publication.</p>
+      <p class="hint">Review the ${ttMedia.video?"video":"carousel"} before sending it to TikTok's inbox or starting a private Direct Post test. Both require a separate approval PIN. The calendar time does not trigger TikTok publication.</p>
       <p><a class="btn" href="/post/${p.id}/tiktok-options">Review TikTok posting options</a></p>
     </div>`;
     if (tiktokTransfer) {
@@ -456,26 +463,33 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     actions += `
       <form method="post" action="/post/${p.id}/approve" class="card">
         ${hidden}
-        <p class="hint">Select one or both targets. Every selected target is authorized by this approval and PIN.</p>
-        <label><input type="checkbox" name="target_facebook" value="1" ${p.facebook_enabled ? "checked" : ""}> Publish to Facebook</label>
+        <p class="hint">Approve Facebook and Bluesky independently. TikTok always requires a separate transfer and PIN.</p>
+        <div class="platform-preview-grid">
+        ${p.facebook_enabled?`<section class="platform-preview"><h3>Facebook approval</h3>
+        <label><input type="checkbox" name="target_facebook" value="1" checked> Publish to Facebook</label>
         <label for="message">Facebook caption</label>
         <textarea id="message" name="message">${esc(message)}</textarea>
-        <label><input type="checkbox" name="target_bluesky" value="1" ${bs ? "checked" : ""}> Publish to Bluesky</label>
+        <p class="hint">${p.video?"Video":p.images.length+" images"}</p></section>`:
+        `<input type="hidden" name="message" value="${esc(message)}">`}
+        ${bs?`<section class="platform-preview"><h3>Bluesky approval</h3>
+        <label><input type="checkbox" name="target_bluesky" value="1" checked> Publish to Bluesky</label>
         <label for="bs_caption">Bluesky caption (300 characters)</label>
-        <textarea id="bs_caption" name="bs_caption">${esc(bs?.caption ?? message.slice(0, 300))}</textarea>
-        <p class="hint">Provide alternative text for each Bluesky image. When images and a Patreon card are selected, the link card appears as a reply in the same thread.</p>
+        <textarea id="bs_caption" name="bs_caption">${esc(bs.caption)}</textarea>
+        <p class="hint">Alt text is required for every selected Bluesky image. The optional Patreon card appears as a reply.</p>
         ${bsMediaFields}
-        <label for="bs_video_url">Bluesky video (optional MP4 GitHub URL or private upload)</label>
-        <input id="bs_video_url" type="text" name="bs_video_url" value="${esc(bs?.video?.url ?? "")}">
+        <label for="bs_video_url">Bluesky video (MP4 GitHub URL or private upload)</label>
+        <input id="bs_video_url" type="text" name="bs_video_url" value="${esc(bs.video?.url??"")}">
         <label for="bs_video_alt">Video accessibility description</label>
-        <input id="bs_video_alt" type="text" name="bs_video_alt" value="${esc(bs?.video?.alt ?? "")}">
-        <p class="hint">A Bluesky post can have either a video or an image gallery, not both.</p>
-        <label for="bs_patreon_url">Free Patreon post URL (optional)</label>
-        <input id="bs_patreon_url" type="text" name="bs_patreon_url" value="${esc(patreon?.url ?? "")}">
+        <input id="bs_video_alt" type="text" name="bs_video_alt" value="${esc(bs.video?.alt??"")}">
+        <p class="hint">Choose video or images, not both.</p>
+        <label for="bs_patreon_url">Free Patreon post URL</label>
+        <input id="bs_patreon_url" name="bs_patreon_url" type="text" value="${esc(patreon?.url??"")}">
         <label for="bs_patreon_title">Patreon card title</label>
-        <input id="bs_patreon_title" type="text" name="bs_patreon_title" value="${esc(patreon?.title ?? "")}">
+        <input id="bs_patreon_title" name="bs_patreon_title" type="text" value="${esc(patreon?.title??"")}">
         <label for="bs_patreon_description">Patreon card description</label>
-        <input id="bs_patreon_description" type="text" name="bs_patreon_description" value="${esc(patreon?.description ?? "")}">
+        <input id="bs_patreon_description" name="bs_patreon_description" type="text" value="${esc(patreon?.description??"")}">
+        </section>`:""}
+        </div>
         <label for="when">Publish time (${esc(env.TIMEZONE)})</label>
         <input id="when" type="datetime-local" name="when" value="${esc(whenValue)}">
         <p class="hint">Leave empty to post the moment you approve. Otherwise between 12 minutes and 30 days from now.</p>
@@ -531,9 +545,16 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     actions += `<form method="post" action="/post/${p.id}/edit-caption" class="card">${hidden}
       <h2>Edit unreleased captions</h2>
       <p class="hint">Save caption changes without publishing. Media and publishing targets are fixed after approval. An approved post will be updated on Facebook where supported.</p>
-      ${p.facebook_enabled ? `<label for="edit-message">Facebook caption</label><textarea id="edit-message" name="message">${esc(p.message)}</textarea>` :
+      <div class="platform-preview-grid">
+      ${p.facebook_enabled ? `<section class="platform-preview"><h3>Facebook</h3><label for="edit-message">Caption</label><textarea id="edit-message" name="message">${esc(p.message)}</textarea></section>` :
         `<input type="hidden" name="message" value="${esc(p.message)}">`}
-      ${p.bluesky ? `<label for="edit-bluesky">Bluesky caption (up to 300 characters)</label><textarea id="edit-bluesky" name="bs_caption">${esc(p.bluesky.caption)}</textarea>` : ""}
+      ${p.tiktok_enabled ? `<section class="platform-preview"><h3>TikTok</h3>
+        <label for="edit-tiktok">Caption and hashtags</label>
+        <textarea id="edit-tiktok" name="tiktok_caption">${esc(p.tiktok_caption??"")}</textarea>
+        <p class="hint">Blank uses the shared caption. Already transferred TikTok content cannot be edited here.</p></section>` : ""}
+      ${p.bluesky ? `<section class="platform-preview"><h3>Bluesky</h3><label for="edit-bluesky">Caption (300 characters)</label>
+        <textarea id="edit-bluesky" name="bs_caption">${esc(p.bluesky.caption)}</textarea></section>` : ""}
+      </div>
       <label for="edit-pin">Approval PIN</label><input id="edit-pin" type="password" name="pin" required autocomplete="off">
       <div class="row"><button class="primary">Save captions</button></div></form>`;
   }
@@ -585,13 +606,26 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
         <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""} ${p.tiktok_enabled ? "TikTok inbox (manual publishing)" : ""}</span></div>
-      ${p.facebook_enabled ? `<p class="hint">Facebook caption and media</p><p class="caption">${esc(p.message)}</p>${p.video ? videoPreview("facebook") : thumbs}` : ""}
-      ${p.tiktok_enabled && !p.facebook_enabled && p.video ? `<p class="hint">TikTok video preview</p>${videoPreview("facebook")}` : ""}
-      ${p.tiktok_enabled && !p.facebook_enabled && !p.video && p.images.length ? `<p class="hint">TikTok photo carousel (${p.images.length} images)</p>${thumbs}` : ""}
-      ${bs ? `<p class="hint">Bluesky caption</p><p class="caption">${esc(bs.caption)}</p>
-        ${bs.images.length ? `<ul class="checks">${bs.images.map((img, i) => `<li>Image ${i + 1}: ${esc(img.alt)} (${esc(img.url)})</li>`).join("")}</ul>` : ""}
-        ${bs.video ? `<p class="hint">Bluesky video: ${esc(bs.video.alt)}</p>${videoPreview("bluesky")}` : ""}
-        ${bs.patreon ? `<p class="meta">Patreon card: ${esc(bs.patreon.title)} | ${esc(bs.patreon.url)}</p>` : ""}` : ""}
+      <style>.platform-preview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:14px}
+        .platform-preview{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0}
+        .platform-preview .thumbs img{width:82px;height:106px;object-fit:cover}
+      </style>
+      <div class="platform-preview-grid">
+      ${p.facebook_enabled ? `<section class="platform-preview" aria-label="Facebook review">
+        <h3>Facebook</h3><p class="caption">${esc(p.message)}</p>
+        ${p.video?videoPreview("facebook"):thumbs}
+        <p class="hint">${p.video?"Video":p.images.length+" images"} · separate Facebook approval</p></section>`:""}
+      ${p.tiktok_enabled ? `<section class="platform-preview" aria-label="TikTok review">
+        <h3>TikTok</h3><p class="caption">${esc(p.tiktok_caption ?? p.message)}</p>
+        ${ttMedia.video?videoPreview("tiktok"):ttThumbs}
+        <p class="hint">${ttMedia.video?"Video":ttMedia.images.length+" images"} · manual transfer only</p></section>`:""}
+      ${bs ? `<section class="platform-preview" aria-label="Bluesky review">
+        <h3>Bluesky</h3><p class="caption">${esc(bs.caption)}</p>
+        ${bs.video?videoPreview("bluesky"):bsThumbs}
+        ${bs.images.length ? `<ul class="checks">${bs.images.map((img,i)=>`<li>Image ${i+1}: ${esc(img.alt)}</li>`).join("")}</ul>`:""}
+        ${bs.patreon ? `<p class="meta">Patreon card: ${esc(bs.patreon.title)} | ${esc(bs.patreon.url)}</p>`:""}
+        </section>`:""}
+      </div>
       ${p.facebook_enabled && p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
       <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} · ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} · ${esc(p.id)}</p>
@@ -802,6 +836,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       }
       const nextMessage = String(form.get("message") ?? "");
       const nextBluesky = current.bluesky ? String(form.get("bs_caption") ?? "") : null;
+      const nextTikTok = current.tiktok_enabled ? (String(form.get("tiktok_caption")??"").trim()||null) : null;
       if (current.facebook_enabled && !nextMessage.trim() && !current.images.length) {
         return postPage(env, session, id, { error: "Facebook requires a caption or image." }, 400);
       }
@@ -809,7 +844,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         const issues = checkBluesky({ ...current.bluesky, caption: nextBluesky! });
         if (issues.length) return postPage(env, session, id, { error: issues.join(" ") }, 400);
       }
-      await editPendingCaptions(env, id, current.updated_at, nextMessage, nextBluesky, session.login);
+      await editPendingCaptions(env, id, current.updated_at, nextMessage, nextBluesky, session.login,nextTikTok);
       return postPage(env, session, id, { notice: "Pending captions updated. No post was published." });
     }
     if (action === "reschedule") {
@@ -930,7 +965,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
 /** Signed-in video preview with HTTP byte ranges for native playback. */
 async function videoProxy(req: Request, env: Env, id: string, target: string): Promise<Response> {
   const p = await getPost(env.DB,id);
-  const reference = target === "facebook" ? p?.video : p?.bluesky?.video?.url;
+  const reference = target === "facebook" ? p?.video : target==="tiktok" ? (p?tiktokMedia(p).video:null) : p?.bluesky?.video?.url;
   if (!reference) return new Response("Not found",{status:404});
   try {
     const bytes = await fetchVideo(env,reference);
@@ -954,9 +989,12 @@ async function videoProxy(req: Request, env: Env, id: string, target: string): P
   }
 }
 
-async function mediaProxy(env: Env, id: string, n: number, thumbnail = false): Promise<Response> {
+async function mediaProxy(env: Env, id: string, n: number, thumbnail = false, platform:string|null=null): Promise<Response> {
   const p = await getPost(env.DB, id);
-  const url = p?.images[n] ?? p?.bluesky?.images[n]?.url;
+  const url = platform==="tiktok"?(p?tiktokMedia(p).images[n]:null):
+    platform==="bluesky"?p?.bluesky?.images[n]?.url:
+    platform==="facebook"?p?.images[n]:
+    p?.images[n] ?? p?.bluesky?.images[n]?.url ?? (p?tiktokMedia(p).images[n]:null);
   if (!url) return new Response("Not found", { status: 404 });
   try {
     const img = await fetchImage(env, url);

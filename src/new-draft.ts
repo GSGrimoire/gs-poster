@@ -61,7 +61,7 @@ export function parseNewDraft(
     message: fields.message, tiktok_caption:fields.tiktok && fields.tiktokCaption?.trim()?fields.tiktokCaption.trim():null,
     label: fields.label.trim() || null,
     release:fields.release.trim() || null,
-    images:[],video:null,link:null,
+    images:[],tiktok_images:fields.tiktok?[]:null,video:null,link:null,
     scheduled_at:scheduledAt?.toISOString() || null,
     facebook_enabled:fields.facebook,
     tiktok_enabled:fields.tiktok===true,
@@ -94,6 +94,18 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   .new-file label{margin:0;grid-column:2}
   .new-file input{width:100%}
   .new-file .gallery-controls{grid-column:2}
+  .platform-editor-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:stretch}
+  .platform-editor{min-width:0;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--bg)}
+  .platform-editor h3{margin:0 0 8px}
+  .platform-editor textarea{width:100%;min-height:175px}
+  .platform-editor[hidden]{display:none!important}
+  .platform-editor .field-meter{margin-top:5px}
+  .new-target-choices{display:flex;gap:7px;flex-wrap:wrap;grid-column:2}
+  .new-target-choices label{margin:0!important;font:600 12px system-ui,sans-serif;display:flex;align-items:center;gap:5px}
+  .new-target-choices input{width:auto!important}
+  .platform-total{font-size:12px;color:var(--muted)}
+  @media(max-width:980px){.platform-editor-grid{grid-template-columns:1fr}}
+  
   .new-file .file-title{font:600 13px/1.4 system-ui,sans-serif;min-width:0;overflow-wrap:anywhere}
   #new-video-preview{width:100%;max-height:340px;border-radius:10px;margin-top:8px}
   #new-draft-form .step-card label{margin-top:9px}
@@ -123,7 +135,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <label class="choice-tile"><input type="radio" name="content_kind" value="video" ${kind==="video"?"checked":""}> Video</label>
         </div>
         <section id="new-images-panel" ${kind!=="images"?"hidden":""}>
-          <p class="form-info" id="new-image-guidance">Images stay in their selected order. Rearrange them before saving. Up to 35 for TikTok, four for Bluesky and 80 for Facebook.</p>
+          <p class="form-info" id="new-image-guidance">Select each image’s destinations. Each platform keeps its own gallery and count: Facebook 80, TikTok 35, Bluesky 4. Use Move up/down to reorder the shared source sequence.</p>
           <div id="new-images-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop images">
             <strong>Drop your artwork here</strong>
             <span>Or select JPG, PNG or GIF files, up to 10 MB each</span>
@@ -149,23 +161,28 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
 
       <section class="step-card" aria-labelledby="draft-copy-title">
         <div class="step-heading"><span class="step-number">3</span><div><h3 id="draft-copy-title">Tell the story</h3><p class="hint">Tailor the caption to each destination.</p></div></div>
-        <section id="new-facebook-panel">
-          <label for="new-message">Facebook / shared caption</label>
+        <div class="platform-editor-grid" aria-label="Platform-specific captions">
+        <section id="new-facebook-panel" class="platform-editor">
+          <h3>Facebook</h3>
+          <label for="new-message">Facebook caption</label>
           <textarea id="new-message" name="message" maxlength="63206" placeholder="Your story, hook or announcement...">${v(fields.message)}</textarea>
           <div class="field-meter" id="new-main-count">0 characters</div>
           <p class="form-info" id="new-tiktok-caption-advice" hidden>TikTok photo descriptions can contain up to 4,000 characters. Review the final caption again in TikTok posting options.</p>
         </section>
-        <section id="new-tiktok-panel" ${fields.tiktok?"":"hidden"}>
-          <label for="new-tiktok-caption">TikTok caption and hashtags (optional override)</label>
+        <section id="new-tiktok-panel" class="platform-editor" ${fields.tiktok?"":"hidden"}>
+          <h3>TikTok</h3>
+          <label for="new-tiktok-caption">TikTok caption and hashtags</label>
           <textarea id="new-tiktok-caption" name="tiktok_caption" maxlength="4000" style="min-height:120px" placeholder="Tailor your TikTok caption, hooks and hashtags here...">${v(fields.tiktokCaption||"")}</textarea>
           <p class="form-info">Leave blank to use the shared caption above. Photo limit: 4,000 characters. Video limit: 2,200 characters.</p>
           <div class="field-meter" id="new-tiktok-count">0 characters</div>
         </section>
-        <section id="new-bluesky-panel">
+        <section id="new-bluesky-panel" class="platform-editor">
+          <h3>Bluesky</h3>
           <label for="new-bs">Bluesky caption (up to 300 characters)</label>
           <textarea id="new-bs" name="bs_caption" maxlength="300" style="min-height:110px" placeholder="A shorter companion caption...">${v(fields.bsCaption)}</textarea>
           <div class="field-meter" id="new-bs-count">0 / 300</div>
         </section>
+        </div>
       </section>
 
       <section class="step-card" aria-labelledby="draft-details-title">
@@ -191,6 +208,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
         <div class="summary-row"><span>Destinations</span><strong id="summary-platforms">Choose platforms</strong></div>
         <div class="summary-row"><span>Format</span><strong id="summary-format">Text</strong></div>
         <div class="summary-row"><span>Media</span><strong id="summary-media">No media selected</strong></div>
+        <p class="platform-total" id="new-platform-counts" aria-live="polite">Choose media for each selected platform</p>
         <div class="summary-row"><span>Calendar</span><strong id="summary-timing">Not scheduled</strong></div>
         <div class="summary-row"><span>Next step</span><strong id="summary-readiness">Save as draft</strong></div>
         <div class="progress-track" role="progressbar" aria-label="Media transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="new-upload-progress"><span class="progress-fill" id="new-progress-fill"></span></div>

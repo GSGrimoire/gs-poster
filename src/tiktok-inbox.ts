@@ -2,7 +2,7 @@
  * Existing media is read from the same private store as Facebook/Bluesky.
  */
 import type {Env} from "./env.ts";
-import {getPost,audit} from "./db.ts";
+import {getPost,audit,tiktokMedia} from "./db.ts";
 import {fetchVideo,INITIAL_VIDEO_MAX_BYTES} from "./video.ts";
 import {tiktokAccessToken,tiktokConnection} from "./tiktok.ts";
 
@@ -64,7 +64,8 @@ export async function startTikTokInboxTransfer(
   if(post.status==="publishing" || post.status==="cancelled" || post.status==="failed" ||
      post.status==="rejected")
     throw new Error("This post cannot be transferred in its current state.");
-  const media=post.video||post.bluesky?.video?.url;
+  if(!post.tiktok_enabled)throw new Error("TikTok is not selected for this draft.");
+  const media=tiktokMedia(post).video;
   if(!media)throw new Error("Attach an MP4 video to the post first.");
   if(!/^upload:\/\/[a-f0-9]{32}\.mp4$/.test(media))
     throw new Error("TikTok inbox transfer requires a private uploaded MP4. Please reattach it in GS Poster.");

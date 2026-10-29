@@ -14,7 +14,11 @@ export const NEW_DRAFT_JS = String.raw`
   const csrf = form.querySelector('input[name="csrf"]').value;
   const summary = id => $(id);
   const mainCaption = $("new-message"), bsCaption = $("new-bs"),ttCaption=$("new-tiktok-caption");
-  function platformLimit() { return target("bluesky") ? 4 : target("tiktok") ? 35 : 80; }
+  const platformLimits={facebook:80,tiktok:35,bluesky:4};
+  const selectedCount=name=>images.filter(item=>target(name)&&item.targets?.[name]?.checked).length;
+  const mediaTargets=item=>["facebook","tiktok","bluesky"].filter(name=>target(name)&&item.targets?.[name]?.checked);
+  const platformTotals=()=>["facebook","tiktok","bluesky"].filter(target).map(name=>
+    name[0].toUpperCase()+name.slice(1)+" "+selectedCount(name)+"/"+platformLimits[name]).join(" · ");
   function updateProgress(done,total) {
     const pct=total ? Math.round(done/total*100) : 0;
     summary("new-upload-progress").setAttribute("aria-valuenow",String(pct));
@@ -23,20 +27,22 @@ export const NEW_DRAFT_JS = String.raw`
       done+" of "+total+" media files attached to this draft" :
       "Media will upload only after you save.";
   }
-  function mediaCount() {
-    const count=images.length,limit=platformLimit();
-    const el=$("new-image-count");
-    el.textContent=count ? count+" image"+(count!==1?"s":"")+" selected · limit "+limit+
-      (count>limit?" · Uncheck a platform with a lower limit or remove images.":"") :
-      "No images selected · limit "+limit;
-    el.classList.toggle("media-error",count>limit);
+  function mediaCount(){
+    const count=images.length;
+    const warning=["facebook","tiktok","bluesky"].some(name=>target(name)&&selectedCount(name)>platformLimits[name]);
+    $("new-image-count").textContent=count?
+      count+" file"+(count!==1?"s":"")+" · "+platformTotals() :
+      "No images selected · choose destination(s) per image";
+    $("new-image-count").classList.toggle("media-error",warning);
+    $("new-platform-counts").textContent=kind()==="images"?platformTotals():
+      kind()==="video"?"The selected video will be attached only to chosen destinations":"Text-only";
   }
   function updateSummary() {
     const k=kind(),tt=target("tiktok"),bs=target("bluesky");
     const platforms=["facebook","bluesky","tiktok"].filter(target).map(x=>x==="facebook"?"Facebook":x==="bluesky"?"Bluesky":"TikTok");
     summary("summary-platforms").textContent=platforms.length ? platforms.join(" · ") : "None selected";
     summary("summary-format").textContent=k==="images"?"Image carousel":k==="video"?"Video":"Text";
-    summary("summary-media").textContent=k==="images" ? images.length+" of "+platformLimit()+" images" :
+    summary("summary-media").textContent=k==="images" ? images.length+" source images" :
       k==="video" ? (video ? video.name : "No video selected") : "Text only";
     summary("summary-timing").textContent=asap.value==="1" ? "Earliest available" :
       time.value ? time.value.replace("T"," ") : "Unscheduled";
@@ -45,17 +51,20 @@ export const NEW_DRAFT_JS = String.raw`
     else if(tt&&k==="text")warning="Choose images or video for TikTok";
     else if(tt&&(ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000))warning="Shorten TikTok caption";
     else if(k==="images"&&!images.length)warning="Add artwork";
-    else if(k==="images"&&images.length>platformLimit())warning="Reduce images or destinations";
-    else if(k==="images"&&bs&&images.some(x=>!x.alt?.value.trim()))warning="Describe Bluesky images";
+    else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&selectedCount(name)>platformLimits[name])) warning="Reduce images for the highlighted destination";
+    else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&!selectedCount(name)&&
+      !(name==="facebook"&&mainCaption.value.trim())&&!(name==="bluesky"&&bsCaption.value.trim())))
+      warning="Assign media or write a text-only caption for each destination";
+    else if(k==="images"&&bs&&images.some(x=>x.targets?.bluesky?.checked&&!x.alt?.value.trim()))warning="Describe selected Bluesky images";
     else if(k==="video"&&!video)warning="Add an MP4";
     else if(k==="video"&&bs&&!$("new-video-alt").value.trim())warning="Describe Bluesky video";
     summary("summary-readiness").textContent=created?"Draft saved, upload in progress":warning||"Ready to save";
     summary("new-tiktok-caption-advice").hidden=!tt;
     summary("new-tiktok-panel").hidden=!tt;
-    const max=tt?(k==="video"?2200:4000):63206;
-    summary("new-main-count").textContent=mainCaption.value.length+
-      " characters"+(tt?" · TikTok limit "+max:"");
-    summary("new-main-count").classList.toggle("media-error",tt&&mainCaption.value.length>max);
+    summary("new-facebook-panel").hidden=!target("facebook");
+    const max=63206;
+    summary("new-main-count").textContent=mainCaption.value.length+" / "+max;
+    summary("new-main-count").classList.toggle("media-error",mainCaption.value.length>max);
     summary("new-bs-count").textContent=bsCaption.value.length+" / 300";
     summary("new-tiktok-count").textContent=(ttCaption.value.trim()||mainCaption.value).length+" / "+(k==="video"?2200:4000);
     summary("new-tiktok-count").classList.toggle("media-error",tt && (ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000));
@@ -127,10 +136,14 @@ export const NEW_DRAFT_JS = String.raw`
     }
     $("new-images-panel").hidden=k!=="images";
     $("new-video-panel").hidden=k!=="video";
-    $("new-facebook-panel").hidden=!(fb||tt);
+    $("new-facebook-panel").hidden=!fb;
     $("new-bluesky-panel").hidden=!bs;
     $("new-video-alt-label").hidden=!(bs&&k==="video");
-    imageList.querySelectorAll('input[type="text"]').forEach(input=>input.required=bs&&k==="images");
+    for(const item of images){
+      item.alt.required=bs&&k==="images"&&!!item.targets?.bluesky?.checked;
+      if(item.label)item.label.hidden=!item.alt.required;
+      if(item.targetContainer)for(const [name,node] of Object.entries(item.targetLabels)) node.hidden=!target(name);
+    }
     $("new-video-alt").required=bs&&k==="video";
     $("new-platform-advice").textContent=tt?
       "TikTok images and videos can go to your inbox for manual publication. Private direct posts are a separate, explicitly approved action. Calendar times never auto-publish to TikTok.":
@@ -143,9 +156,10 @@ export const NEW_DRAFT_JS = String.raw`
 
   function chooseImages(files) {
     if(busy||created)return;
-    images=Array.from(files).map(file=>({file,attached:false,alt:null}));
-    imageList.replaceChildren();
-    for(const item of images){
+    const offset=images.length;
+    const additions=Array.from(files).map((file,index)=>({file,order:offset+index,attached:false,alt:null,targets:{}}));
+    images.push(...additions);
+    for(const item of additions){
       const wrap=document.createElement("article");
       wrap.className="new-file";
       wrap.tabIndex=-1;
@@ -177,6 +191,28 @@ export const NEW_DRAFT_JS = String.raw`
       };
       const up=action("Move up",-1),down=action("Move down",1);
       action("Remove",null);
+      const destinations=document.createElement("div");
+      destinations.className="new-target-choices";
+      destinations.setAttribute("role","group");
+      destinations.setAttribute("aria-label","Destinations for "+item.file.name);
+      item.targetContainer=destinations;
+      item.targetLabels={};
+      for(const [name,title] of [["facebook","Facebook"],["tiktok","TikTok"],["bluesky","Bluesky"]]){
+        const platformLabel=document.createElement("label");
+        platformLabel.hidden=!target(name);
+        const check=document.createElement("input");
+        check.type="checkbox";
+        check.checked=target(name)&&(name==="bluesky"?item.order<4:name==="tiktok"?item.order<35:true);
+        check.setAttribute("aria-label",title+" for "+item.file.name);
+        check.addEventListener("change",()=>{
+          item.alt.required=target("bluesky")&&!!item.targets.bluesky.checked;
+          item.label.hidden=!item.alt.required;
+          updateSummary();
+        });
+        platformLabel.append(check,document.createTextNode(title));
+        destinations.append(platformLabel);
+        item.targets[name]=check;item.targetLabels[name]=platformLabel;
+      }
       const label=document.createElement("label");
       label.textContent="Alternative text for image";
       const alt=document.createElement("input");
@@ -185,11 +221,13 @@ export const NEW_DRAFT_JS = String.raw`
       alt.required=target("bluesky");
       alt.addEventListener("input",updateSummary);
       label.append(alt);
-      wrap.append(img,title,controls,label);
+      wrap.append(img,title,destinations,controls,label);
+      label.hidden=!item.targets.bluesky.checked;
       item.alt=alt;item.wrap=wrap;item.number=number;item.label=label;
       item.up=up;item.down=down;
     }
     renumberImages();
+    visible();
   }
 
   function chooseVideo(file) {
@@ -223,14 +261,22 @@ export const NEW_DRAFT_JS = String.raw`
     if(target("tiktok") && !["video","images"].includes(k)) throw new Error("TikTok requires video or images.");
     if (k === "images") {
       if (!images.length) throw new Error("Choose at least one image.");
-      if (images.length > (bs ? 4 : (target("tiktok")?35:80)))
-        throw new Error(bs ? "Bluesky permits up to four images." : (target("tiktok") ? "TikTok permits up to 35 images." : "Facebook permits up to 80 images."));
-      for (const [i, item] of images.entries()) {
-        if (!/\.(jpe?g|png|gif)$/i.test(item.file.name) || item.file.size <= 0 ||
-            item.file.size > 10 * 1024 * 1024)
+      for(const name of ["facebook","tiktok","bluesky"]){
+        if(!target(name))continue;
+        const count=selectedCount(name);
+        if(!count){
+          if(name==="facebook"&&mainCaption.value.trim())continue;
+          if(name==="bluesky"&&bsCaption.value.trim())continue;
+          throw new Error("Choose an image or provide a text-only caption for "+name+".");
+        }
+        if(count>platformLimits[name])throw new Error(name+" supports up to "+platformLimits[name]+" images.");
+      }
+      for(const [i,item] of images.entries()){
+        if(!/\.(jpe?g|png|gif)$/i.test(item.file.name)||item.file.size<=0||item.file.size>10*1024*1024)
           throw new Error("Each image must be JPG, PNG or GIF and no more than 10 MB.");
-        if (bs && !item.alt.value.trim())
-          throw new Error("Provide alternative text for image " + (i+1) + ".");
+        if(!mediaTargets(item).length)throw new Error("Select at least one destination for image "+(i+1)+".");
+        if(bs&&item.targets.bluesky.checked&&!item.alt.value.trim())
+          throw new Error("Describe image "+(i+1)+" for Bluesky.");
       }
     } else if (k === "video") {
       if (!video) throw new Error("Choose an MP4 video.");
@@ -302,7 +348,7 @@ export const NEW_DRAFT_JS = String.raw`
         for (const [i,item] of images.entries()) {
           if (item.attached) continue;
           statusText("Uploading image "+(i+1)+" of "+images.length+"...");
-          await upload(item.file,"images",item.alt.value.trim(),fb,bs,target("tiktok"));
+          await upload(item.file,"images",item.alt.value.trim(),fb&&item.targets.facebook.checked,bs&&item.targets.bluesky.checked,target("tiktok")&&item.targets.tiktok.checked);
           item.attached = true;
           updateProgress(images.filter(x=>x.attached).length,images.length);
         }

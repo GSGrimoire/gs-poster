@@ -1,9 +1,10 @@
 import { esc } from "./html.ts";
-import type { Post } from "./db.ts";
+import {tiktokMedia,type Post} from "./db.ts";
 
 /** Does not grant approval or change media for already approved posts. */
 export function draftMediaPanel(post: Post, csrf: string): string {
   if (!["draft","rejected"].includes(post.status) || post.approved_at) return "";
+  const tt=tiktokMedia(post);
   return `
 <style>
 .media-drop{border:2px dashed var(--line);border-radius:9px;padding:18px;text-align:center;font:14px system-ui,sans-serif;cursor:pointer;transition:background .15s}
@@ -18,7 +19,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
 </style>
 <div class="card" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
  data-version="${esc(post.updated_at)}" data-facebook="${post.facebook_enabled ? "1" : "0"}"
- data-bluesky="${post.bluesky ? "1" : "0"}" data-tiktok="${post.tiktok_enabled ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}">
+ data-bluesky="${post.bluesky ? "1" : "0"}" data-tiktok="${post.tiktok_enabled ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}" data-tiktok-images="${tt.images.length}">
   <h2>Add images to this draft</h2>
   <p class="hint">Drop JPG, PNG or GIF images here, or select files. Files go into GS Poster's private storage and are attached to the chosen draft targets. No GitHub image commit and no publishing.</p>
   <div id="media-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop images">
@@ -26,10 +27,10 @@ export function draftMediaPanel(post: Post, csrf: string): string {
     <input type="file" id="media-files" accept=".jpg,.jpeg,.png,.gif,image/jpeg,image/png,image/gif" multiple hidden>
   </div>
   <div id="media-upload-items" class="media-files" aria-live="polite"></div>
-  <p class="hint">Provide descriptive alternative text for each Bluesky image. Maximum 4 Bluesky images, 35 TikTok images or 80 Facebook images. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
+  <p class="hint">Provide descriptive alternative text for each Bluesky image. Independent limits: 4 Bluesky images, 35 TikTok images, and 80 Facebook images. Choose destinations per file. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
-  <h2>${post.video || post.bluesky?.video ? "Replace video in this draft" : "Add a video to this draft"}</h2>
+  <h2>${post.video || post.bluesky?.video || tt.video ? "Replace video in this draft" : "Add a video to this draft"}</h2>
   <p class="hint">MP4 up to 20 MB. Videos and image galleries cannot be combined on the same platform. Uploading a new video replaces the previous video only on the platforms you select. No publication takes place.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
@@ -40,11 +41,11 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div class="media-targets">
     <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.images.length ? "checked" : "disabled"}>Facebook</label>
     <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
-    <label><input type="checkbox" id="video-tiktok" ${post.tiktok_enabled && !post.images.length ? "checked" : "disabled"}>TikTok inbox</label>
+    <label><input type="checkbox" id="video-tiktok" ${post.tiktok_enabled && !tt.images.length ? "checked" : "disabled"}>TikTok inbox</label>
   </div>
   <label for="video-alt">Bluesky video alternative text</label>
   <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
-  <div class="row"><button type="button" class="primary" id="video-upload-submit" disabled>${post.video || post.bluesky?.video ? "Upload and replace video" : "Upload and attach video"}</button></div>
+  <div class="row"><button type="button" class="primary" id="video-upload-submit" disabled>${post.video || post.bluesky?.video || tt.video ? "Upload and replace video" : "Upload and attach video"}</button></div>
   <div id="video-upload-status" class="hint" role="status" aria-live="polite"></div>
 </div>
 <script src="/draft-media.js" defer></script>
@@ -137,7 +138,12 @@ export const DRAFT_MEDIA_JS = `
         if (!enabled) continue;
         const text = document.createElement("label");
         const box = document.createElement("input");
-        box.type = "checkbox";box.checked = true;
+        box.type = "checkbox";
+        const base=Number(panel.dataset[kind+"Images"]||0);
+        const selected=files.filter(x=>!!x[kind]?.checked).length;
+        const limit=kind==="bluesky"?4:kind==="tiktok"?35:80;
+        box.checked=base+selected<limit;
+        if(!box.checked)text.title="Platform gallery already has its maximum number of images.";
         if (kind === "facebook") record.facebook = box;
         else if (kind === "bluesky") record.bluesky = box;
         else record.tiktok = box;
@@ -150,7 +156,7 @@ export const DRAFT_MEDIA_JS = `
       alt.placeholder = "Describe what is visible in this image";
       altLabel.append(alt);
       record.alt = alt;
-      if (!record.bluesky) altLabel.hidden = true;
+      if (!record.bluesky || !record.bluesky.checked) altLabel.hidden = true;
       else record.bluesky.addEventListener("change", () => { altLabel.hidden = !record.bluesky.checked; });
       const progress = document.createElement("span");
       progress.className = "media-status";progress.textContent = "Ready";

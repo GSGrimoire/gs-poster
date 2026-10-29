@@ -52,6 +52,8 @@ function view(env: Env, origin: string, p: Post) {
     message: p.message,
     tiktok_caption: p.tiktok_caption,
     images: p.images,
+    tiktok_images:p.tiktok_images,
+    tiktok_video:p.tiktok_video,
     video: p.video,
     facebook_enabled: p.facebook_enabled,
     tiktok_enabled: p.tiktok_enabled===true,
@@ -251,6 +253,8 @@ export function buildServer(env: Env, origin: string): McpServer {
         tiktok_enabled: z.boolean().default(false).describe("Select TikTok as an independent draft target. Upload or direct publication on TikTok is a separate explicit PIN-approved web action. GS Poster does not automatically schedule TikTok releases."),
         bluesky: blueskySchema.optional().describe("Optional Bluesky target with its own caption, image alt descriptions and free Patreon link card."),
         images: imageList.optional(),
+        tiktok_images:imageList.optional().describe("Independent TikTok carousel (up to 35). Omitted means legacy shared Facebook gallery."),
+        tiktok_video:z.string().optional().describe("Independent TikTok MP4; cannot combine with TikTok images."),
         video: z.string().optional().describe("Facebook MP4 GitHub URL or private upload:// reference (20 MB maximum). Cannot be combined with Facebook images."),
         link: z.string().url().optional().describe("Optional link preview. Only used when the post has no images."),
         publish_at: z.string().optional().describe("When to publish. Copenhagen time (2026-10-16T19:00) or ISO 8601 with offset. 30 minutes to 30 days ahead."),
@@ -259,18 +263,28 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ message, tiktok_caption, images = [], video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
-      const checks = checkMessage(message, { hasImages: images.length > 0 || !!video || (!facebook_enabled && !!bluesky) });
+    async ({ message, tiktok_caption, images = [], tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
+      const checks = facebook_enabled?
+        checkMessage(message,{hasImages:images.length>0||!!video}):
+        tiktok_enabled?checkMessage(tiktok_caption??message,{
+          hasImages:(tiktok_images??images).length>0||!!(tiktok_video??video)
+        }):{errors:[],warnings:[]};
       const time = readWhen(env, publish_at);
       const imgErrors = await checkImages(env, images);
       const bsHouse = bluesky ? checkMessage(bluesky.caption, { hasImages: bluesky.images.length > 0 }) : null;
       const bsErrors = bluesky ? [...checkBluesky(bluesky), ...bsHouse!.errors, ...(await checkImages(env, bluesky.images.map((i) => i.url)))] : [];
       const errors = [...checks.errors, ...(time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
       if (!facebook_enabled && !bluesky && !tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
-       if (tiktok_enabled && images.length > 35) errors.push("TikTok carousels support at most 35 images.");
+       const effectiveTTImages=tiktok_images??(tiktok_video?[]:images);
+       if (tiktok_enabled && effectiveTTImages.length > 35) errors.push("TikTok carousels support at most 35 images.");
+      if (tiktok_images && !tiktok_enabled) errors.push("TikTok gallery requires TikTok target.");
+      if (tiktok_video && !tiktok_enabled) errors.push("TikTok video requires TikTok target.");
+      if (tiktok_video && effectiveTTImages.length) errors.push("TikTok cannot combine video with a gallery.");
+      if (tiktok_video && checkVideoUrl(tiktok_video))errors.push(checkVideoUrl(tiktok_video)!);
+       if (tiktok_images) errors.push(...(await checkImages(env,tiktok_images)));
       if (video && !facebook_enabled && !tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
       if(tiktok_caption!==undefined && !tiktok_enabled) errors.push("TikTok caption requires the TikTok target.");
-      if(tiktok_enabled && (tiktok_caption ?? message).length>(video?2200:4000)) errors.push("TikTok description exceeds its format limit.");
+      if(tiktok_enabled && (tiktok_caption ?? message).length>((tiktok_video||(tiktok_images===undefined&&!!video))?2200:4000)) errors.push("TikTok description exceeds its format limit.");
       if (video && images.length) errors.push("Facebook videos cannot be combined with photos.");
       if (video && link) errors.push("Facebook videos cannot also have a link preview.");
       if (video && checkVideoUrl(video)) errors.push(checkVideoUrl(video)!);
@@ -279,6 +293,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         message,
         tiktok_caption:tiktok_caption ?? null,
         images,
+        tiktok_images:tiktok_images??(tiktok_video?[]:null),tiktok_video:tiktok_video??null,
         video:video ?? null,
         link: link ?? null,
         scheduled_at: time.when?.toISOString() ?? null,
@@ -307,6 +322,8 @@ export function buildServer(env: Env, origin: string): McpServer {
         facebook_enabled: z.boolean().optional(),
         bluesky: blueskySchema.nullable().optional(),
         images: imageList.optional(),
+        tiktok_images:imageList.nullable().optional().describe("Independent TikTok carousel; null restores shared fallback."),
+        tiktok_video:z.string().nullable().optional().describe("Independent TikTok video or null."),
         video: z.string().nullable().optional().describe("Facebook MP4 reference, or null to clear it."),
         link: z.string().url().nullable().optional(),
         publish_at: z.string().nullable().optional(),
@@ -315,7 +332,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, message, tiktok_caption, images, video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
+    async ({ id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
       if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
@@ -326,16 +343,26 @@ export function buildServer(env: Env, origin: string): McpServer {
       const imgErrors = images ? await checkImages(env, images) : [];
       const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
-      const checks = checkMessage(nextMessage, { hasImages: nextImages.length > 0 || !!nextVideo || (!fbNext && !!bsNext) });
+      const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
+        cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
+          hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
+        }):{errors:[],warnings:[]};
       const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
       const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors, ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
       if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
-      if (cur.tiktok_enabled && nextImages.length > 35) errors.push("TikTok carousels support at most 35 images.");
+      const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
+      const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
+      if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
+      if (tiktok_images!==undefined&&!cur.tiktok_enabled)errors.push("TikTok gallery requires TikTok target.");
+      if (tiktok_video!==undefined&&!cur.tiktok_enabled)errors.push("TikTok video requires TikTok target.");
+      if (nextTTVideo&&(nextTTImages??nextImages).length)errors.push("TikTok photos and video cannot be combined.");
+      if (nextTTVideo&&checkVideoUrl(nextTTVideo))errors.push(checkVideoUrl(nextTTVideo)!);
+      if (tiktok_images?.length)errors.push(...(await checkImages(env,tiktok_images)));
       if (nextVideo && !fbNext && !cur.tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
       const nextTikTokCaption=tiktok_caption===undefined?cur.tiktok_caption:tiktok_caption;
       if(tiktok_caption!==undefined && !cur.tiktok_enabled) errors.push("TikTok caption requires the TikTok target.");
-      if(cur.tiktok_enabled && (nextTikTokCaption ?? nextMessage).length>(nextVideo?2200:4000)) errors.push("TikTok description exceeds its format limit.");
+      if(cur.tiktok_enabled && (nextTikTokCaption ?? nextMessage).length>((nextTTImages===null?nextVideo:nextTTVideo)?2200:4000)) errors.push("TikTok description exceeds its format limit.");
       if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
       if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
@@ -347,6 +374,8 @@ export function buildServer(env: Env, origin: string): McpServer {
           message: nextMessage,
           tiktok_caption:nextTikTokCaption,
           images: nextImages,
+          tiktok_images:nextTTImages,
+          tiktok_video:nextTTVideo,
           video:nextVideo,
           link: link === undefined ? cur.link : link,
           scheduled_at: time.when?.toISOString() ?? null,
