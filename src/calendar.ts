@@ -91,6 +91,10 @@ const STYLE = `
 .platform-icons{display:inline-flex;gap:3px}
 .platform-icon{display:inline-grid;place-items:center;width:18px;height:18px;background:#2164a8;color:#fff;border-radius:4px;font:bold 12px system-ui,sans-serif}
 .platform-icon.sky{background:#cfe8ff;color:#0861a3}
+.platform-icon.tiktok{background:#141414;color:#fafafa;border:1px solid #4ad6d6;text-shadow:1px 1px #ee4769}
+.calendar-post[data-status="draft"]{border-left-color:var(--accent2)}
+.calendar-post:focus-visible{outline:3px solid var(--accent2);outline-offset:2px}
+
 .cal-tooltip{position:absolute;top:calc(100% + 3px);left:0;z-index:40;display:none;pointer-events:none;min-width:230px;max-width:300px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 6px 18px #0007;white-space:normal;overflow-wrap:anywhere;font:12px/1.5 system-ui,sans-serif}
 .calendar-post:hover,.calendar-post:focus{z-index:25}
 .calendar-post:hover .cal-tooltip,.calendar-post:focus .cal-tooltip{display:block}
@@ -200,12 +204,14 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
         (!p.approved_at || (p.scheduled_at && Date.parse(p.scheduled_at) - now.getTime() >= 12*60000));
       const caption = p.facebook_enabled ? p.message : p.bluesky?.caption || p.message;
       const title = p.label || p.release || caption.slice(0,50) || "Untitled post";
-      const platforms = (p.facebook_enabled ? '<span class="platform-icon" title="Facebook">f</span>' : '') +
-        (p.bluesky ? '<span class="platform-icon sky" title="Bluesky">🦋</span>' : '');
+      const platforms = (p.facebook_enabled ? '<span class="platform-icon" title="Facebook" aria-label="Facebook">f</span>' : '') +
+        (p.bluesky ? '<span class="platform-icon sky" title="Bluesky" aria-label="Bluesky">🦋</span>' : '') +
+        (p.tiktok_enabled ? '<span class="platform-icon tiktok" title="TikTok, manual transfer" aria-label="TikTok">♪</span>' : '');
       const url = p.images.length || p.bluesky?.images.length ? '/media/' + p.id + '/0?thumb=1' : null;
       const thumb = url ? '<img class="cal-thumb" src="' + esc(url) + '" alt="" loading="lazy">' : '';
       const tip = '<span class="cal-tooltip"><strong>' + esc(title) + '</strong><br>' + esc(p.status) +
         ' · ' + esc(local.replace('T',' ')) + '<br>Created by ' + esc(p.created_by || "unknown") +
+        (p.tiktok_enabled?'<br><strong>TikTok requires an explicit transfer</strong>':'') +
         '<br>' + esc(caption.slice(0,200)) + '</span>';
       return '<a class="calendar-post" style="top:' + minute + 'px;left:calc(' + left +
         '% + 3px);width:calc(' + width + '% - 6px);right:auto" href="/post/' + esc(p.id) +

@@ -8,7 +8,7 @@ import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, listPos
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
-import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
+import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { publicPage } from "./public-pages.ts";
 import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
@@ -296,7 +296,7 @@ function postCard(env: Env, p: Post): string {
   const live = p.permalink ? ` · <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
   const bsky = p.bluesky?.permalink ? ` · <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
-    <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span></div>
+    <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.tiktok_enabled?'<span class="chip">TikTok</span>':""}</div>
     <p class="caption clip">${esc(p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
     ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
@@ -321,7 +321,12 @@ async function dashboard(env: Env, session: Session, requestedWeek: string | nul
 
   const body = `
     ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
-    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><div class="row"><a class="btn" href="/tiktok/settings">TikTok settings</a><a class="btn" href="/new">+ New draft</a></div></div>
+    <div class="hero" style="margin-bottom:15px">
+      <div class="hero-kicker">GS Grimoire · Editorial calendar</div>
+      <h2>One place for every story.</h2>
+      <p>Review drafts, schedule approved Facebook and Bluesky posts, and prepare TikTok videos or carousels for separate, explicit transfer.</p>
+    </div>
+    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><div class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/tiktok/settings">TikTok connection</a><a class="btn" href="/new">+ New draft</a></div></div>
     ${calendar}
     ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
     ${section("Scheduled", scheduled, "Nothing scheduled.")}
@@ -339,8 +344,9 @@ async function newDraftPage(req: Request,env:Env,session:Session):Promise<Respon
   const show=(fields:NewDraftFields,error?:string,status=200)=>
     html(page("New draft",renderNewDraft(fields,csrf,env.TIMEZONE,error),{login:session.login}),{status});
   if(req.method==="GET"){
-    const when=newDraftPrefill(new URL(req.url).searchParams.get("when"),env.TIMEZONE);
-    return show(blankNewDraft(when));
+    const params=new URL(req.url).searchParams;
+    const when=newDraftPrefill(params.get("when"),env.TIMEZONE);
+    return show(presetNewDraft(params.get("preset"),when));
   }
   if(!sameOrigin(req))return new Response("Cross-site request refused",{status:403});
   if(Number(req.headers.get("content-length")||0)>160_000)
@@ -419,21 +425,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   let actions = "";
   const postVideo=p.video || p.bluesky?.video?.url;
   if ((postVideo||p.images.length) && p.tiktok_enabled && !tiktokConn) {
-    actions += '<div class="card"><h2>TikTok inbox</h2><p>Connect your TikTok account first to send this video for manual publication.</p><p><a href="/tiktok/settings">Connect TikTok</a></p></div>';
+    actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to the inbox or initiating a private direct test.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
   }
   if ((postVideo||p.images.length) && p.tiktok_enabled && tiktokConn) {
-    if(!tiktokTransfer) actions += `<div class="card"><h2>TikTok publishing choices</h2><p>Choose inbox upload or an explicit private Direct Post test for the ${p.video?"video":"photo carousel"}.</p><p><a class="btn" href="/post/${p.id}/tiktok-options">Review TikTok posting options</a></p></div>`;
-    if (!tiktokTransfer && ["draft","scheduled","published"].includes(p.status) && !["publishing","published"].includes(p.bluesky?.status||"")) {
-      if(postVideo) actions += `<form method="post" action="/post/${p.id}/tiktok-upload" class="card">
-        ${hidden}
-        <h2>Send video to TikTok inbox</h2>
-        <p>This sends the MP4 to your connected TikTok account for you to review and publish in TikTok. It does not automatically post or schedule a TikTok release.</p>
-        <label><input type="checkbox" name="confirm_tiktok" value="1" required>
-          I understand that TikTok publication is manual and may occur at a different time from this calendar slot.</label>
-        <label for="tiktok-pin">Approval PIN</label><input id="tiktok-pin" type="password" name="pin" required>
-        <button class="primary" type="submit">Send video to TikTok inbox</button>
-      </form>`;
-    }
+    if(!tiktokTransfer && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
+      <div class="eyebrow">TikTok · Ready for review</div>
+      <h3 style="margin:8px 0">Choose your TikTok publishing path</h3>
+      <p class="hint">Review the ${p.video?"video":"carousel"} before sending it to TikTok's inbox or starting a private Direct Post test. Both require a separate approval PIN. The calendar time does not trigger TikTok publication.</p>
+      <p><a class="btn" href="/post/${p.id}/tiktok-options">Review TikTok posting options</a></p>
+    </div>`;
     if (tiktokTransfer) {
       actions += `<div class="card"><h2>TikTok inbox transfer</h2>
         <p>Status: <strong>${esc(tiktokTransfer.status.replaceAll("_"," "))}</strong></p>
@@ -740,7 +740,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     }
     if (action === "tiktok-status") {
       const checked=await refreshTikTokInboxTransfer(env,id,session.login);
-      return postPage(env,session,id,{notice:"TikTok transfer: "+checked.status.replaceAll("_"," ")+". Publication still requires your action in TikTok."});
+      return postPage(env,session,id,{notice:"TikTok transfer: "+checked.status.replaceAll("_"," ")+
+        (checked.post_mode==="DIRECT_POST"?". TikTok is processing your direct post.":". Complete publication inside TikTok if it is an inbox upload.")});
     }
     if (action === "restore-cancelled") {
       if (form.get("confirmed_cancelled") !== "1") {
