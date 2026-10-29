@@ -24,6 +24,7 @@ export const CHAT_UPLOAD_JS=String.raw`
   }
   function select(file){
     if(busy||!file)return;
+    selected=null;send.disabled=true;
     const suffix=file.name.split(".").pop().toLowerCase();
     const valid=ext==="jpg"||ext==="jpeg"?["jpg","jpeg"].includes(suffix):suffix===ext;
     if(!valid){message("Choose a "+ext.toUpperCase()+" file. This link cannot accept a different format.",true);return;}
@@ -101,7 +102,7 @@ export async function browserUploadPage(req:Request,env:Env):Promise<Response> {
       <p class="hint">This one-use link accepts a ${esc(info.ext.toUpperCase())} file, up to ${(info.maxBytes/1048576).toFixed(1)} MB.</p></div></div>
       <div role="button" tabindex="0" id="chat-upload-drop" aria-label="Choose or drop the media file">Drop your file here or select it</div>
       <label for="chat-upload-file">Select file</label>
-      <input type="file" id="chat-upload-file" accept="${esc(accept)}" required>
+      <input type="file" id="chat-upload-file" accept="${esc(accept)}">
       <p id="chat-upload-fileinfo">No file selected</p>
       <button class="primary" type="submit" id="chat-upload-submit" disabled>Upload privately</button>
       <noscript><p class="notice err">JavaScript is required for the browser uploader. You may instead run the command returned by GS Poster.</p></noscript>
