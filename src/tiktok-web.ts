@@ -66,22 +66,34 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   const enabled=tiktokConfigured(env);
   const csrf=await csrfToken(env,session);
   const granted=conn?.scopes.split(",").filter(Boolean)||[];
-  const body=`<p><a href="/">← Back to GS Poster</a></p>
-  <h2>TikTok connection</h2>
-  <p>TikTok authorizes the publishing account separately from the GitHub editor login. Nothing is sent to TikTok when you create a GS Poster draft.</p>
-  ${notice==="connected"?'<div class="notice ok">TikTok account connected. Publishing remains disabled pending validation.</div>':""}
+  const readiness=`<div class="step-card">
+      <div class="eyebrow">Connection readiness</div>
+      <div class="summary-row"><span><span class="status-led ${enabled?"":"err"}"></span>Worker credentials</span><strong>${enabled?"Configured":"Action needed"}</strong></div>
+      <div class="summary-row"><span><span class="status-led ${conn?"":"warn"}"></span>TikTok account</span><strong>${conn?"Connected":"Not connected"}</strong></div>
+      <div class="summary-row"><span><span class="status-led warn"></span>Media URL ownership</span><strong>Confirm in TikTok</strong></div>
+      <p class="rail-note">The last step is verified in TikTok's developer portal. GS Poster cannot check it automatically.</p>
+    </div>`;
+  const body=`<div class="hero">
+    <div class="hero-kicker">GS Grimoire · Social connections</div>
+    <h2>Connect once. Create freely.</h2>
+    <p>Control which TikTok account receives your videos and carousels. Connecting grants permissions only; publishing still requires your explicit approval PIN.</p>
+    </div>
+    ${readiness}
+  ${notice==="connected"?'<div class="notice ok">TikTok account connected. Choose a posting method on a draft when you are ready.</div>':""}
   ${notice==="disconnected"?'<div class="notice">Local TikTok connection removed.</div>':""}
   ${notice==="revoke-warning"?'<div class="notice err">Local credentials were removed, but TikTok did not confirm revocation. Revoke GS Poster in TikTok account settings if necessary.</div>':""}
   ${!enabled?'<div class="notice err">TikTok is not configured yet. Add TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET and TIKTOK_TOKEN_ENCRYPTION_KEY as Cloudflare Worker secrets before connecting.</div>':""}
-  <div class="card"><h3>Developer portal settings</h3>
-    <p>Login Kit redirect URI:</p><code>${esc(tiktokRedirect(env))}</code>
-    <p><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/about">Public About page</a></p>
+  <div class="step-card"><div class="step-heading"><span class="step-number">1</span><div>
+    <h3>App authorization</h3><p class="hint">Only the requested permissions appear on TikTok's consent screen.</p></div></div>
+    <p class="form-info">Login Kit redirect address</p><code style="display:block;overflow-wrap:anywhere">${esc(tiktokRedirect(env))}</code>
+    <p class="form-info"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/about">Public About page</a></p>
   </div>
-  <div class="card">
-    <h3>TikTok photo and video URL verification</h3>
-    <p>Verify the exact URL prefix below in TikTok Developer Portal → URL properties:</p>
-    <code>${esc(TIKTOK_MEDIA_PREFIX)}</code>
-    <p class="hint">Download TikTok's verification .txt file, then enter its filename and contents here. This creates a public verification file without exposing private draft images.</p>
+  <div class="step-card">
+    <div class="step-heading"><span class="step-number">2</span><div><h3>Verify your media address</h3>
+      <p class="hint">Required for image carousels and link-based video posting.</p></div></div>
+    <p class="form-info">In GS TT Poster, open TikTok Developer Portal → URL properties, then verify this exact prefix:</p>
+    <code style="display:block;overflow-wrap:anywhere">${esc(TIKTOK_MEDIA_PREFIX)}</code>
+    <p class="choice-advice">TikTok supplies a text verification file. Paste the filename and exact contents below, host it, then finish the verification in TikTok. This does not expose your private draft artwork.</p>
     <form method="post" action="/tiktok/verify">
       <input name="csrf" type="hidden" value="${esc(csrf)}">
       <label for="tt-verify-filename">Verification filename from TikTok</label>
@@ -93,8 +105,9 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
     <p class="hint">Once hosted, complete ownership verification in TikTok. This is required for photo carousels and URL-based video publishing.</p>
   </div>
   ${conn?
-    `<div class="card">
-      <h3>Connected TikTok account</h3>
+    `<div class="step-card">
+      <div class="step-heading"><span class="step-number">3</span><div><h3>Connected TikTok account</h3>
+        <p class="hint">Your account is available for separately approved transfers.</p></div></div>
       <p><strong>Connection:</strong> Active</p>
       <p><strong>Account identifier:</strong> ${esc(conn.open_id)}</p>
       <p><strong>Granted permissions:</strong> ${esc(granted.join(", "))}</p>
@@ -106,8 +119,9 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
         <button type="submit">Disconnect TikTok</button>
       </form>
     </div>` :
-    `<form method="post" action="/tiktok/connect" class="card">
-      <h3>Connect a TikTok account</h3>
+    `<form method="post" action="/tiktok/connect" class="step-card">
+      <div class="step-heading"><span class="step-number">3</span><div><h3>Connect a TikTok account</h3>
+        <p class="hint">You remain signed in to GS Poster through GitHub.</p></div></div>
       <p>The TikTok consent screen will show the exact permissions requested. Only select permissions enabled in your TikTok developer application.</p>
       <input name="csrf" type="hidden" value="${esc(csrf)}">
       <p><label><input type="checkbox" checked disabled> Read basic account profile (required)</label></p>
@@ -116,7 +130,12 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <button class="primary" type="submit" ${enabled?"":"disabled"}>Connect TikTok</button>
       <p class="hint">Connecting only grants access. No content is posted until a separate explicit publishing action is implemented and approved.</p>
     </form>`}
-  <p class="hint">Video and photo inbox uploads are available. Direct Post tests require additional permissions and explicit approval; unaudited applications are restricted to private posts. Automatic TikTok scheduling is not enabled.</p>`;
+  <div class="step-card"><div class="eyebrow">Next step</div>
+    <h3 style="margin:8px 0">Create your next post</h3>
+    <p class="hint">Try a two-image carousel first. Sending to the TikTok inbox is safer for initial testing than immediate Direct Post.</p>
+    <p class="inline-actions"><a class="btn" href="/new">+ Create a draft</a><a class="btn" href="/">Open planner</a></p>
+    <p class="rail-note">Automatic TikTok scheduling is not enabled. Every TikTok transfer is a separate approval action, independent of your planner time.</p>
+  </div>`;
   // Templates contain only escaped account fields or fixed server-defined strings.
   return html(page("TikTok settings",body,{login:session.login}));
 }
