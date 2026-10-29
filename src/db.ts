@@ -405,7 +405,7 @@ export async function updatePost(db: D1Database, id: string, patch: Patch, onlyI
   await ensureSchema(db);
   const fields = Object.entries({ ...patch, updated_at: new Date().toISOString() });
   const sets = fields.map(([k]) => `${k} = ?`).join(", ");
-  const values = fields.map(([k, v]) => (k === "images" ? JSON.stringify(v) : (v ?? null)));
+  const values = fields.map(([k, v]) => (k === "images" || k === "tiktok_images") && v !== null ? JSON.stringify(v) : (v ?? null));
   let sql = `UPDATE posts SET ${sets} WHERE id = ?`;
   const binds: unknown[] = [...values, id];
   if (onlyIfStatus?.length) {
