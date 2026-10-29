@@ -142,7 +142,11 @@ export function buildServer(env: Env, origin: string): McpServer {
     },
     async ({ filename }) => {
       try {
-        const grant = await createUpload(env, origin, { filename, actor: actor() });
+        // Upload ownership must use the authenticated GitHub login, not the
+        // human-readable MCP actor string (which includes the client name).
+        const login=ownerLogin();
+        if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
+        const grant = await createUpload(env, origin, { filename, actor: login });
         await audit(env.DB, actor(), "upload-link", null, grant.reference);
         return ok({
           ...grant,upload_page_url:grant.upload_url,
