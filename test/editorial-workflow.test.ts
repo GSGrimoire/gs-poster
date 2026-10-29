@@ -1,7 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import {page} from "../src/html.ts";
-import {blankNewDraft,renderNewDraft} from "../src/new-draft.ts";
+import {blankNewDraft,presetNewDraft,renderNewDraft} from "../src/new-draft.ts";
 import {NEW_DRAFT_JS} from "../src/new-draft-client.ts";
 import {renderCalendar} from "../src/calendar.ts";
 import type {Post} from "../src/db.ts";
@@ -73,4 +73,20 @@ test("calendar shows TikTok destination without suggesting automatic TikTok publ
   assert.match(html,/TikTok requires an explicit transfer/);
   assert.match(html,/aria-label="TikTok"/);
   assert.match(html,/data-status="draft"/);
+});
+
+test("TikTok quick starts do not silently select Facebook or Bluesky",()=>{
+  const when="2026-10-30T12:00";
+  const photo=presetNewDraft("tiktok-carousel",when);
+  assert.equal(photo.contentKind,"images");
+  assert.equal(photo.tiktok,true);
+  assert.equal(photo.facebook,false);
+  assert.equal(photo.bluesky,false);
+  assert.equal(photo.when,when);
+  const video=presetNewDraft("tiktok-video",when);
+  assert.equal(video.contentKind,"video");
+  assert.equal(video.facebook,false);
+  assert.equal(video.bluesky,false);
+  assert.equal(video.tiktok,true);
+  assert.deepEqual(presetNewDraft("unknown"),blankNewDraft());
 });
