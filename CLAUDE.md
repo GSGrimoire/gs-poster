@@ -34,3 +34,9 @@ If any of these fails, comment on the pull request and tell Gus instead of mergi
 - Draft with `draft_post`, one post per call, with `label` (e.g. "Day 1 creature reveal"), `release` and `publish_at` in Copenhagen time.
 - Tell Gus the drafts are waiting and give him the review link. Never say a post is published until `get_post` shows `published`.
 - Rejected posts carry Gus's note in `gus_note`. Revise with `update_draft`.
+- For images and reels created inside Claude, **never assume the remote connector automatically receives conversation attachment bytes**. See [CHAT_MEDIA_WORKFLOW.md](./CHAT_MEDIA_WORKFLOW.md).
+- Call `request_upload` per JPG, PNG, GIF or MP4. If a code/file tool gives you access to the original file bytes, use its file upload capability or curl to send those bytes to `upload_url`. Never generate base64 from a picture description or fake a local path.
+- If Claude cannot access the binary file in that environment, show `upload_page_url` so Gus can select the file in a browser. The private one-time upload page removes the need for GitHub staging.
+- After the editor uploads, call `check_upload` using its `upload://` reference. Only use media with `ready: true` in `draft_post` or `update_draft`.
+- For TikTok-only drafts, select `facebook_enabled:false, tiktok_enabled:true` and provide the image references in carousel order or the MP4 as `video`. TikTok requires a separate, explicit PIN-confirmed web action and does not automatically follow the calendar time.
+- Give Gus the draft review link and clearly distinguish **stored**, **drafted**, **transferred**, and **published** status. A successful upload is not a published post.
