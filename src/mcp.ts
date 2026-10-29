@@ -16,6 +16,7 @@ import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
 import { createUpload, getUploadUsage, uploadStatusForOwner } from "./upload.ts";
+import {createChatUploadBatch,checkChatUploadBatch,CHAT_BATCH_MAX_FILES,CHAT_BATCH_CHECK_MAX} from "./chat-media.ts";
 
 const STATUSES = ["draft", "rejected", "publishing", "scheduled", "published", "failed", "cancelled"] as const;
 
@@ -176,6 +177,48 @@ export function buildServer(env: Env, origin: string): McpServer {
       const result=await uploadStatusForOwner(env.DB,reference,login);
       return result ? ok({...result,ready:result.status==="stored"}) :
         fail("Upload not found or not owned by this account.");
+    },
+  );
+
+
+  server.registerTool(
+    "request_uploads",
+    {
+      title:"Prepare multiple private media uploads for a carousel or reel",
+      description:"Request up to 35 private, one-time image or MP4 upload pages in a single call, retaining the order for TikTok carousels. Use the upload_page_url fields to transfer each actual file from a chat or mobile device, or send the bytes directly to upload_url if the assistant has file access. Call check_uploads afterwards. No GitHub staging and no publishing.",
+      inputSchema:z.object({
+        filenames:z.array(z.string().min(1).max(200)).min(1).max(CHAT_BATCH_MAX_FILES)
+          .describe("Ordered list of JPG, JPEG, PNG, GIF, or MP4 filenames. One upload grant per file."),
+      }),
+      annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
+    },
+    async ({filenames})=>{
+      const login=ownerLogin();
+      if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
+      try{
+        const result=await createChatUploadBatch(env,origin,login,filenames);
+        await audit(env.DB,actor(),"upload-batch",null,result.created+" private media upload links");
+        return ok(result);
+      }catch(error){return fail(error instanceof Error?error.message:String(error));}
+    },
+  );
+
+  server.registerTool(
+    "check_uploads",
+    {
+      title:"Verify a batch of chat media files in original carousel order",
+      description:"Read-only check of up to 80 upload:// image or video references. Reports whether each file was actually stored and belongs to this authenticated editor. Use only ready files in a GS Poster draft. TikTok supports at most 35 carousel images, Bluesky at most four, and Facebook at most 80.",
+      inputSchema:z.object({
+        references:z.array(z.string().min(1)).min(1).max(CHAT_BATCH_CHECK_MAX)
+          .describe("Private upload:// references in intended carousel order."),
+      }),
+      annotations:{readOnlyHint:true,openWorldHint:false},
+    },
+    async ({references})=>{
+      const login=ownerLogin();
+      if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
+      try{return ok(await checkChatUploadBatch(env.DB,login,references));}
+      catch(error){return fail(error instanceof Error?error.message:String(error));}
     },
   );
 
