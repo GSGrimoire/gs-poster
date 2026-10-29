@@ -365,7 +365,7 @@ async function newDraftPage(req: Request,env:Env,session:Session):Promise<Respon
   const str=(name:string)=>String(form.get(name)||"");
   const fields:NewDraftFields={
     label:str("label"),release:str("release"),message:str("message"),
-    bsCaption:str("bs_caption"),facebook:form.get("facebook")==="1",
+    tiktokCaption:str("tiktok_caption"),bsCaption:str("bs_caption"),facebook:form.get("facebook")==="1",
     bluesky:form.get("bluesky")==="1",tiktok:form.get("tiktok")==="1",when:form.get("asap")==="1" ? soonestDraftTime(env.TIMEZONE) : str("when"),
     contentKind:str("content_kind") as NewDraftFields["contentKind"],
   };

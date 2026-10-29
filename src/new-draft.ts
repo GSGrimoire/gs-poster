@@ -6,12 +6,12 @@ import { textLength } from "./bluesky.ts";
 import type { NewPost } from "./db.ts";
 
 export interface NewDraftFields {
-  label: string; release: string; message: string; bsCaption: string;
+  label: string; release: string; message: string; bsCaption: string; tiktokCaption?:string;
   facebook: boolean; bluesky: boolean; tiktok?: boolean; when: string;
   contentKind?: "text" | "images" | "video";
 }
 export function blankNewDraft(when = ""): NewDraftFields {
-  return {label:"",release:"",message:"",bsCaption:"",facebook:true,bluesky:true,tiktok:false,when,contentKind:"text"};
+  return {label:"",release:"",message:"",bsCaption:"",tiktokCaption:"",facebook:true,bluesky:true,tiktok:false,when,contentKind:"text"};
 }
 
 /** Explicit presets only, selected through GET links. No preset approves or publishes. */
@@ -52,11 +52,14 @@ export function parseNewDraft(
     throw new Error("Name and release must each be 120 characters or fewer.");
   if(fields.message.length>63_206)
     throw new Error("Facebook caption exceeds its maximum length.");
+  if(fields.tiktok && (fields.tiktokCaption?.trim()||fields.message).length>(fields.contentKind==="video"?2200:4000))
+    throw new Error("TikTok caption exceeds the limit for this format.");
   if(textLength(fields.bsCaption)>300 || new TextEncoder().encode(fields.bsCaption).length>3000)
     throw new Error("Bluesky caption exceeds its 300-character limit.");
   const scheduledAt=newDraftTime(fields.when,zone,now);
   return {
-    message: fields.message, label: fields.label.trim() || null,
+    message: fields.message, tiktok_caption:fields.tiktok && fields.tiktokCaption?.trim()?fields.tiktokCaption.trim():null,
+    label: fields.label.trim() || null,
     release:fields.release.trim() || null,
     images:[],video:null,link:null,
     scheduled_at:scheduledAt?.toISOString() || null,
@@ -147,10 +150,16 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
       <section class="step-card" aria-labelledby="draft-copy-title">
         <div class="step-heading"><span class="step-number">3</span><div><h3 id="draft-copy-title">Tell the story</h3><p class="hint">Tailor the caption to each destination.</p></div></div>
         <section id="new-facebook-panel">
-          <label for="new-message">Facebook / TikTok caption</label>
+          <label for="new-message">Facebook / shared caption</label>
           <textarea id="new-message" name="message" maxlength="63206" placeholder="Your story, hook or announcement...">${v(fields.message)}</textarea>
           <div class="field-meter" id="new-main-count">0 characters</div>
           <p class="form-info" id="new-tiktok-caption-advice" hidden>TikTok photo descriptions can contain up to 4,000 characters. Review the final caption again in TikTok posting options.</p>
+        </section>
+        <section id="new-tiktok-panel" ${fields.tiktok?"":"hidden"}>
+          <label for="new-tiktok-caption">TikTok caption and hashtags (optional override)</label>
+          <textarea id="new-tiktok-caption" name="tiktok_caption" maxlength="4000" style="min-height:120px" placeholder="Tailor your TikTok caption, hooks and hashtags here...">${v(fields.tiktokCaption||"")}</textarea>
+          <p class="form-info">Leave blank to use the shared caption above. Photo limit: 4,000 characters. Video limit: 2,200 characters.</p>
+          <div class="field-meter" id="new-tiktok-count">0 characters</div>
         </section>
         <section id="new-bluesky-panel">
           <label for="new-bs">Bluesky caption (up to 300 characters)</label>
