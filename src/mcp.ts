@@ -264,7 +264,11 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ message, tiktok_caption, images = [], tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
-      const checks = checkMessage(message, { hasImages: images.length > 0 || !!video || (!facebook_enabled && !!bluesky) });
+      const checks = facebook_enabled?
+        checkMessage(message,{hasImages:images.length>0||!!video}):
+        tiktok_enabled?checkMessage(tiktok_caption??message,{
+          hasImages:(tiktok_images??images).length>0||!!(tiktok_video??video)
+        }):{errors:[],warnings:[]};
       const time = readWhen(env, publish_at);
       const imgErrors = await checkImages(env, images);
       const bsHouse = bluesky ? checkMessage(bluesky.caption, { hasImages: bluesky.images.length > 0 }) : null;
@@ -339,7 +343,10 @@ export function buildServer(env: Env, origin: string): McpServer {
       const imgErrors = images ? await checkImages(env, images) : [];
       const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
-      const checks = checkMessage(nextMessage, { hasImages: nextImages.length > 0 || !!nextVideo || (!fbNext && !!bsNext) });
+      const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
+        cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
+          hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
+        }):{errors:[],warnings:[]};
       const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
       const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors, ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
