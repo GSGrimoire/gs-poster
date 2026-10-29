@@ -64,7 +64,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   const kind=fields.contentKind ?? "text";
   return `
   <div class="hero">
-    <div class="hero-kicker">GS Grimoire · Publishing studio</div>
+    <div class="hero-kicker">GS Grimoire · New post draft</div>
     <h2>Make something worth sharing.</h2>
     <p>Build once, tailor by platform, preview every image and save an unapproved draft. Nothing goes live until you choose a separate publishing action.</p>
   </div>
