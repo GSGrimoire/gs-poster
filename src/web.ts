@@ -403,11 +403,13 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at
     ? await getFacebookUploadProgress(env.DB, p.id, p.images.length) : null;
   const message = state.message ?? p.message;
-  const checks = checkMessage(message, { hasImages: p.images.length > 0 || !!p.video || (!p.facebook_enabled && !!p.bluesky) });
+  const checks = p.facebook_enabled ? checkMessage(message, {hasImages:p.images.length>0||!!p.video}) : {errors:[],warnings:[]};
   const bsChecks = p.bluesky ? checkMessage(p.bluesky.caption, { hasImages: p.bluesky.images.length > 0 || !!p.bluesky.video }) : null;
   const checkList = [
     ...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`),
     ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`),
+    ...(p.tiktok_enabled && (p.tiktok_caption??p.message).length>(ttMedia.video?2200:4000)
+      ? ['<li class="e">TikTok caption is too long for this format.</li>'] : []),
     ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
