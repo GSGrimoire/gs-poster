@@ -138,7 +138,12 @@ export const DRAFT_MEDIA_JS = `
         if (!enabled) continue;
         const text = document.createElement("label");
         const box = document.createElement("input");
-        box.type = "checkbox";box.checked = true;
+        box.type = "checkbox";
+        const base=Number(panel.dataset[kind+"Images"]||0);
+        const selected=files.filter(x=>!!x[kind]?.checked).length;
+        const limit=kind==="bluesky"?4:kind==="tiktok"?35:80;
+        box.checked=base+selected<limit;
+        if(!box.checked)text.title="Platform gallery already has its maximum number of images.";
         if (kind === "facebook") record.facebook = box;
         else if (kind === "bluesky") record.bluesky = box;
         else record.tiktok = box;
@@ -151,7 +156,7 @@ export const DRAFT_MEDIA_JS = `
       alt.placeholder = "Describe what is visible in this image";
       altLabel.append(alt);
       record.alt = alt;
-      if (!record.bluesky) altLabel.hidden = true;
+      if (!record.bluesky || !record.bluesky.checked) altLabel.hidden = true;
       else record.bluesky.addEventListener("change", () => { altLabel.hidden = !record.bluesky.checked; });
       const progress = document.createElement("span");
       progress.className = "media-status";progress.textContent = "Ready";
