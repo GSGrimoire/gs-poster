@@ -206,6 +206,36 @@ export async function handleUploadPut(request: Request, env: Env): Promise<Respo
       : json({error:"Upload failed. Contact support if the link has been consumed."},500);
   }
 }
+/** One-time bearer link lookup, valid only until the upload is completed or expired.
+ * This MUST NOT disclose the upload token in any response.
+ */
+export async function pendingUploadPageInfo(
+  db:D1Database,id:string,token:string,
+):Promise<{ext:UploadExt;maxBytes:number}|null> {
+  if(!/^[a-f0-9]{32}$/.test(id)|| !/^[A-Za-z0-9_-]{20,64}$/.test(token))return null;
+  await ensureUploads(db);
+  const row=await db.prepare(
+    "SELECT token_hash,ext,max_bytes,status,expires_at FROM uploads WHERE id=?"
+  ).bind(id).first<Pick<UploadRow,"token_hash"|"ext"|"max_bytes"|"status"|"expires_at">>();
+  if(!row||row.status!=="pending"||row.expires_at<=new Date().toISOString()||
+     !safeEqual(await sha256(token),row.token_hash))return null;
+  return {ext:row.ext,maxBytes:row.max_bytes};
+}
+
+/** Only the OAuth/GitHub owner may query whether an upload can be used in a draft. */
+export async function uploadStatusForOwner(db:D1Database,reference:string,login:string):
+  Promise<{reference:string;status:"pending"|"uploading"|"stored"|"expired";bytes:number|null;max_bytes:number}|null> {
+  const parsed=parseUploadRef(reference);
+  if(!parsed||!login.trim())return null;
+  await ensureUploads(db);
+  const row=await db.prepare(
+    "SELECT ext,status,created_by,expires_at,bytes,max_bytes FROM uploads WHERE id=?"
+  ).bind(parsed.id).first<Pick<UploadRow,"ext"|"status"|"created_by"|"expires_at"|"bytes"|"max_bytes">>();
+  if(!row||row.ext!==parsed.ext||row.created_by?.toLowerCase()!==login.toLowerCase())return null;
+  const expired=row.status==="pending"&&row.expires_at<=new Date().toISOString();
+  return {reference,status:expired?"expired":row.status,bytes:row.bytes,max_bytes:row.max_bytes};
+}
+
 /** Verify that a browser upload finished and belongs to the signed-in owner. */
 export async function isStoredOwnerUpload(db: D1Database, reference: string, login: string): Promise<boolean> {
   const ref = parseUploadRef(reference);
