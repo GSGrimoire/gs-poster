@@ -4,7 +4,7 @@
  */
 import type { Env } from "./env.ts";
 import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
-import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, type Post, type ApprovalSnapshot } from "./db.ts";
+import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, type Post, type ApprovalSnapshot, tiktokMedia } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchVideo } from "./video.ts";
@@ -269,7 +269,7 @@ export async function editPendingCaptions(
   if (message.length > 63_206) throw new Error("Facebook caption is too long.");
   if(p.tiktok_enabled){
     const content=tiktokCaption ?? message;
-    const max=p.tiktok_video||p.video ? 2200 : 4000;
+    const max=tiktokMedia(p).video ? 2200 : 4000;
     if(content.length>max)throw new Error("TikTok caption exceeds its format limit.");
     if(tiktokCaption!==p.tiktok_caption && await getTikTokInboxTransfer(env.DB,id))
       throw new Error("TikTok transfer already started. Its caption cannot be changed here.");
