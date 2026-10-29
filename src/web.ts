@@ -10,6 +10,7 @@ import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
+import { CHAT_UPLOAD_JS } from "./chat-upload.ts";
 import { publicPage } from "./public-pages.ts";
 import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
 import { tiktokConnection } from "./tiktok.ts";
@@ -78,6 +79,11 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     const response = publicPage(path.slice(1) as "about" | "terms" | "privacy");
     return req.method === "HEAD" ? new Response(null,{status:response.status,headers:response.headers}) : response;
   }
+  if (path === "/upload-client.js" && req.method === "GET")
+    return new Response(CHAT_UPLOAD_JS,{headers:{
+      "Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store",
+      "X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"
+    }});
   if (path === "/tiktok/callback") return tiktokCallback(req,env);
   if (path.startsWith("/tiktok/media/")) return serveTikTokMedia(req,env);
   if (path === "/robots.txt") return new Response(
