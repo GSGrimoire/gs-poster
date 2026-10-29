@@ -8,7 +8,7 @@ import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, listPos
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
-import { blankNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
+import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { publicPage } from "./public-pages.ts";
 import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
@@ -326,7 +326,7 @@ async function dashboard(env: Env, session: Session, requestedWeek: string | nul
       <h2>One place for every story.</h2>
       <p>Review drafts, schedule approved Facebook and Bluesky posts, and prepare TikTok videos or carousels for separate, explicit transfer.</p>
     </div>
-    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><div class="inline-actions"><a class="btn" href="/tiktok/settings">TikTok connection</a><a class="btn" href="/new">+ New draft</a></div></div>
+    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><div class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/tiktok/settings">TikTok connection</a><a class="btn" href="/new">+ New draft</a></div></div>
     ${calendar}
     ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
     ${section("Scheduled", scheduled, "Nothing scheduled.")}
@@ -344,8 +344,9 @@ async function newDraftPage(req: Request,env:Env,session:Session):Promise<Respon
   const show=(fields:NewDraftFields,error?:string,status=200)=>
     html(page("New draft",renderNewDraft(fields,csrf,env.TIMEZONE,error),{login:session.login}),{status});
   if(req.method==="GET"){
-    const when=newDraftPrefill(new URL(req.url).searchParams.get("when"),env.TIMEZONE);
-    return show(blankNewDraft(when));
+    const params=new URL(req.url).searchParams;
+    const when=newDraftPrefill(params.get("when"),env.TIMEZONE);
+    return show(presetNewDraft(params.get("preset"),when));
   }
   if(!sameOrigin(req))return new Response("Cross-site request refused",{status:403});
   if(Number(req.headers.get("content-length")||0)>160_000)
