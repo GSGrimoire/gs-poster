@@ -53,7 +53,10 @@ test("image carousel editor preserves order and alternate descriptions when reor
   assert.match(NEW_DRAFT_JS,/form\.querySelector\('input\[name="content_kind"\]\[value="images"\]'\)\.checked=true/);
   assert.match(NEW_DRAFT_JS,/images\.filter\(x=>x\.attached\)\.length/);
   assert.match(NEW_DRAFT_JS,/new-upload-progress/);
-  assert.match(NEW_DRAFT_JS,/platformLimit\(\)/);
+  assert.match(NEW_DRAFT_JS,/const platformLimits=\{facebook:80,tiktok:35,bluesky:4\}/);
+  assert.match(NEW_DRAFT_JS,/selectedCount\(name\)/);
+  assert.match(NEW_DRAFT_JS,/item.order<4/);
+  assert.match(NEW_DRAFT_JS,/item.order<35/);
   assert.doesNotMatch(NEW_DRAFT_JS,/\/approve|\/publish/);
 });
 
