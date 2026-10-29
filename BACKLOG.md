@@ -7,10 +7,10 @@ This file indexes actionable work and links to the evidence/design documents in 
 | Priority | Work item | Status | Reference | Blocker |
 |---|---|---|---|---|
 | P0 | ChatGPT media intake improvements: batch upload links, batch checks and TikTok-specific caption | In current pull request | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Production tests/merge |
-| P1 | True no-click ChatGPT attachment transfer | Research/backlog | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Verify chat-client access to original attachment bytes and binary transfer capability |
-| P1 | Better multi-file uploader and independent Facebook/TikTok galleries | Backlog | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | New shared-media-target database and UI |
-| P2 | Reddit subreddit-specific drafts, rule checking and approved posting | Research/backlog | [Reddit](docs/REDDIT_PUBLISHING_RESEARCH_2026-10-29.md) | Reddit API approval and commercial-use permission |
-| P2 | Facebook Group manual dispatch with copy/media/reminder/completion | Research/backlog | [Facebook Groups](docs/FACEBOOK_GROUPS_RESEARCH_2026-10-29.md) | No supported public API; manual workflow only |
+| P1 | True no-click ChatGPT attachment transfer | [#32](https://github.com/GSGrimoire/gs-poster/issues/32) | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Verify chat-client access to original attachment bytes and binary transfer capability |
+| P1 | Better multi-file uploader and independent Facebook/TikTok galleries | [#33](https://github.com/GSGrimoire/gs-poster/issues/33) | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | New shared-media-target database and UI |
+| P2 | Reddit subreddit-specific drafts, rule checking and approved posting | [#34](https://github.com/GSGrimoire/gs-poster/issues/34) | [Reddit](docs/REDDIT_PUBLISHING_RESEARCH_2026-10-29.md) | Reddit API approval and commercial-use permission |
+| P2 | Facebook Group manual dispatch with copy/media/reminder/completion | [#35](https://github.com/GSGrimoire/gs-poster/issues/35) | [Facebook Groups](docs/FACEBOOK_GROUPS_RESEARCH_2026-10-29.md) | No supported public API; manual workflow only |
 | P2 | Larger reels, upload streaming, audio/subtitle workflow and cover selection | Backlog | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Streaming, duration/format validation and storage budget |
 | P3 | Direct official Group API integration | Blocked, not planned | [Facebook Groups](docs/FACEBOOK_GROUPS_RESEARCH_2026-10-29.md) | Meta retired Groups API 22 April 2024. Revisit only if an officially supported replacement appears. |
 
