@@ -5,6 +5,7 @@ GS Poster prepares Facebook and Bluesky posts for GS Grimoire. Claude, ChatGPT a
 One Cloudflare Worker (free plan) does three jobs:
 
 - **MCP server** at `/mcp`. Claude or ChatGPT connects to it as a custom connector and gets tools to draft, revise, list and delete drafts, and read the Page. **There is no publish tool.**
+- **Chat media handoff**. The connector creates one-time private media upload pages for Claude and ChatGPT. An editor can open the upload page and select media directly, or an assistant with actual file-byte access can PUT the original image or MP4. Use `check_upload` to confirm storage and `draft_post` to save the content. TikTok-only drafts are supported. **No public GitHub file staging is needed.** See [CHAT_MEDIA_WORKFLOW.md](./CHAT_MEDIA_WORKFLOW.md).
 - **Approval site** at `/`. Gus signs in with GitHub, chooses Facebook, Bluesky or both, edits platform captions, image alternative text and publish time, and approves with a PIN. Facebook uses Meta scheduling. Bluesky uses an approved queue served by the Worker's cron trigger.
 - **OAuth server**. Connecting an assistant requires Gus's GitHub sign-in plus a consent click.
 

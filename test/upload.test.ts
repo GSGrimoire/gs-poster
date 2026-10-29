@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkImageUrl, fetchImage } from "../src/media.ts";
 import { createUpload, handleUploadPut, looksLike, parseUploadRef,
-  UPLOAD_MAX_LINKS_PER_HOUR, UPLOAD_QUOTA_BYTES } from "../src/upload.ts";
+  UPLOAD_MAX_LINKS_PER_HOUR, UPLOAD_QUOTA_BYTES, pendingUploadPageInfo, uploadStatusForOwner } from "../src/upload.ts";
+import {CHAT_UPLOAD_JS,browserUploadPage} from "../src/chat-upload.ts";
 import type { Env } from "../src/env.ts";
 
 type Row = Record<string, any>;
@@ -118,4 +119,48 @@ test("ambiguous R2 write failure consumes bearer link and blocks a second PUT",a
   assert.equal(db.rows[0].status,"uploading");
   assert.equal((await handleUploadPut(upload(grant.upload_url,png),env)).status,404);
   assert.equal(calls,1);
+});
+
+
+test("chat upload handoff is one-time, does not expose bearer credentials in page HTML",async()=>{
+  const {env}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"token.png",actor:"GSGrimoire"});
+  const url=new URL(grant.upload_url);
+  const parts=url.pathname.split("/");
+  const info=await pendingUploadPageInfo(env.DB,parts[2],parts[3]);
+  assert.deepEqual(info,{ext:"png",maxBytes:10*1024*1024});
+  const response=await browserUploadPage(new Request(grant.upload_url),env);
+  assert.equal(response.status,200);
+  assert.equal(response.headers.get("Referrer-Policy"),"no-referrer");
+  assert.equal(response.headers.get("Cache-Control"),"no-store");
+  assert.match(response.headers.get("Content-Security-Policy")||"",/script-src 'self'/);
+  const body=await response.text();
+  assert.match(body,/Upload privately/);
+  assert.match(body,/src="\/upload-client.js"/);
+  assert.match(body,/data-ext="png"/);
+  assert.doesNotMatch(body,new RegExp(parts[3]));
+  assert.doesNotMatch(body,/https:\/\/[^"]+\.js/);
+  assert.equal((await browserUploadPage(new Request(grant.upload_url,{method:"POST"}),env)).status,405);
+  assert.equal((await handleUploadPut(upload(grant.upload_url,png),env)).status,200);
+  assert.equal((await browserUploadPage(new Request(grant.upload_url),env)).status,404);
+});
+
+test("upload readiness is scoped to the authenticated uploader, not the MCP client name",async()=>{
+  const {env}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"poster.png",actor:"GSGrimoire"});
+  assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"gsgrimoire"))?.status,"pending");
+  assert.equal(await uploadStatusForOwner(env.DB,grant.reference,"AnotherEditor"),null);
+  assert.equal((await uploadStatusForOwner(env.DB,"upload://"+"x".repeat(32)+".png","GSGrimoire")),null);
+  assert.equal((await handleUploadPut(upload(grant.upload_url,png),env)).status,200);
+  const state=await uploadStatusForOwner(env.DB,grant.reference,"GSGrimoire");
+  assert.equal(state?.status,"stored");
+  assert.equal(state?.bytes,png.byteLength);
+});
+
+test("chat uploader sends file bytes with a one-time PUT and never auto-publishes",()=>{
+  assert.match(CHAT_UPLOAD_JS,/method:"PUT",body:selected/);
+  assert.match(CHAT_UPLOAD_JS,/referrerPolicy:"no-referrer"/);
+  assert.match(CHAT_UPLOAD_JS,/credentials:"omit"/);
+  assert.match(CHAT_UPLOAD_JS,/response\.reference/);
+  assert.doesNotMatch(CHAT_UPLOAD_JS,/\/approve|\/publish/);
 });

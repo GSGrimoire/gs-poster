@@ -10,6 +10,7 @@ import type { Env } from "./env.ts";
 import { buildServer } from "./mcp.ts";
 import { handleWeb } from "./web.ts";
 import { handleUploadPut } from "./upload.ts";
+import { browserUploadPage } from "./chat-upload.ts";
 import { publishDueBluesky } from "./publish.ts";
 import { processFacebookUploadBatch } from "./facebook-queue.ts";
 
@@ -57,7 +58,8 @@ export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response {
     const origin = new URL(request.url).origin;
     if (env.PUBLIC_ORIGIN && origin !== env.PUBLIC_ORIGIN) return new Response("Not found", { status: 404 });
-    if (new URL(request.url).pathname.startsWith("/upload/")) return handleUploadPut(request, env);
+    if (new URL(request.url).pathname.startsWith("/upload/"))
+      return request.method==="GET" ? browserUploadPage(request,env) : handleUploadPut(request, env);
     return providerFor(origin).fetch(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
