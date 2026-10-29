@@ -168,7 +168,7 @@ function fromRow(r: Row): Post {
   return {
     ...r,
     images: JSON.parse(r.images || "[]"),
-    tiktok_images: r.tiktok_images===null ? null : JSON.parse(r.tiktok_images),
+    tiktok_images: r.tiktok_images==null ? null : JSON.parse(r.tiktok_images),
     tiktok_video: r.tiktok_video ?? null,
     facebook_enabled: r.bs_caption === null ? r.facebook_enabled !== 0 : r.bs_facebook_enabled !== 0,
     tiktok_enabled: r.tiktok_enabled !== 0,
@@ -335,7 +335,7 @@ export async function reopenCancelledDraft(
 /** Store one video for either or both targets in a draft-only D1 transaction. */
 /** Distinguish new independent TikTok galleries from legacy shared media records. */
 export function tiktokMedia(post:Post):{images:string[];video:string|null} {
-  return post.tiktok_images===null
+  return post.tiktok_images==null
     ? {images:post.images,video:post.video}
     : {images:post.tiktok_images,video:post.tiktok_video};
 }
