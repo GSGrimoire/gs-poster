@@ -411,6 +411,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       if (!env.UPLOADS) return fail("Private uploads are disabled (R2 storage is not bound).");
       try { return ok(await getUploadUsage(env.DB)); }
       catch (e) { return fail(e instanceof Error ? e.message : String(e)); }
@@ -516,6 +517,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     async ({ id }) => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       const okDel = await deletePost(env.DB, id, ["draft", "rejected"]);
       if (!okDel) return fail("Not deleted: no draft or rejected post with that id.");
       await audit(env.DB, actor(), "deleted", id);
@@ -537,6 +539,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ status, release, limit }) => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       await refreshScheduled(env).catch(() => undefined);
       let posts = await listPosts(env.DB, { status: status as PostStatus | undefined, limit: limit ?? 30 });
       if (release) posts = posts.filter((p) => (p.release ?? "").toLowerCase() === release.toLowerCase());
@@ -553,6 +556,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ id }) => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       const p = await getPost(env.DB, id);
       return p ? ok(view(env, origin, p)) : fail(`No post with id ${id}.`);
     },
@@ -571,6 +575,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ kind, limit }) => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       try {
         const k = kind ?? "published";
         const posts = await listPagePosts(env, k, limit ?? 10);
@@ -596,6 +601,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async () => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       const missing = missingSecrets(env);
       let facebook: unknown = "skipped: FB_PAGE_ID or FB_PAGE_TOKEN missing";
       if (env.FB_PAGE_ID && env.FB_PAGE_TOKEN) {
