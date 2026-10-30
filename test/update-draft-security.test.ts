@@ -40,7 +40,12 @@ function fixture(){
           }
           return null;
         },
-        async run(){writes++;return {meta:{changes:1}};},
+        async run(){
+          // Schema migrations do not modify a draft. Count only persisted
+          // post, Bluesky or audit mutations, never ALTER TABLE.
+          if(/^(UPDATE posts|INSERT INTO posts|INSERT INTO bluesky_targets|DELETE FROM bluesky_targets|INSERT INTO audit)/.test(sql.trim()))writes++;
+          return {meta:{changes:1}};
+        },
       });
       return obj();
     },
