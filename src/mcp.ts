@@ -138,6 +138,100 @@ const blueskySchema = z.object({
   }).nullable().default(null),
 });
 
+const updateDraftSchema = z.object({
+        id: z.string(),
+        message: z.string().max(63206).optional(),
+        tiktok_caption:z.string().max(4000).nullable().optional().describe("Separate TikTok caption. Null removes override; otherwise can contain hashtags. TikTok video limit 2,200, photo limit 4,000 characters."),
+        facebook_enabled: z.boolean().optional(),
+        bluesky: blueskySchema.nullable().optional(),
+        images: imageList.optional(),
+        tiktok_images:imageList.nullable().optional().describe("Independent TikTok carousel; null restores shared fallback."),
+        tiktok_video:z.string().nullable().optional().describe("Independent TikTok video or null."),
+        video: z.string().nullable().optional().describe("Facebook MP4 reference, or null to clear it."),
+        link: z.string().url().nullable().optional(),
+        publish_at: z.string().nullable().optional(),
+        label: z.string().max(120).optional(),
+        release: z.string().max(120).optional(),
+      });
+
+/** Actual update_draft handler. Exported so regression tests exercise the same
+ * database-mutation boundary as the MCP tool, with an injected editor identity.
+ */
+export async function handleUpdateDraft(
+  env:Env,origin:string,login:string,input:z.infer<typeof updateDraftSchema>,
+){
+  const {id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky}=input;
+      if(!login)return fail("Editor access is no longer authorized.");
+      const cur = await getPost(env.DB, id);
+      if (!cur) return fail(`No post with id ${id}.`);
+      if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
+      const nextMessage = message ?? cur.message;
+      const nextImages = images ?? cur.images;
+      const nextVideo = video === undefined ? cur.video : video;
+      const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
+      const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
+      const fbNext = facebook_enabled ?? cur.facebook_enabled;
+      const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
+        cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
+          hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
+        }):{errors:[],warnings:[]};
+      const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
+      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
+      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
+      if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
+      const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
+      const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
+      const privateErrors=await checkOwnedDraftMedia(env,login,[
+        ...nextImages,...(nextTTImages??[]),...(nextVideo?[nextVideo]:[]),
+        ...(nextTTVideo?[nextTTVideo]:[]),
+        ...(bsNext?.images.map(i=>i.url)??[]),
+        ...(bsNext?.video?[bsNext.video.url]:[]),
+      ]);
+      if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
+      // All media preflight errors must be added to the final error collection
+      // BEFORE updatePost can run. Do not mutate arrays already spread into it.
+      if(images)errors.push(...(await checkImages(env,images)));
+      if(bluesky&&bsNext)errors.push(...(await checkImages(env,bsNext.images.map(i=>i.url))));
+      if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
+      if (tiktok_images!==undefined&&!cur.tiktok_enabled)errors.push("TikTok gallery requires TikTok target.");
+      if (tiktok_video!==undefined&&!cur.tiktok_enabled)errors.push("TikTok video requires TikTok target.");
+      if (nextTTVideo&&(nextTTImages??nextImages).length)errors.push("TikTok photos and video cannot be combined.");
+      if (nextTTVideo&&checkVideoUrl(nextTTVideo))errors.push(checkVideoUrl(nextTTVideo)!);
+      if (tiktok_images?.length)errors.push(...(await checkImages(env,tiktok_images)));
+      if (nextVideo && !fbNext && !cur.tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
+      const nextTikTokCaption=tiktok_caption===undefined?cur.tiktok_caption:tiktok_caption;
+      if(tiktok_caption!==undefined && !cur.tiktok_enabled) errors.push("TikTok caption requires the TikTok target.");
+      if(cur.tiktok_enabled && (nextTikTokCaption ?? nextMessage).length>((nextTTImages===null?nextVideo:nextTTVideo)?2200:4000)) errors.push("TikTok description exceeds its format limit.");
+      if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
+      if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
+      if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
+      const changed = await updatePost(
+        env.DB,
+        id,
+        {
+          status: "draft",
+          message: nextMessage,
+          tiktok_caption:nextTikTokCaption,
+          images: nextImages,
+          tiktok_images:nextTTImages,
+          tiktok_video:nextTTVideo,
+          video:nextVideo,
+          link: link === undefined ? cur.link : link,
+          scheduled_at: time.when?.toISOString() ?? null,
+          label: label ?? cur.label,
+          release: release ?? cur.release,
+          note: cur.status === "rejected" ? cur.note : null,
+        },
+        ["draft", "rejected"],
+      );
+      if (!changed) return fail("The post changed status while saving. Fetch it again.");
+      if (bluesky !== undefined || facebook_enabled !== undefined) {
+        if (!(await saveBlueskyDraft(env.DB, id, bsNext, fbNext))) return fail("Could not save the Bluesky target.");
+      }
+      await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id);
+      return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
+}
+
 export function buildServer(env: Env, origin: string): McpServer {
   const server = new McpServer({ name: "gs-poster", version: "0.1.0" });
 
@@ -402,95 +496,10 @@ export function buildServer(env: Env, origin: string): McpServer {
       title: "Revise a draft",
       description:
         "Change a draft or a rejected post. A rejected post goes back to draft for Gus to review again; read gus_note first to see what he asked for. Only the fields you pass are changed. Pass publish_at as an empty string to post on approval instead of at a set time.",
-      inputSchema: z.object({
-        id: z.string(),
-        message: z.string().max(63206).optional(),
-        tiktok_caption:z.string().max(4000).nullable().optional().describe("Separate TikTok caption. Null removes override; otherwise can contain hashtags. TikTok video limit 2,200, photo limit 4,000 characters."),
-        facebook_enabled: z.boolean().optional(),
-        bluesky: blueskySchema.nullable().optional(),
-        images: imageList.optional(),
-        tiktok_images:imageList.nullable().optional().describe("Independent TikTok carousel; null restores shared fallback."),
-        tiktok_video:z.string().nullable().optional().describe("Independent TikTok video or null."),
-        video: z.string().nullable().optional().describe("Facebook MP4 reference, or null to clear it."),
-        link: z.string().url().nullable().optional(),
-        publish_at: z.string().nullable().optional(),
-        label: z.string().max(120).optional(),
-        release: z.string().max(120).optional(),
-      }),
+      inputSchema: updateDraftSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
-      const login=currentOwner(env);
-      if(!login)return fail("Editor access is no longer authorized.");
-      const cur = await getPost(env.DB, id);
-      if (!cur) return fail(`No post with id ${id}.`);
-      if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
-      const nextMessage = message ?? cur.message;
-      const nextImages = images ?? cur.images;
-      const nextVideo = video === undefined ? cur.video : video;
-      const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
-      const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
-      const fbNext = facebook_enabled ?? cur.facebook_enabled;
-      const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
-        cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
-          hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
-        }):{errors:[],warnings:[]};
-      const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
-      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
-      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
-      if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
-      const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
-      const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
-      const privateErrors=await checkOwnedDraftMedia(env,login,[
-        ...nextImages,...(nextTTImages??[]),...(nextVideo?[nextVideo]:[]),
-        ...(nextTTVideo?[nextTTVideo]:[]),
-        ...(bsNext?.images.map(i=>i.url)??[]),
-        ...(bsNext?.video?[bsNext.video.url]:[]),
-      ]);
-      if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
-      // All media preflight errors must be added to the final error collection
-      // BEFORE updatePost can run. Do not mutate arrays already spread into it.
-      if(images)errors.push(...(await checkImages(env,images)));
-      if(bluesky&&bsNext)errors.push(...(await checkImages(env,bsNext.images.map(i=>i.url))));
-      if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
-      if (tiktok_images!==undefined&&!cur.tiktok_enabled)errors.push("TikTok gallery requires TikTok target.");
-      if (tiktok_video!==undefined&&!cur.tiktok_enabled)errors.push("TikTok video requires TikTok target.");
-      if (nextTTVideo&&(nextTTImages??nextImages).length)errors.push("TikTok photos and video cannot be combined.");
-      if (nextTTVideo&&checkVideoUrl(nextTTVideo))errors.push(checkVideoUrl(nextTTVideo)!);
-      if (tiktok_images?.length)errors.push(...(await checkImages(env,tiktok_images)));
-      if (nextVideo && !fbNext && !cur.tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
-      const nextTikTokCaption=tiktok_caption===undefined?cur.tiktok_caption:tiktok_caption;
-      if(tiktok_caption!==undefined && !cur.tiktok_enabled) errors.push("TikTok caption requires the TikTok target.");
-      if(cur.tiktok_enabled && (nextTikTokCaption ?? nextMessage).length>((nextTTImages===null?nextVideo:nextTTVideo)?2200:4000)) errors.push("TikTok description exceeds its format limit.");
-      if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
-      if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
-      if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
-      const changed = await updatePost(
-        env.DB,
-        id,
-        {
-          status: "draft",
-          message: nextMessage,
-          tiktok_caption:nextTikTokCaption,
-          images: nextImages,
-          tiktok_images:nextTTImages,
-          tiktok_video:nextTTVideo,
-          video:nextVideo,
-          link: link === undefined ? cur.link : link,
-          scheduled_at: time.when?.toISOString() ?? null,
-          label: label ?? cur.label,
-          release: release ?? cur.release,
-          note: cur.status === "rejected" ? cur.note : null,
-        },
-        ["draft", "rejected"],
-      );
-      if (!changed) return fail("The post changed status while saving. Fetch it again.");
-      if (bluesky !== undefined || facebook_enabled !== undefined) {
-        if (!(await saveBlueskyDraft(env.DB, id, bsNext, fbNext))) return fail("Could not save the Bluesky target.");
-      }
-      await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id);
-      return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
-    },
+    async input => handleUpdateDraft(env,origin,currentOwner(env),input),
   );
 
   server.registerTool(
