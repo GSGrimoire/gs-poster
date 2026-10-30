@@ -13,6 +13,9 @@ import { checkBluesky } from "./bluesky.ts";
 import { checkVideoUrl } from "./video.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
 import { importStagedGitHubBlob, verifyPrivateStagingRepo } from "./github-staging.ts";
+import { importChatGPTFile } from "./chatgpt-native.ts";
+import {runNativeBatch} from "./native-batch.ts";
+import {checkOwnedDraftMedia,isCurrentEditor} from "./media-owner.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
@@ -31,6 +34,11 @@ function fail(message: string, extra?: Record<string, unknown>) {
 function ownerLogin():string {
   const login=getMcpAuthContext()?.props?.login;
   return typeof login==="string" ? login : "";
+}
+/** Issued OAuth tokens must still match the CURRENT editor allowlist. */
+function currentOwner(env:Env):string{
+  const login=ownerLogin();
+  return isCurrentEditor(env,login)?login:"";
 }
 function actor(): string {
   const props = getMcpAuthContext()?.props;
@@ -130,6 +138,138 @@ const blueskySchema = z.object({
   }).nullable().default(null),
 });
 
+const updateDraftSchema = z.object({
+        id: z.string(),
+        message: z.string().max(63206).optional(),
+        tiktok_caption:z.string().max(4000).nullable().optional().describe("Separate TikTok caption. Null removes override; otherwise can contain hashtags. TikTok video limit 2,200, photo limit 4,000 characters."),
+        facebook_enabled: z.boolean().optional(),
+        bluesky: blueskySchema.nullable().optional(),
+        images: imageList.optional(),
+        tiktok_images:imageList.nullable().optional().describe("Independent TikTok carousel; null restores shared fallback."),
+        tiktok_video:z.string().nullable().optional().describe("Independent TikTok video or null."),
+        video: z.string().nullable().optional().describe("Facebook MP4 reference, or null to clear it."),
+        link: z.string().url().nullable().optional(),
+        publish_at: z.string().nullable().optional(),
+        label: z.string().max(120).optional(),
+        release: z.string().max(120).optional(),
+      });
+
+/** Actual update_draft handler. Exported so regression tests exercise the same
+ * database-mutation boundary as the MCP tool, with an injected editor identity.
+ */
+export async function handleUpdateDraft(
+  env:Env,origin:string,login:string,input:z.infer<typeof updateDraftSchema>,
+){
+  const {id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky}=input;
+      if(!login)return fail("Editor access is no longer authorized.");
+      const cur = await getPost(env.DB, id);
+      if (!cur) return fail(`No post with id ${id}.`);
+      if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
+      const nextMessage = message ?? cur.message;
+      const nextImages = images ?? cur.images;
+      const nextVideo = video === undefined ? cur.video : video;
+      const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
+      const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
+      const fbNext = facebook_enabled ?? cur.facebook_enabled;
+      const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
+        cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
+          hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
+        }):{errors:[],warnings:[]};
+      const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
+      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
+      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
+      if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
+      const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
+      const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
+      const privateErrors=await checkOwnedDraftMedia(env,login,[
+        ...nextImages,...(nextTTImages??[]),...(nextVideo?[nextVideo]:[]),
+        ...(nextTTVideo?[nextTTVideo]:[]),
+        ...(bsNext?.images.map(i=>i.url)??[]),
+        ...(bsNext?.video?[bsNext.video.url]:[]),
+      ]);
+      if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
+      // All media preflight errors must be added to the final error collection
+      // BEFORE updatePost can run. Do not mutate arrays already spread into it.
+      if(images)errors.push(...(await checkImages(env,images)));
+      if(bluesky&&bsNext)errors.push(...(await checkImages(env,bsNext.images.map(i=>i.url))));
+      if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
+      if (tiktok_images!==undefined&&!cur.tiktok_enabled)errors.push("TikTok gallery requires TikTok target.");
+      if (tiktok_video!==undefined&&!cur.tiktok_enabled)errors.push("TikTok video requires TikTok target.");
+      if (nextTTVideo&&(nextTTImages??nextImages).length)errors.push("TikTok photos and video cannot be combined.");
+      if (nextTTVideo&&checkVideoUrl(nextTTVideo))errors.push(checkVideoUrl(nextTTVideo)!);
+      if (tiktok_images?.length)errors.push(...(await checkImages(env,tiktok_images)));
+      if (nextVideo && !fbNext && !cur.tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
+      const nextTikTokCaption=tiktok_caption===undefined?cur.tiktok_caption:tiktok_caption;
+      if(tiktok_caption!==undefined && !cur.tiktok_enabled) errors.push("TikTok caption requires the TikTok target.");
+      if(cur.tiktok_enabled && (nextTikTokCaption ?? nextMessage).length>((nextTTImages===null?nextVideo:nextTTVideo)?2200:4000)) errors.push("TikTok description exceeds its format limit.");
+      if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
+      if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
+      if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
+      const changed = await updatePost(
+        env.DB,
+        id,
+        {
+          status: "draft",
+          message: nextMessage,
+          tiktok_caption:nextTikTokCaption,
+          images: nextImages,
+          tiktok_images:nextTTImages,
+          tiktok_video:nextTTVideo,
+          video:nextVideo,
+          link: link === undefined ? cur.link : link,
+          scheduled_at: time.when?.toISOString() ?? null,
+          label: label ?? cur.label,
+          release: release ?? cur.release,
+          note: cur.status === "rejected" ? cur.note : null,
+        },
+        ["draft", "rejected"],
+      );
+      if (!changed) return fail("The post changed status while saving. Fetch it again.");
+      if (bluesky !== undefined || facebook_enabled !== undefined) {
+        if (!(await saveBlueskyDraft(env.DB, id, bsNext, fbNext))) return fail("Could not save the Bluesky target.");
+      }
+      await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id);
+      return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
+}
+
+/** The production handlers are exported for revoked-token regression tests.
+ * Authorization precedes any database, Facebook or scheduled-post activity.
+ */
+export async function handleDeleteDraft(env:Env,login:string,id:string){
+  if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
+  const okDel=await deletePost(env.DB,id,["draft","rejected"]);
+  if(!okDel)return fail("Not deleted: no draft or rejected post with that id.");
+  await audit(env.DB,actor(),"deleted",id);
+  return ok({deleted:id});
+}
+export async function handleListPosts(
+  env:Env,origin:string,login:string,input:{
+    status?:typeof STATUSES[number]; release?:string; limit?:number;
+  },
+){
+  if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
+  await refreshScheduled(env).catch(()=>undefined);
+  let posts=await listPosts(env.DB,{status:input.status as PostStatus|undefined,limit:input.limit??30});
+  if(input.release)posts=posts.filter(p=>(p.release??"").toLowerCase()===input.release!.toLowerCase());
+  return ok({count:posts.length,review_site:origin,posts:posts.map(p=>view(env,origin,p))});
+}
+export async function handleGetPost(env:Env,origin:string,login:string,id:string){
+  if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
+  const p=await getPost(env.DB,id);
+  return p?ok(view(env,origin,p)):fail(`No post with id ${id}.`);
+}
+
+/** The exact read-only readiness response used by check_upload.
+ * Stored status is only granted after native integrity pre-finalization.
+ */
+export async function checkUploadForEditor(env:Env,login:string,reference:string){
+  if(!isCurrentEditor(env,login))
+    return fail("Your authenticated account could not be identified. Reconnect GS Poster.");
+  const result=await uploadStatusForOwner(env.DB,reference,login);
+  return result ? ok({...result,ready:result.status==="stored"}) :
+    fail("Upload not found or not owned by this account.");
+}
+
 export function buildServer(env: Env, origin: string): McpServer {
   const server = new McpServer({ name: "gs-poster", version: "0.1.0" });
 
@@ -138,6 +278,43 @@ export function buildServer(env: Env, origin: string): McpServer {
   // Optional GitHub bridge when the assistant can write original bytes to a
   // private GitHub blob but cannot PUT directly to the private GS Poster upload.
   // Import is OAuth-owner scoped and NEVER creates, approves or publishes a post.
+
+  // ChatGPT's documented fileParams adapter injects authorized file objects
+  // without embedding original binary bytes in the model tool arguments.
+  // Other chat clients may not support it; the browser upload fallback remains.
+  server.registerTool(
+    "import_chatgpt_files",
+    {
+      title:"Import ChatGPT attachments privately into GS Poster",
+      description:"Transfer up to 35 original user-selected ChatGPT image or MP4 attachments directly into private GS Poster storage, preserving order and returning upload:// references. This uses ChatGPT's fileParams attachment adapter, not text base64 or GitHub staging. Files may not be available on every ChatGPT client. If missing or unsupported, use request_uploads and private browser upload pages. Imports never create or publish a post.",
+      inputSchema:z.object({
+        files:z.array(z.object({
+          download_url:z.string().min(1),
+          file_id:z.string().min(1),
+          mime_type:z.string().optional(),
+          file_name:z.string().optional(),
+        }).strict()).min(1).max(CHAT_BATCH_MAX_FILES),
+      }),
+      _meta:{"openai/fileParams":["files"]},
+      annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
+    },
+    async ({files})=>{
+      const login=currentOwner(env);
+      if(!login)return fail("Authenticated editor identity unavailable. Reconnect GS Poster.");
+      const result=await runNativeBatch(
+        files,
+        file=>importChatGPTFile(env,origin,login,file),
+        stored=>audit(env.DB,actor(),"chatgpt-native-import",null,stored.reference),
+      );
+      return ok({
+        ...result,
+        next:result.stopped_reason
+          ?"Retain confirmed upload references and inspect recoverable references using check_upload. Use request_uploads only for unconfirmed missing files; never re-upload a confirmed stored file."
+          :"All references are stored for this editor. Use them in intended order in an unapproved draft. Nothing was published.",
+      });
+    },
+  );
+
   server.registerTool(
     "import_github_blob",
     {
@@ -152,7 +329,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async (input) => {
-      const login = ownerLogin();
+      const login = currentOwner(env);
       if (!login) return fail("Account identity unavailable. Reconnect GS Poster.");
       try {
         const stored = await importStagedGitHubBlob(env,origin,login,input);
@@ -181,7 +358,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       try {
         // Upload ownership must use the authenticated GitHub login, not the
         // human-readable MCP actor string (which includes the client name).
-        const login=ownerLogin();
+        const login=currentOwner(env);
         if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
         const grant = await createUpload(env, origin, { filename, actor: login });
         await audit(env.DB, actor(), "upload-link", null, grant.reference);
@@ -207,13 +384,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations:{readOnlyHint:true,openWorldHint:false},
     },
-    async ({reference})=>{
-      const login=ownerLogin();
-      if(!login)return fail("Your authenticated account could not be identified. Reconnect GS Poster.");
-      const result=await uploadStatusForOwner(env.DB,reference,login);
-      return result ? ok({...result,ready:result.status==="stored"}) :
-        fail("Upload not found or not owned by this account.");
-    },
+    async ({reference})=>checkUploadForEditor(env,currentOwner(env),reference),
   );
 
 
@@ -229,7 +400,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
     },
     async ({filenames})=>{
-      const login=ownerLogin();
+      const login=currentOwner(env);
       if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
       try{
         const result=await createChatUploadBatch(env,origin,login,filenames);
@@ -251,7 +422,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations:{readOnlyHint:true,openWorldHint:false},
     },
     async ({references})=>{
-      const login=ownerLogin();
+      const login=currentOwner(env);
       if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
       try{return ok(await checkChatUploadBatch(env.DB,login,references));}
       catch(error){return fail(error instanceof Error?error.message:String(error));}
@@ -267,6 +438,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       if (!env.UPLOADS) return fail("Private uploads are disabled (R2 storage is not bound).");
       try { return ok(await getUploadUsage(env.DB)); }
       catch (e) { return fail(e instanceof Error ? e.message : String(e)); }
@@ -297,6 +469,15 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ message, tiktok_caption, images = [], tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
+      const login=currentOwner(env);
+      if(!login)return fail("Editor access is no longer authorized.");
+      const privateErrors=await checkOwnedDraftMedia(env,login,[
+        ...images,...(tiktok_images??[]),...(video?[video]:[]),
+        ...(tiktok_video?[tiktok_video]:[]),
+        ...(bluesky?.images.map(i=>i.url)??[]),
+        ...(bluesky?.video?[bluesky.video.url]:[]),
+      ]);
+      if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
       const checks = facebook_enabled?
         checkMessage(message,{hasImages:images.length>0||!!video}):
         tiktok_enabled?checkMessage(tiktok_caption??message,{
@@ -348,83 +529,10 @@ export function buildServer(env: Env, origin: string): McpServer {
       title: "Revise a draft",
       description:
         "Change a draft or a rejected post. A rejected post goes back to draft for Gus to review again; read gus_note first to see what he asked for. Only the fields you pass are changed. Pass publish_at as an empty string to post on approval instead of at a set time.",
-      inputSchema: z.object({
-        id: z.string(),
-        message: z.string().max(63206).optional(),
-        tiktok_caption:z.string().max(4000).nullable().optional().describe("Separate TikTok caption. Null removes override; otherwise can contain hashtags. TikTok video limit 2,200, photo limit 4,000 characters."),
-        facebook_enabled: z.boolean().optional(),
-        bluesky: blueskySchema.nullable().optional(),
-        images: imageList.optional(),
-        tiktok_images:imageList.nullable().optional().describe("Independent TikTok carousel; null restores shared fallback."),
-        tiktok_video:z.string().nullable().optional().describe("Independent TikTok video or null."),
-        video: z.string().nullable().optional().describe("Facebook MP4 reference, or null to clear it."),
-        link: z.string().url().nullable().optional(),
-        publish_at: z.string().nullable().optional(),
-        label: z.string().max(120).optional(),
-        release: z.string().max(120).optional(),
-      }),
+      inputSchema: updateDraftSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
-      const cur = await getPost(env.DB, id);
-      if (!cur) return fail(`No post with id ${id}.`);
-      if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
-      const nextMessage = message ?? cur.message;
-      const nextImages = images ?? cur.images;
-      const nextVideo = video === undefined ? cur.video : video;
-      const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
-      const imgErrors = images ? await checkImages(env, images) : [];
-      const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
-      const fbNext = facebook_enabled ?? cur.facebook_enabled;
-      const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
-        cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
-          hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
-        }):{errors:[],warnings:[]};
-      const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
-      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors, ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
-      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
-      if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
-      const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
-      const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
-      if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
-      if (tiktok_images!==undefined&&!cur.tiktok_enabled)errors.push("TikTok gallery requires TikTok target.");
-      if (tiktok_video!==undefined&&!cur.tiktok_enabled)errors.push("TikTok video requires TikTok target.");
-      if (nextTTVideo&&(nextTTImages??nextImages).length)errors.push("TikTok photos and video cannot be combined.");
-      if (nextTTVideo&&checkVideoUrl(nextTTVideo))errors.push(checkVideoUrl(nextTTVideo)!);
-      if (tiktok_images?.length)errors.push(...(await checkImages(env,tiktok_images)));
-      if (nextVideo && !fbNext && !cur.tiktok_enabled) errors.push("A video requires Facebook or TikTok.");
-      const nextTikTokCaption=tiktok_caption===undefined?cur.tiktok_caption:tiktok_caption;
-      if(tiktok_caption!==undefined && !cur.tiktok_enabled) errors.push("TikTok caption requires the TikTok target.");
-      if(cur.tiktok_enabled && (nextTikTokCaption ?? nextMessage).length>((nextTTImages===null?nextVideo:nextTTVideo)?2200:4000)) errors.push("TikTok description exceeds its format limit.");
-      if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
-      if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
-      if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
-      const changed = await updatePost(
-        env.DB,
-        id,
-        {
-          status: "draft",
-          message: nextMessage,
-          tiktok_caption:nextTikTokCaption,
-          images: nextImages,
-          tiktok_images:nextTTImages,
-          tiktok_video:nextTTVideo,
-          video:nextVideo,
-          link: link === undefined ? cur.link : link,
-          scheduled_at: time.when?.toISOString() ?? null,
-          label: label ?? cur.label,
-          release: release ?? cur.release,
-          note: cur.status === "rejected" ? cur.note : null,
-        },
-        ["draft", "rejected"],
-      );
-      if (!changed) return fail("The post changed status while saving. Fetch it again.");
-      if (bluesky !== undefined || facebook_enabled !== undefined) {
-        if (!(await saveBlueskyDraft(env.DB, id, bsNext, fbNext))) return fail("Could not save the Bluesky target.");
-      }
-      await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id);
-      return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
-    },
+    async input => handleUpdateDraft(env,origin,currentOwner(env),input),
   );
 
   server.registerTool(
@@ -435,12 +543,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       inputSchema: z.object({ id: z.string() }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id }) => {
-      const okDel = await deletePost(env.DB, id, ["draft", "rejected"]);
-      if (!okDel) return fail("Not deleted: no draft or rejected post with that id.");
-      await audit(env.DB, actor(), "deleted", id);
-      return ok({ deleted: id });
-    },
+    async ({ id }) => handleDeleteDraft(env,currentOwner(env),id),
   );
 
   server.registerTool(
@@ -456,12 +559,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ status, release, limit }) => {
-      await refreshScheduled(env).catch(() => undefined);
-      let posts = await listPosts(env.DB, { status: status as PostStatus | undefined, limit: limit ?? 30 });
-      if (release) posts = posts.filter((p) => (p.release ?? "").toLowerCase() === release.toLowerCase());
-      return ok({ count: posts.length, review_site: origin, posts: posts.map((p) => view(env, origin, p)) });
-    },
+    async input => handleListPosts(env,origin,currentOwner(env),input),
   );
 
   server.registerTool(
@@ -472,10 +570,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       inputSchema: z.object({ id: z.string() }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ id }) => {
-      const p = await getPost(env.DB, id);
-      return p ? ok(view(env, origin, p)) : fail(`No post with id ${id}.`);
-    },
+    async ({ id }) => handleGetPost(env,origin,currentOwner(env),id),
   );
 
   server.registerTool(
@@ -491,6 +586,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ kind, limit }) => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       try {
         const k = kind ?? "published";
         const posts = await listPagePosts(env, k, limit ?? 10);
@@ -516,6 +612,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async () => {
+      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       const missing = missingSecrets(env);
       let facebook: unknown = "skipped: FB_PAGE_ID or FB_PAGE_TOKEN missing";
       if (env.FB_PAGE_ID && env.FB_PAGE_TOKEN) {
