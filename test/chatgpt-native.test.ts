@@ -68,6 +68,20 @@ test("native attachment URL validation prohibits arbitrary network destinations"
   assert.equal(validateChatGPTFile({...file,file_name:undefined}).filename,"attachment.png");
 });
 
+test("MP4 box boundaries reject truncated videos",async()=>{
+  const video=new Uint8Array([
+    0,0,0,16,102,116,121,112,0,0,0,0,0,0,0,0,
+    0,0,0,8,109,111,111,118,
+    0,0,0,12,109,100,97,116,1,2,3,4,
+  ]);
+  assert.equal(completeMedia("mp4",video),true);
+  assert.equal(completeMedia("mp4",video.subarray(0,video.length-1)),false);
+  const mp4File={...file,file_name:"clip.mp4",mime_type:"video/mp4"};
+  const got=await fetchChatGPTFile(mp4File,(async()=>good(video)) as typeof fetch);
+  assert.deepEqual(got.bytes,video);
+  assert.equal(got.sha256,createHash("sha256").update(video).digest("hex"));
+});
+
 test("native download reads and hashes original binary bytes without model base64",async()=>{
   const download=(async(url:string|URL|Request,init?:RequestInit)=>{
     assert.equal(String(url),file.download_url);
