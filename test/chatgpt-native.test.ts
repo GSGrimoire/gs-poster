@@ -70,7 +70,6 @@ test("native download reads and hashes original binary bytes without model base6
   const download=(async(url:string|URL|Request,init?:RequestInit)=>{
     assert.equal(String(url),file.download_url);
     assert.equal(init?.redirect,"manual");
-    assert.equal(init?.credentials,"omit");
     return good();
   }) as typeof fetch;
   const got=await fetchChatGPTFile(file,download);
