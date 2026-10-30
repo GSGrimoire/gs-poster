@@ -95,13 +95,22 @@ export async function fetchStagedBlob(
   };
   // Do not import media from an inaccessible or public staging repository.
   await verifyPrivateStagingRepo(env,request);
-  const response = await request(
-    repositoryUrl + "/git/blobs/" + input.blob_sha.toLowerCase(),
-    {
-      headers: {...authHeaders, "Accept": "application/vnd.github.raw+json"},
-      redirect: "error",
-    },
-  );
+  // Cloudflare Workers supports redirect:"manual", not redirect:"error".
+  // Never follow an authenticated GitHub request to another origin.
+  let response: Response;
+  try {
+    response = await request(
+      repositoryUrl + "/git/blobs/" + input.blob_sha.toLowerCase(),
+      {
+        headers: {...authHeaders, "Accept": "application/vnd.github.raw+json"},
+        redirect: "manual",
+      },
+    );
+  } catch {
+    throw new Error("Private GitHub blob request failed before an HTTP response.");
+  }
+  if (response.status >= 300 && response.status < 400)
+    throw new Error("Private GitHub blob download redirected; refusing to forward authorization.");
   if (!response.ok) throw new Error("Private GitHub blob could not be read (HTTP " + response.status + ").");
   const declared = response.headers.get("content-length");
   if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > limit))
