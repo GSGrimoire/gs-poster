@@ -53,12 +53,13 @@ function githubResponse(body:Uint8Array=png,headers:Record<string,string>={}){
 }
 const github=(response:Response,privateRepo=true)=>(async(url:string|URL|Request,options?:RequestInit)=>{
   assert.equal(new Headers(options?.headers).get("Authorization"),"Bearer test-token");
-  assert.equal(options?.redirect,"manual");
   const name=String(url);
   if (name==="https://api.github.com/repos/GSGrimoire/gs-media-staging") {
+    assert.equal(options?.redirect,"manual");
     assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github+json");
     return Response.json({private:privateRepo});
   }
+  assert.equal(options?.redirect,"error");
   assert.equal(name,"https://api.github.com/repos/GSGrimoire/gs-media-staging/git/blobs/"+SHA);
   assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github.raw+json");
   return response;
