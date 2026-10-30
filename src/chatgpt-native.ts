@@ -2,7 +2,7 @@
  * Each file remains private, owner-scoped and draft-only after import.
  */
 import type {Env} from "./env.ts";
-import {createUpload,extensionOf,handleUploadPut,looksLike,uploadStatusForOwner,type UploadExt} from "./upload.ts";
+import {createUpload,extensionOf,handleUploadPut,looksLike,uploadStatusForOwner,readUpload,parseUploadRef,type UploadExt} from "./upload.ts";
 
 export interface ChatGPTFile {
   download_url:string;
@@ -17,6 +17,16 @@ export interface NativeMediaImport {
   sha256:string;
   status:"stored";
 }
+/** A post-write failure must preserve a recovery reference for the owner. */
+export class NativeMediaImportError extends Error{
+  readonly reference:string;
+  readonly storage_state:"unconfirmed"|"stored_but_unverified";
+  constructor(message:string,reference:string,storage_state:"unconfirmed"|"stored_but_unverified"){
+    super(message);
+    this.reference=reference;
+    this.storage_state=storage_state;
+  }
+}
 
 const MIME:Record<UploadExt,string>={
   jpg:"image/jpeg",jpeg:"image/jpeg",png:"image/png",gif:"image/gif",mp4:"video/mp4",
@@ -24,6 +34,55 @@ const MIME:Record<UploadExt,string>={
 const MIME_EXTENSION:Record<string,string>={
   "image/jpeg":"jpg","image/png":"png","image/gif":"gif","video/mp4":"mp4",
 };
+
+/** Reject recognizable truncated containers, not merely magic bytes. A genuine
+ * original-file digest is checked separately during live acceptance.
+ */
+export function completeMedia(ext:UploadExt, bytes:Uint8Array):boolean{
+  const n=bytes.length;
+  if(!looksLike(ext,bytes.subarray(0,Math.min(16,n))))return false;
+  if(ext==="jpg"||ext==="jpeg")
+    return n>=16&&bytes[n-2]===0xff&&bytes[n-1]===0xd9;
+  if(ext==="gif")
+    return n>=14&&bytes[n-1]===0x3b;
+  const read32=(i:number)=>((bytes[i]*0x1000000)+(bytes[i+1]<<16)+(bytes[i+2]<<8)+bytes[i+3])>>>0;
+  if(ext==="png"){
+    if(n<45||read32(8)!==13||String.fromCharCode(...bytes.subarray(12,16))!=="IHDR")return false;
+    let offset=8,ended=false;
+    while(offset+12<=n){
+      const size=read32(offset);
+      if(size>n-offset-12)return false;
+      const tag=String.fromCharCode(...bytes.subarray(offset+4,offset+8));
+      offset+=12+size;
+      if(tag==="IEND"){
+        ended=size===0&&offset===n;
+        break;
+      }
+    }
+    return ended;
+  }
+  // MP4: walk complete top-level boxes; require ftyp, video data and metadata.
+  if(n<24)return false;
+  let offset=0,ftyp=false,meta=false,media=false;
+  while(offset+8<=n){
+    let size=read32(offset);
+    const box=String.fromCharCode(...bytes.subarray(offset+4,offset+8));
+    let header=8;
+    if(size===1){
+      if(offset+16>n)return false;
+      const hi=read32(offset+8),lo=read32(offset+12);
+      const length=hi*0x100000000+lo;
+      if(!Number.isSafeInteger(length))return false;
+      size=length;header=16;
+    }else if(size===0)size=n-offset;
+    if(size<header||size>n-offset)return false;
+    if(box==="ftyp")ftyp=true;
+    if(box==="moov"||box==="moof")meta=true;
+    if(box==="mdat"&&size>header)media=true;
+    offset+=size;
+  }
+  return offset===n&&ftyp&&meta&&media;
+}
 
 /** An explicit provider allowlist keeps this tool from becoming a server-side URL fetcher. */
 export function validateChatGPTFile(input:ChatGPTFile):{url:string;filename:string;ext:UploadExt;limit:number}{
@@ -80,11 +139,13 @@ export async function fetchChatGPTFile(
     }
   }catch(e){await reader.cancel().catch(()=>{});throw e;}
   if(total===0)throw new Error("ChatGPT attachment was empty.");
+  if(declared!==null&&Number(declared)!==total)
+    throw new Error("ChatGPT attachment download ended before its declared length.");
   const bytes=new Uint8Array(total);
   let offset=0;
   for(const part of parts){bytes.set(part,offset);offset+=part.byteLength;}
-  if(!looksLike(ext,bytes.subarray(0,Math.min(16,total))))
-    throw new Error("ChatGPT attachment signature does not match its file type.");
+  if(!completeMedia(ext,bytes))
+    throw new Error("ChatGPT attachment is incomplete or does not match its media format.");
   const digest=await crypto.subtle.digest("SHA-256",bytes.buffer);
   const sha256=Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,"0")).join("");
   return {bytes,filename,sha256};
@@ -101,9 +162,22 @@ export async function importChatGPTFile(
   const saved=await handleUploadPut(new Request(grant.upload_url,{
     method:"PUT",headers:{"Content-Length":String(bytes.byteLength)},body:bytes,
   }),env);
-  if(!saved.ok)throw new Error("Native media import could not be confirmed in private storage.");
-  const ready=await uploadStatusForOwner(env.DB,grant.reference,login);
-  if(ready?.status!=="stored"||ready.bytes!==bytes.byteLength)
-    throw new Error("Private media readiness verification failed.");
+  if(!saved.ok)
+    throw new NativeMediaImportError("Private media write or finalization was not confirmed.",grant.reference,"unconfirmed");
+  try{
+    const ready=await uploadStatusForOwner(env.DB,grant.reference,login);
+    if(ready?.status!=="stored"||ready.bytes!==bytes.byteLength)
+      throw new Error("Upload readiness did not match expected owner and byte count.");
+    const ref=parseUploadRef(grant.reference);
+    if(!ref)throw new Error("Stored media reference was invalid.");
+    const persisted=await readUpload(env,ref);
+    if(persisted.byteLength!==bytes.byteLength)
+      throw new Error("Persisted media length mismatch.");
+    const digest=await crypto.subtle.digest("SHA-256",persisted);
+    const persistedHash=Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,"0")).join("");
+    if(persistedHash!==sha256)throw new Error("Persisted media hash mismatch.");
+  }catch{
+    throw new NativeMediaImportError("Private media was stored but independent verification failed.",grant.reference,"stored_but_unverified");
+  }
   return {reference:grant.reference,filename,bytes:bytes.byteLength,sha256,status:"stored"};
 }
