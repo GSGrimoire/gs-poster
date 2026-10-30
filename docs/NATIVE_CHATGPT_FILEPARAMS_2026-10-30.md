@@ -82,3 +82,13 @@ The second independent security review of commit `5086008` requested two further
 - Ordinary browser uploads and GitHub blob ingestion continue using the existing handler without the native prefinalization option. No publishing consent or approval PIN changes are part of this revision.
 
 **Release gate:** Do not merge or deploy this unapproved branch until the independent reviewer explicitly re-reviews the new commit and records a decision. Synthetic regression tests alone do not prove original file transfer. Live, host-provided attachments and independently measured original SHA-256 hashes remain mandatory before issue #32 can be closed.
+
+
+## Independent security re-review findings R3 and R4
+
+**[ChatGPT implementation session | 30 October 2026]** The third review of commit `a2504f6` required two additional corrections. This section documents implementation, **not independent approval**.
+
+- **R3, revoked OAuth editor credentials:** All 14 registered Model Context Protocol tools now enforce `currentOwner(env)` or delegate to an authenticated handler before database access or external API requests. Specifically, `delete_draft`, `list_posts`, `get_post`, `list_page_posts`, `check_setup`, and `check_upload_usage` were brought under the current allowlist. The destructive and private-post reading handlers are exported for focused tests, with a previously authorized editor removed from `ALLOWED_GITHUB_LOGINS`. Tests ensure no database access occurs, and a registration-inventory test flags any newly added tool without an explicit allowlist gate.
+- **R4, database acknowledgment ambiguity:** Private object verification completes before the database's `stored` transition. If verification fails before the transition is attempted, the object is eligible for best-effort cleanup and never becomes draft-ready. After finalization is **attempted**, neither database errors nor missing acknowledgments authorize deleting an already verified private object. The one-use upload token remains consumed, and the caller receives an unconfirmed recovery reference. A targeted regression simulates a database update that commits `stored` but throws before returning; the test verifies the object still exists with the original SHA-256 and the owner readiness checks remain consistent. A noncommitting finalization remains non-ready and does not reopen the token.
+
+**Release gate remains unchanged:** Independent re-review of the new exact head is required before merging, followed by deployment and real ChatGPT attachment tests with independent original-file hashes. No publishing PIN or approval controls were changed.
