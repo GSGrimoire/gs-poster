@@ -59,7 +59,7 @@ const github=(response:Response,privateRepo=true)=>(async(url:string|URL|Request
     assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github+json");
     return Response.json({private:privateRepo});
   }
-  assert.equal(options?.redirect,"error");
+  assert.equal(options?.redirect,"manual");
   assert.equal(name,"https://api.github.com/repos/GSGrimoire/gs-media-staging/git/blobs/"+SHA);
   assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github.raw+json");
   return response;
@@ -110,6 +110,15 @@ test("downloads original binary bytes, checks signature and SHA-256",async()=>{
   await assert.rejects(fetchStagedBlob(env,{filename:"original.exe",blob_sha:SHA},github(githubResponse())),/Only JPG/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:"not-a-sha"},github(githubResponse())),/Invalid GitHub blob/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(png,{"Content-Length":"10485761"}))),/file size/);
+});
+
+test("GitHub blob response redirects are rejected before private storage",async()=>{
+  const {env,db,objects}=setup();
+  const moved=new Response(null,{status:302,headers:{Location:"https://github.com/"}});
+  await assert.rejects(importStagedGitHubBlob(env,"https://poster.test","GSGrimoire",
+    {filename:"original.png",blob_sha:SHA},github(moved)),/blob download redirected/);
+  assert.equal(db.rows.length,0);
+  assert.equal(objects.size,0);
 });
 
 test("imports a private GitHub blob to an owner-scoped upload without publishing",async()=>{
