@@ -121,7 +121,7 @@ test("native import stores original bytes privately as owner-scoped draft media"
 });
 
 test("persisted bytes are independently hashed and corruption is reported with a recovery reference",async()=>{
-  const {env,objects}=setup();
+  const {env,db,objects}=setup();
   const bucket=env.UPLOADS!;
   (bucket as unknown as {get:(key:string)=>Promise<{arrayBuffer:()=>Promise<ArrayBuffer>}|null>}).get=
     async(key:string)=>{
