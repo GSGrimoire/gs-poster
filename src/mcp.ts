@@ -12,7 +12,7 @@ import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { checkVideoUrl } from "./video.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
-import { importStagedGitHubBlob } from "./github-staging.ts";
+import { importStagedGitHubBlob, verifyPrivateStagingRepo } from "./github-staging.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
@@ -525,8 +525,20 @@ export function buildServer(env: Env, origin: string): McpServer {
           facebook = { ok: false, error: e instanceof Error ? e.message : String(e) };
         }
       }
+      let github_staging: unknown = {ok:false,error:"GitHub staging requires GITHUB_STAGING_REPO, GITHUB_READ_TOKEN and private uploads."};
+      if (env.GITHUB_STAGING_REPO && env.GITHUB_READ_TOKEN && env.UPLOADS) {
+        try {
+          github_staging = await verifyPrivateStagingRepo(env);
+        } catch (e) {
+          // Only show vetted static errors; never surface a GitHub token or fetch URL.
+          const message = e instanceof Error ? e.message : "";
+          github_staging = {ok:false,error:message.startsWith("Configured GitHub staging")
+            ? message : "Private GitHub staging access check failed."};
+        }
+      }
       return ok({
         review_site: origin,
+        github_staging,
         missing_secrets: missing,
         optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN, GITHUB_STAGING_REPO: !!env.GITHUB_STAGING_REPO, UPLOADS: !!env.UPLOADS, IMAGES: !!env.IMAGES, BSKY_HANDLE: !!env.BSKY_HANDLE, BSKY_APP_PASSWORD: !!env.BSKY_APP_PASSWORD },
         bluesky: { configured: !!env.BSKY_HANDLE && !!env.BSKY_APP_PASSWORD, images_ready: !!env.IMAGES },
