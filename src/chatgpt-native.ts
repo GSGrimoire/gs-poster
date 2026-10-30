@@ -2,7 +2,7 @@
  * Each file remains private, owner-scoped and draft-only after import.
  */
 import type {Env} from "./env.ts";
-import {createUpload,extensionOf,handleUploadPut,looksLike,uploadStatusForOwner,readUpload,parseUploadRef,type UploadExt} from "./upload.ts";
+import {createUpload,extensionOf,handleUploadPut,looksLike,uploadStatusForOwner,readUpload,type UploadExt} from "./upload.ts";
 
 export interface ChatGPTFile {
   download_url:string;
@@ -20,8 +20,8 @@ export interface NativeMediaImport {
 /** A post-write failure must preserve a recovery reference for the owner. */
 export class NativeMediaImportError extends Error{
   readonly reference:string;
-  readonly storage_state:"unconfirmed"|"stored_but_unverified";
-  constructor(message:string,reference:string,storage_state:"unconfirmed"|"stored_but_unverified"){
+  readonly storage_state:"unconfirmed";
+  constructor(message:string,reference:string,storage_state:"unconfirmed"){
     super(message);
     this.reference=reference;
     this.storage_state=storage_state;
@@ -159,25 +159,30 @@ export async function importChatGPTFile(
   // Validate the complete original object before creating an upload reservation.
   const {bytes,filename,sha256}=await fetchChatGPTFile(input,request);
   const grant=await createUpload(env,origin,{filename,actor:login});
+  // Supply verification to the upload handler BEFORE its database transition
+  // to stored. A corruption/missing-object error keeps the record 'uploading',
+  // which check_upload, check_uploads and draft ownership checks all reject.
   const saved=await handleUploadPut(new Request(grant.upload_url,{
     method:"PUT",headers:{"Content-Length":String(bytes.byteLength)},body:bytes,
-  }),env);
+  }),env,{
+    verifyBeforeFinalize:async ref=>{
+      const persisted=await readUpload(env,ref);
+      if(persisted.byteLength!==bytes.byteLength)
+        throw new Error("Persisted media length mismatch.");
+      const persistedDigest=await crypto.subtle.digest("SHA-256",persisted);
+      const persistedHash=Array.from(new Uint8Array(persistedDigest),
+        v=>v.toString(16).padStart(2,"0")).join("");
+      if(persistedHash!==sha256)throw new Error("Persisted media hash mismatch.");
+    },
+  });
   if(!saved.ok)
-    throw new NativeMediaImportError("Private media write or finalization was not confirmed.",grant.reference,"unconfirmed");
+    throw new NativeMediaImportError("Private media write or verification was not confirmed; reference is not draft-ready.",grant.reference,"unconfirmed");
   try{
     const ready=await uploadStatusForOwner(env.DB,grant.reference,login);
     if(ready?.status!=="stored"||ready.bytes!==bytes.byteLength)
       throw new Error("Upload readiness did not match expected owner and byte count.");
-    const ref=parseUploadRef(grant.reference);
-    if(!ref)throw new Error("Stored media reference was invalid.");
-    const persisted=await readUpload(env,ref);
-    if(persisted.byteLength!==bytes.byteLength)
-      throw new Error("Persisted media length mismatch.");
-    const digest=await crypto.subtle.digest("SHA-256",persisted);
-    const persistedHash=Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,"0")).join("");
-    if(persistedHash!==sha256)throw new Error("Persisted media hash mismatch.");
   }catch{
-    throw new NativeMediaImportError("Private media was stored but independent verification failed.",grant.reference,"stored_but_unverified");
+    throw new NativeMediaImportError("Private media readiness could not be confirmed. Check upload status before reuse.",grant.reference,"unconfirmed");
   }
   return {reference:grant.reference,filename,bytes:bytes.byteLength,sha256,status:"stored"};
 }
