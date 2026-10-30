@@ -7,7 +7,7 @@ This file indexes actionable work and links to the evidence/design documents in 
 | Priority | Work item | Status | Reference | Blocker |
 |---|---|---|---|---|
 | P0 | ChatGPT media intake improvements: batch upload links, batch checks and TikTok-specific caption | In current pull request | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Production tests/merge |
-| P1 | True no-click ChatGPT attachment transfer | [#32](https://github.com/GSGrimoire/gs-poster/issues/32) | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Verify chat-client access to original attachment bytes and binary transfer capability |
+| P1 | True no-click ChatGPT attachment transfer | [#32](https://github.com/GSGrimoire/gs-poster/issues/32) | [GitHub blob bridge](docs/GITHUB_BLOB_BRIDGE_2026-10-30.md) | Private GitHub-to-R2 importer in feature branch; configure private staging repo and read token, then prove ChatGPT-to-GitHub binary handoff |
 | P1 | One-page bulk uploader and independent per-platform ordering | [#33](https://github.com/GSGrimoire/gs-poster/issues/33) | [Platform composer](docs/PLATFORM_SPECIFIC_COMPOSER_2026-10-29.md) | Independent galleries implemented in #36; bulk upload session and per-platform reorder remain |
 | P2 | Reddit subreddit-specific drafts, rule checking and approved posting | [#34](https://github.com/GSGrimoire/gs-poster/issues/34) | [Reddit](docs/REDDIT_PUBLISHING_RESEARCH_2026-10-29.md) | Reddit API approval and commercial-use permission |
 | P2 | Facebook Group manual dispatch with copy/media/reminder/completion | [#35](https://github.com/GSGrimoire/gs-poster/issues/35) | [Facebook Groups](docs/FACEBOOK_GROUPS_RESEARCH_2026-10-29.md) | No supported public API; manual workflow only |

@@ -39,6 +39,8 @@ export interface Env {
   IMAGES?: ImagesBinding;
   /** Optional: read-only GitHub token for images in private repos. */
   GITHUB_READ_TOKEN?: string;
+  /** Exact private owner/repo allowed for temporary binary GitHub blob intake. */
+  GITHUB_STAGING_REPO?: string;
   /** TikTok developer Login Kit client key (Worker secret). */
   TIKTOK_CLIENT_KEY?: string;
   /** TikTok developer Login Kit client secret (Worker secret). */

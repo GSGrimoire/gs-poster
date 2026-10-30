@@ -12,6 +12,7 @@ import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { checkVideoUrl } from "./video.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
+import { importStagedGitHubBlob } from "./github-staging.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
@@ -134,6 +135,38 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   // OAuth-protected. The returned PUT URL is a short-lived bearer credential;
   // writing media never approves or publishes a post.
+  // Optional GitHub bridge when the assistant can write original bytes to a
+  // private GitHub blob but cannot PUT directly to the private GS Poster upload.
+  // Import is OAuth-owner scoped and NEVER creates, approves or publishes a post.
+  server.registerTool(
+    "import_github_blob",
+    {
+      title: "Copy a private GitHub binary blob into GS Poster storage",
+      description: "Import an already-created private GitHub binary blob by SHA into GS Poster's private R2, returning a verified upload:// reference for later drafting. The source repository is fixed by server configuration and is never selected by the chat client. Use GitHub create_blob with encoding base64 only if you truly have the original attachment bytes; a picture description is not binary data. Optionally supply original-file SHA-256 to confirm exact bytes. This operation does not draft or publish. If binary access is unavailable, use request_upload and its private browser handoff.",
+      inputSchema: z.object({
+        filename: z.string().min(1).max(200).describe("Original filename ending in JPG, JPEG, PNG, GIF or MP4."),
+        blob_sha: z.string().regex(/^[a-f0-9]{40}$/i).describe("GitHub SHA-1 blob object ID returned by create_blob in the configured private staging repository."),
+        expected_sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional()
+          .describe("Optional SHA-256 of the actual original file bytes, for end-to-end integrity verification."),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (input) => {
+      const login = ownerLogin();
+      if (!login) return fail("Account identity unavailable. Reconnect GS Poster.");
+      try {
+        const stored = await importStagedGitHubBlob(env,origin,login,input);
+        await audit(env.DB,actor(),"github-blob-import",null,stored.reference);
+        return ok({
+          ...stored,
+          next:"Call check_upload with reference to confirm owner-scoped readiness, then use the upload:// reference in draft_post. The GitHub staging blob is not deleted automatically. Nothing has been published.",
+        });
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
   server.registerTool(
     "request_upload",
     {
@@ -495,7 +528,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       return ok({
         review_site: origin,
         missing_secrets: missing,
-        optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN, UPLOADS: !!env.UPLOADS, IMAGES: !!env.IMAGES, BSKY_HANDLE: !!env.BSKY_HANDLE, BSKY_APP_PASSWORD: !!env.BSKY_APP_PASSWORD },
+        optional: { FB_APP_SECRET: !!env.FB_APP_SECRET, GITHUB_READ_TOKEN: !!env.GITHUB_READ_TOKEN, GITHUB_STAGING_REPO: !!env.GITHUB_STAGING_REPO, UPLOADS: !!env.UPLOADS, IMAGES: !!env.IMAGES, BSKY_HANDLE: !!env.BSKY_HANDLE, BSKY_APP_PASSWORD: !!env.BSKY_APP_PASSWORD },
         bluesky: { configured: !!env.BSKY_HANDLE && !!env.BSKY_APP_PASSWORD, images_ready: !!env.IMAGES },
         upload_usage: env.UPLOADS ? await getUploadUsage(env.DB) : null,
         graph_version: env.GRAPH_VERSION,

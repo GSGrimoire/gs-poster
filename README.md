@@ -8,6 +8,7 @@ One Cloudflare Worker (free plan) does three jobs:
 - **Platform-specific composer and review**. Independent Facebook, TikTok and Bluesky media selections and captions, per-target image counts and side-by-side desktop previews. See [platform composer design](./docs/PLATFORM_SPECIFIC_COMPOSER_2026-10-29.md) for the legacy fallback and current limitations.
 - **Chat carousel intake**. The MCP connector also supports `request_uploads` for up to 35 ordered files, `check_uploads` to verify multiple private media references, and a separate TikTok caption for hashtags and platform-specific copy. These tools do not automatically receive ChatGPT attachment bytes.
 - **Community expansion research**. Read [BACKLOG.md](./BACKLOG.md), [Reddit publishing](./docs/REDDIT_PUBLISHING_RESEARCH_2026-10-29.md), [Facebook Groups](./docs/FACEBOOK_GROUPS_RESEARCH_2026-10-29.md), and [ChatGPT intake architecture](./docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md). No Reddit or Group automatic publishing is enabled.
+- **Private GitHub blob bridge (optional)**. An authenticated chat client can import an uncommitted binary blob from one configured private staging repository into the Worker's private media storage using `import_github_blob`. It validates media type, size and optional SHA-256 before returning an `upload://` reference. This is **not** proof of native ChatGPT attachment-byte transfer, and does not publish. See [private GitHub blob bridge](./docs/GITHUB_BLOB_BRIDGE_2026-10-30.md).
 - **Chat media handoff**. The connector creates one-time private media upload pages for Claude and ChatGPT. An editor can open the upload page and select media directly, or an assistant with actual file-byte access can PUT the original image or MP4. Use `check_upload` to confirm storage and `draft_post` to save the content. TikTok-only drafts are supported. **No public GitHub file staging is needed.** See [CHAT_MEDIA_WORKFLOW.md](./CHAT_MEDIA_WORKFLOW.md).
 - **Approval site** at `/`. Gus signs in with GitHub, chooses Facebook, Bluesky or both, edits platform captions, image alternative text and publish time, and approves with a PIN. Facebook uses Meta scheduling. Bluesky uses an approved queue served by the Worker's cron trigger.
 - **OAuth server**. Connecting an assistant requires Gus's GitHub sign-in plus a consent click.
@@ -71,6 +72,7 @@ In [dash.cloudflare.com](https://dash.cloudflare.com): left sidebar **Compute (W
 | `BSKY_HANDLE` | Bluesky account handle for the account GS Poster should post as |
 | `BSKY_APP_PASSWORD` | a Bluesky **app password**, not your main account password, generated in Bluesky settings |
 | `GITHUB_READ_TOKEN` | optional: fine-grained token, *Contents: read* only, for images in private repos |
+| `GITHUB_STAGING_REPO` | optional: exact dedicated **private** `owner/repo` permitted for `import_github_blob`, e.g. `GSGrimoire/GSGrimoire-gs-poster-media-staging` |
 
 `COOKIE_SECRET` is created automatically on the first deploy. Never put any of these in the repo or in a chat.
 
