@@ -9,7 +9,7 @@ import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchVideo } from "./video.ts";
 import { fetchImage } from "./media.ts";
-import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload } from "./facebook-queue.ts";
+import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload, ensureFacebookQueue } from "./facebook-queue.ts";
 
 export interface ApproveInput extends ApprovalSnapshot {
   actor: string;
@@ -190,6 +190,46 @@ export async function retryFailedFacebook(env: Env, id: string, actor: string): 
     await audit(db, actor, "facebook-retry-failed", id, message);
     return false;
   }
+}
+
+/** How long an approval may sit in `publishing` before a human may reconcile it. */
+export const STUCK_PUBLISHING_MS = 15 * 60_000;
+
+/** A `publishing` post with no Facebook id and no queue job: the approval request
+ * ended before recording any result (issue #49). Read-only check used by the page. */
+export async function isStuckPublishing(db: D1Database, p: Post, now = Date.now()): Promise<boolean> {
+  if (p.status !== "publishing" || !p.approved_at || !p.facebook_enabled || p.fb_post_id) return false;
+  if (now - Date.parse(p.updated_at) < STUCK_PUBLISHING_MS) return false;
+  if (p.bluesky?.status === "publishing") return false;
+  await ensureFacebookQueue(db);
+  const job = await db.prepare("SELECT 1 AS present FROM facebook_upload_jobs WHERE post_id = ?").bind(p.id).first();
+  return !job;
+}
+
+/**
+ * PIN-gated human reconciliation for a stuck approval. The caller has confirmed
+ * on Facebook that no post exists. This sends nothing: it only moves the record
+ * to `failed`, from where the existing PIN-gated "back to drafts" path applies.
+ * One atomic UPDATE fences version, age, missing Facebook id and missing queue job.
+ */
+export async function reconcileStuckPublishing(
+  env: Env, id: string, expectedVersion: string, actor: string, now = Date.now(),
+): Promise<boolean> {
+  const p = await getPost(env.DB, id);
+  if (!p || p.updated_at !== expectedVersion || !(await isStuckPublishing(env.DB, p, now))) return false;
+  const cutoff = new Date(now - STUCK_PUBLISHING_MS).toISOString();
+  const res = await env.DB.prepare(`UPDATE posts SET status = 'failed', error = ?, updated_at = ?
+    WHERE id = ? AND status = 'publishing' AND approved_at IS NOT NULL AND facebook_enabled = 1
+      AND fb_post_id IS NULL AND updated_at = ? AND updated_at <= ?
+      AND NOT EXISTS (SELECT 1 FROM facebook_upload_jobs WHERE post_id = ?)`)
+    .bind(
+      "The approval request ended before a Facebook result was recorded. " +
+        "The editor confirmed on Facebook that no post exists. Nothing was resent.",
+      new Date(now).toISOString(), id, expectedVersion, cutoff, id,
+    ).run();
+  if ((res.meta.changes ?? 0) !== 1) return false;
+  await audit(env.DB, actor, "stuck-publishing-reconciled", id, "confirmed absent on Facebook");
+  return true;
 }
 
 export async function rejectPost(env: Env, id: string, reason: string, actor: string): Promise<boolean> {

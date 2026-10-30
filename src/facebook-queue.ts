@@ -12,7 +12,14 @@ import { createFeedPost, getPostInfo, uploadUnpublishedPhoto } from "./facebook.
 import { fetchImage } from "./media.ts";
 import { nextFacebookImageBatch } from "./validate.ts";
 
-export const BULK_FACEBOOK_THRESHOLD = 10;
+/**
+ * Facebook posts with MORE than this many photos are queued and posted by cron.
+ * Zero means every photo post is queued (issue #49): uploading photos inside the
+ * approval request let a cut-off request strand posts in `publishing` with no
+ * Facebook id, no error and no recovery path. The queue checkpoints each upload
+ * and keeps the one-way `sending` barrier, so nothing here weakens approval.
+ */
+export const BULK_FACEBOOK_THRESHOLD = 0;
 export const BULK_SCHEDULE_MIN_LEAD_MS = 30 * 60 * 1000;
 
 
