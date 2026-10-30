@@ -14,6 +14,7 @@ import { checkVideoUrl } from "./video.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
 import { importStagedGitHubBlob, verifyPrivateStagingRepo } from "./github-staging.ts";
 import { importChatGPTFile } from "./chatgpt-native.ts";
+import {runNativeBatch} from "./native-batch.ts";
 import {checkOwnedDraftMedia,isCurrentEditor} from "./media-owner.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
@@ -168,24 +169,15 @@ export function buildServer(env: Env, origin: string): McpServer {
     async ({files})=>{
       const login=currentOwner(env);
       if(!login)return fail("Authenticated editor identity unavailable. Reconnect GS Poster.");
-      const imported=[];
-      let stopped_reason:string|null=null;
-      for(const [index,file] of files.entries()){
-        try{
-          const stored=await importChatGPTFile(env,origin,login,file);
-          await audit(env.DB,actor(),"chatgpt-native-import",null,stored.reference);
-          imported.push({index:index+1,...stored});
-        }catch(error){
-          stopped_reason=error instanceof Error?error.message:"Private file import failed.";
-          break;
-        }
-      }
+      const result=await runNativeBatch(
+        files,
+        file=>importChatGPTFile(env,origin,login,file),
+        stored=>audit(env.DB,actor(),"chatgpt-native-import",null,stored.reference),
+      );
       return ok({
-        requested:files.length,imported_count:imported.length,
-        all_ready:imported.length===files.length,
-        uploads:imported,stopped_reason,
-        next:stopped_reason
-          ?"Use request_uploads for missing files, verify all references with check_uploads, then create an unapproved draft."
+        ...result,
+        next:result.stopped_reason
+          ?"Retain confirmed upload references and inspect recoverable references using check_upload. Use request_uploads only for unconfirmed missing files; never re-upload a confirmed stored file."
           :"All references are stored for this editor. Use them in intended order in an unapproved draft. Nothing was published.",
       });
     },
