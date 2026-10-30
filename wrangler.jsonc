@@ -17,7 +17,7 @@
   "vars": {
     // GitHub accounts allowed to sign in. Comma-separated, case-insensitive.
     "ALLOWED_GITHUB_LOGINS": "GSGrimoire",
-    "GITHUB_STAGING_REPO": "GSGrimoire/gs-poster-media-staging",
+    "GITHUB_STAGING_REPO": "GSGrimoire/GSGrimoire-gs-poster-media-staging",
     "GRAPH_VERSION": "v24.0",
     "TIMEZONE": "Europe/Copenhagen"
   }
