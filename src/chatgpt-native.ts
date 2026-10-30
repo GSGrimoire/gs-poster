@@ -55,7 +55,7 @@ export async function fetchChatGPTFile(
   let response:Response;
   try {
     response=await request(url,{
-      method:"GET",redirect:"manual",credentials:"omit",referrerPolicy:"no-referrer",
+      method:"GET",redirect:"manual",referrerPolicy:"no-referrer",
       headers:{"Accept":"application/octet-stream","Cache-Control":"no-store"},
     });
   }catch{throw new Error("ChatGPT file download failed before an HTTP response. Use secure browser upload.");}
