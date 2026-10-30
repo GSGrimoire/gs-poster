@@ -53,7 +53,7 @@ function githubResponse(body:Uint8Array=png,headers:Record<string,string>={}){
 }
 const github=(response:Response,privateRepo=true)=>(async(url:string|URL|Request,options?:RequestInit)=>{
   assert.equal(new Headers(options?.headers).get("Authorization"),"Bearer test-token");
-  assert.equal(options?.redirect,"error");
+  assert.equal(options?.redirect,"manual");
   const name=String(url);
   if (name==="https://api.github.com/repos/GSGrimoire/gs-media-staging") {
     assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github+json");
@@ -86,6 +86,16 @@ test("staging diagnostics distinguish GitHub authorization and repository select
     const request=(async()=>new Response(null,{status})) as typeof fetch;
     await assert.rejects(verifyPrivateStagingRepo(env,request),expected);
   }
+});
+
+test("staging check reports redirects and transport failures without exposing credentials",async()=>{
+  const {env}=setup();
+  const redirected=(async()=>new Response(null,{status:301,headers:{Location:"https://api.github.com/repositories/123"}})) as typeof fetch;
+  await assert.rejects(verifyPrivateStagingRepo(env,redirected),/lookup redirected \(HTTP 301\)/);
+  const offline=(async()=>{throw new TypeError("private host, secret or internal request detail");}) as typeof fetch;
+  await assert.rejects(verifyPrivateStagingRepo(env,offline),/HTTPS request failed before an HTTP response/);
+  const notJson=(async()=>new Response("<html>proxy issue</html>",{status:200})) as typeof fetch;
+  await assert.rejects(verifyPrivateStagingRepo(env,notJson),/metadata was not valid JSON/);
 });
 
 test("downloads original binary bytes, checks signature and SHA-256",async()=>{
