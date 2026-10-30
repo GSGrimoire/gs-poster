@@ -72,7 +72,7 @@ In [dash.cloudflare.com](https://dash.cloudflare.com): left sidebar **Compute (W
 | `BSKY_HANDLE` | Bluesky account handle for the account GS Poster should post as |
 | `BSKY_APP_PASSWORD` | a Bluesky **app password**, not your main account password, generated in Bluesky settings |
 | `GITHUB_READ_TOKEN` | optional: fine-grained token, *Contents: read* only, for images in private repos |
-| `GITHUB_STAGING_REPO` | optional: exact dedicated **private** `owner/repo` permitted for `import_github_blob`, e.g. `GSGrimoire/gs-poster-media-staging` |
+| `GITHUB_STAGING_REPO` | optional: exact dedicated **private** `owner/repo` permitted for `import_github_blob`, e.g. `GSGrimoire/GSGrimoire-gs-poster-media-staging` |
 
 `COOKIE_SECRET` is created automatically on the first deploy. Never put any of these in the repo or in a chat.
 
