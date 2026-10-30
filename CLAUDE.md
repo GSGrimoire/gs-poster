@@ -17,6 +17,10 @@ The point of this repo is that Claude drafts and Gus approves. Keep it that way.
 - Local end-to-end testing: `npm run dev` with test values in `.dev.vars`. `GRAPH_BASE_URL=http://127.0.0.1:<port>` points Facebook calls at a local mock; it is ignored for any other host.
 - Deploys run from `main` via GitHub Actions, so a merged pull request goes live.
 
+## Review-depth and named-session entry point
+
+Read [AGENTS.md](AGENTS.md) before beginning an implementation or review. It links the shared GS Tools Hub [review playbook](https://github.com/GSGrimoire/gs-tools-hub/blob/main/docs/REVIEW_PLAYBOOK.md) and defines **Mini review** versus **Full review**. GS Poster changes to authentication, all editor/tool access, private media, external file transfer, storage integrity or failure recovery, approval or publishing are **Full reviews**, even for small code diffs. Inspect every affected entry point and failure state, not only the changed function. Use **ChatGPT-1 | Implementer** and **ChatGPT-2 | Independent Reviewer** (or unique role-named sessions) in pull-request handoffs; labels do not supply separate GitHub identities or formal self-approval. The hard rules above still apply.
+
 ## Review checklist (for ChatGPT before merging)
 1. CI is green (`npm run check` and the bundle dry-run).
 2. Facebook publishing is restricted to the sign-in/PIN-approved immediate path in `src/publish.ts` and the approved-only cron queue in `src/facebook-queue.ts`. Bluesky cron can publish only atomically claimed approved targets. No Model Context Protocol tool can publish.
