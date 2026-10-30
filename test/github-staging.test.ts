@@ -77,7 +77,7 @@ test("GitHub staging demands a configured private repository and read token",()=
 test("read-only setup check validates repository access and private visibility",async()=>{
   const {env}=setup();
   assert.deepEqual(await verifyPrivateStagingRepo(env,github(githubResponse())),{ok:true,private:true});
-  await assert.rejects(verifyPrivateStagingRepo(env,github(githubResponse(),false)),/not private/);
+  await assert.rejects(verifyPrivateStagingRepo(env,github(githubResponse(),false)),/did not confirm a private repository/);
   await assert.rejects(verifyPrivateStagingRepo({...env,GITHUB_READ_TOKEN:undefined}),/GITHUB_READ_TOKEN/);
 });
 
@@ -105,7 +105,7 @@ test("downloads original binary bytes, checks signature and SHA-256",async()=>{
   assert.deepEqual(received.bytes,png);
   assert.equal(received.sha256,digest);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA,expected_sha256:"f".repeat(64)},github(githubResponse())),/does not match/);
-  await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(),false)),/not private/);
+  await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(),false)),/did not confirm a private repository/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(new Uint8Array([1,2,3])))),/media type/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.exe",blob_sha:SHA},github(githubResponse())),/Only JPG/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:"not-a-sha"},github(githubResponse())),/Invalid GitHub blob/);
