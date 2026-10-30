@@ -4,6 +4,9 @@ import {createHash} from "node:crypto";
 import {fetchChatGPTFile,importChatGPTFile,validateChatGPTFile,completeMedia,NativeMediaImportError,type ChatGPTFile} from "../src/chatgpt-native.ts";
 import type {Env} from "../src/env.ts";
 import {uploadStatusForOwner} from "../src/upload.ts";
+import {checkChatUploadBatch} from "../src/chat-media.ts";
+import {checkOwnedDraftMedia} from "../src/media-owner.ts";
+import {checkUploadForEditor} from "../src/mcp.ts";
 
 const png=new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5WuioAAAAASUVORK5CYII=","base64"));
 const digest=createHash("sha256").update(png).digest("hex");
@@ -43,7 +46,7 @@ function fakeDb(){
 }
 function setup(){
   const db=fakeDb(),objects=new Map<string,ArrayBuffer>();
-  const env={DB:db,UPLOADS:{
+  const env={DB:db,ALLOWED_GITHUB_LOGINS:"GSGrimoire",UPLOADS:{
     async put(key:string,body:ArrayBuffer){objects.set(key,body);},
     async get(key:string){const value=objects.get(key);return value?{arrayBuffer:async()=>value}:null;},
   }} as unknown as Env;
@@ -128,9 +131,25 @@ test("persisted bytes are independently hashed and corruption is reported with a
       corrupted[35]^=0x01;
       return {arrayBuffer:async()=>corrupted.buffer};
     };
+  let failedReference="";
   await assert.rejects(importChatGPTFile(env,"https://poster.test","GSGrimoire",file,(async()=>good()) as typeof fetch),
-    (error:unknown)=>error instanceof NativeMediaImportError && error.storage_state==="stored_but_unverified" &&
-      /^upload:\/\//.test(error.reference));
+    (error:unknown)=>{
+      if(!(error instanceof NativeMediaImportError)||error.storage_state!=="unconfirmed")return false;
+      failedReference=error.reference;
+      return /^upload:\/\//.test(failedReference);
+    });
+  assert.ok(failedReference);
+  // Failed verification never transitions to stored. Both check_upload and
+  // check_uploads must remain unready; the draft authorization gate must reject.
+  const status=await uploadStatusForOwner(env.DB,failedReference,"GSGrimoire");
+  assert.equal(status?.status,"uploading");
+  const individual=await checkUploadForEditor(env,"GSGrimoire",failedReference);
+  assert.equal(JSON.parse(individual.content[0].text).ready,false);
+  const batch=await checkChatUploadBatch(env.DB,"GSGrimoire",[failedReference]);
+  assert.equal(batch.all_ready,false);
+  assert.equal(batch.results[0].ready,false);
+  const draftErrors=await checkOwnedDraftMedia(env,"GSGrimoire",[failedReference]);
+  assert.match(draftErrors[0],/not stored/);
 });
 
 test("unconfirmed upload finalization preserves recoverable reference",async()=>{
