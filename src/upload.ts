@@ -160,8 +160,14 @@ function json(body: unknown, status = 200): Response {
     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
   } });
 }
-/** PUT /upload/:id/:token is the only unauthenticated write. */
-export async function handleUploadPut(request: Request, env: Env): Promise<Response> {
+/** PUT /upload/:id/:token is the only unauthenticated write.
+ * Native imports may supply a private readback verifier. If it fails,
+ * the upload MUST NOT transition to stored. Other upload flows are unchanged.
+ */
+export async function handleUploadPut(
+  request: Request, env: Env,
+  options?:{verifyBeforeFinalize?:(reference:UploadRef)=>Promise<void>},
+): Promise<Response> {
   const match = /^\/upload\/([a-f0-9]{32})\/([A-Za-z0-9_-]{20,64})$/.exec(new URL(request.url).pathname);
   if (!match) return json({error:"Not found."},404);
   if (request.method !== "PUT") return new Response(JSON.stringify({error:"Use PUT."}),{
@@ -193,14 +199,24 @@ export async function handleUploadPut(request: Request, env: Env): Promise<Respo
     // Once R2 is called, a network failure may be ambiguous: never reuse the token.
     writeStarted = true;
     await env.UPLOADS.put(key(ref),body,{httpMetadata:{contentType:TYPES[row.ext].mime}});
+    // The object must be independently verified BEFORE it becomes ready.
+    // An integrity failure leaves status='uploading', which all readiness and
+    // draft-attachment checks reject. Never reopen the consumed bearer token.
+    if(options?.verifyBeforeFinalize)await options.verifyBeforeFinalize(ref);
     const mark = await env.DB.prepare("UPDATE uploads SET status = 'stored', bytes = ? WHERE id = ? AND status = 'uploading'")
       .bind(body.byteLength,id).run();
     if ((mark.meta.changes ?? 0) !== 1) throw new Error("Failed to finalize the upload record.");
     return json({ok:true,reference:formatUploadRef(ref),bytes:body.byteLength});
   } catch (error) {
-    // Do not reopen a token after a successful R2 write: a retry could overwrite its object.
+    // Do not reopen a token after an attempted R2 write: a retry could
+    // overwrite its object. Failed verified imports are never draft-ready.
     if (!writeStarted) await env.DB.prepare("UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'uploading'")
       .bind(id).run();
+    if(writeStarted && options?.verifyBeforeFinalize && env.UPLOADS){
+      // Best-effort cleanup of this unique object. Readiness remains blocked
+      // by status='uploading' even when deletion is unavailable or fails.
+      try { await env.UPLOADS.delete(key({id,ext:row.ext})); } catch { /* quarantined status wins */ }
+    }
     return error instanceof UploadError
       ? json({error:error.message},error.status)
       : json({error:"Upload failed. Contact support if the link has been consumed."},500);
