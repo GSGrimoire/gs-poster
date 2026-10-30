@@ -1,25 +1,35 @@
 # GS Poster development backlog
 
-**Reviewed:** 29 October 2026
+**Reviewed: 30 October 2026.** Verify the live GitHub head, issues, and deployment evidence before acting. This index is a starting point, not a substitute for live issues.
 
-This file indexes actionable work and links to the evidence/design documents in `docs/`. Active work still belongs in GitHub Issues; this file helps an assistant resume safely in a later session.
+**Newest continuation:** [30 October handoff, winter cave battlemap release and technical pipeline](docs/HANDOFF_2026-10-30_POSTER_PIPELINE.md). For cross-project review policy, read [AGENTS.md](AGENTS.md) and the [GS Tools review playbook](https://github.com/GSGrimoire/gs-tools-hub/blob/main/docs/REVIEW_PLAYBOOK.md).
 
-| Priority | Work item | Status | Reference | Blocker |
-|---|---|---|---|---|
-| P0 | ChatGPT media intake improvements: batch upload links, batch checks and TikTok-specific caption | In current pull request | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Production tests/merge |
-| P1 | True no-click ChatGPT attachment transfer | [#32](https://github.com/GSGrimoire/gs-poster/issues/32) | [GitHub blob bridge](docs/GITHUB_BLOB_BRIDGE_2026-10-30.md) | Private GitHub-to-R2 importer in feature branch; configure private staging repo and read token, then prove ChatGPT-to-GitHub binary handoff |
-| P1 | One-page bulk uploader and independent per-platform ordering | [#33](https://github.com/GSGrimoire/gs-poster/issues/33) | [Platform composer](docs/PLATFORM_SPECIFIC_COMPOSER_2026-10-29.md) | Independent galleries implemented in #36; bulk upload session and per-platform reorder remain |
-| P2 | Reddit subreddit-specific drafts, rule checking and approved posting | [#34](https://github.com/GSGrimoire/gs-poster/issues/34) | [Reddit](docs/REDDIT_PUBLISHING_RESEARCH_2026-10-29.md) | Reddit API approval and commercial-use permission |
-| P2 | Facebook Group manual dispatch with copy/media/reminder/completion | [#35](https://github.com/GSGrimoire/gs-poster/issues/35) | [Facebook Groups](docs/FACEBOOK_GROUPS_RESEARCH_2026-10-29.md) | No supported public API; manual workflow only |
-| P2 | Larger reels, upload streaming, audio/subtitle workflow and cover selection | Backlog | [Design](docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md) | Streaming, duration/format validation and storage budget |
-| P3 | Direct official Group API integration | Blocked, not planned | [Facebook Groups](docs/FACEBOOK_GROUPS_RESEARCH_2026-10-29.md) | Meta retired Groups API 22 April 2024. Revisit only if an officially supported replacement appears. |
+## Priority queue
 
-## Instructions for a future implementation session
+| Priority | Work item | Verified state at checkpoint | Next acceptance gate |
+| --- | --- | --- | --- |
+| P0 | Native ChatGPT file transfer, [issue #32](https://github.com/GSGrimoire/gs-poster/issues/32), [pull request #44](https://github.com/GSGrimoire/gs-poster/pull/44) | **Full source-security review approved without changes** at head `6f1fce72f2f294b544e8318e155e93ecfd08561c`; successful checks; **pull request remains open and unmerged** | Reconcile with current main, recheck exact integration head and authorization, review and merge under repository rules, pass production environment gate; then prove real host-injected original image/video and ordered carousel bytes with independently measured source digests, owner isolation, failure/recovery and browser fallback. Do not close #32 before real transfer acceptance |
+| P0 | [Dependency vulnerability triage, issue #13](https://github.com/GSGrimoire/gs-poster/issues/13) | Earlier deployment reported 6 audit findings (4 moderate, 2 high), with no package/reachability classification recorded | Run controlled `npm audit --json` and production-only audit, classify production versus development dependencies, fix compatible affected versions with full regression checks. Avoid `npm audit fix --force` |
+| P1 | [Four-phase winter cave battlemap release preparation, issue #46](https://github.com/GSGrimoire/gs-poster/issues/46) | **Unapproved Facebook-only draft created**, `p_mvve6u15758e2a8340`. Four originals located in ChatGPT Library and hashed. **0 of 4 images attached** because binary upload from preparing session was unavailable | Transfer actual originals through private GS Poster upload, confirm each stored and owner-scoped, update the existing draft in phase order, verify final post, hand off for owner's sign-in and PIN approval. Never auto-publish |
+| P1 | [One-page bulk upload and independent ordering, issue #33](https://github.com/GSGrimoire/gs-poster/issues/33) | Independent Facebook/TikTok/Bluesky media selection and preview merged through earlier #36; `request_uploads`, `check_uploads` and TikTok caption on main. Mobile one-page batch upload and per-platform drag/reorder still outstanding | Build resumable multi-file selection/progress/reorder interface with accurate owner status, shared assets, legacy compatibility and live mobile checks. Full review for any media/auth/storage change |
+| P2 | [GS Analytics posting windows, issue #5](https://github.com/GSGrimoire/gs-poster/issues/5) | Dependent [GS Analytics #5](https://github.com/GSGrimoire/gs-analytics/issues/5) is open; source-labeled read-only feed not verified in production | Agree and verify versioned feed, freshness/source labels, daylight-saving behavior and protected read-only access before adding suggested times. Never create automatic publish side effects |
+| P2 | [Manual Facebook Groups dispatch, issue #35](https://github.com/GSGrimoire/gs-poster/issues/35) | Feasibility researched; public Groups publishing application programming interface retired | Manual copy/media/open/reminder/confirmed-by-editor workflow only. Do not use unsupported Graph requests or cookie automation |
+| P2 | [Reddit per-subreddit drafts and conditional publication, issue #34](https://github.com/GSGrimoire/gs-poster/issues/34) | Feasibility researched; no approved business/Data API access | Begin with manual per-subreddit draft/checklist; no Reddit API publishing until explicit permissions and tailored per-community approval |
+| P2 | Larger reels, streaming media, subtitles, cover/crop and audio handling | Future design; native MP4 ingest capped at 20,000,000 bytes, no transcoding | Separate architecture and failure-state review before changing private storage and publication inputs |
 
-1. Read `CLAUDE.md` and the relevant source documents. Do not relax the existing account authentication or PIN approval requirements.
-2. Examine GitHub Issues and the latest `main` branch before creating a branch. Do not duplicate an open feature or imply an unmerged pull request is deployed.
-3. Treat platform capabilities as dated. Recheck official TikTok, Reddit and Meta documentation before implementing a new publishing endpoint.
-4. Work on a feature branch and make a pull request. Run `npm run check` and `npx wrangler deploy --dry-run --outdir dist`. Only merge when checks pass.
-5. Chat tools should create and edit **drafts only**; any new publishing operation must require explicit authenticated human approval and the existing PIN.
+## What is actually live at this checkpoint
 
-For Claude work, wait until the owner has access again and can test its connected-client file-access capabilities. Do not assume an attachment visible in Claude is automatically available to a remote Model Context Protocol tool.
+- `main` at `87e94afecc14bf24cf990087cb0713f6ba2dc78c` incorporates documentation/session-review policy pull request #45, **not** native importer pull request #44.
+- [Production Deploy workflow #41115220630](https://github.com/GSGrimoire/gs-poster/actions/runs/41115220630) completed with success for that main commit, including Cloudflare Worker deploy; [live read-only smoke run #41115368311](https://github.com/GSGrimoire/gs-poster/actions/runs/41115368311) passed. These are deployment and limited smoke evidence, not complete provider or media end-to-end acceptance.
+- Connected GS Poster `check_setup` on 30 October returned no missing secrets, Facebook reachable, Bluesky configured, private staging accessible and Cloudflare R2 enabled. The connected GS Poster tool inventory **did not expose native `import_chatgpt_files`**, consistent with #44 remaining unmerged.
+- Older `docs/CHATGPT_MEDIA_INTAKE_2026-10-29.md` and this repository's README include historical statements written before later gallery and bridge merges. Consult live implementation and issue status when they conflict.
+
+## Requirements for every future implementation session
+
+1. State **ChatGPT-1 | Implementer**, **ChatGPT-2 | Independent Reviewer**, or another unique session/role label in work records. Read `AGENTS.md`, `CLAUDE.md` and the Hub review playbook. Classify **Mini review** or **Full review** up front. An implementation session must not approve or merge its own GS Poster source pull request.
+2. Inspect current `main`, open pull requests, issues and the precise target head. Keep application changes separate from editorial release prep.
+3. For security-sensitive changes, perform a **full affected-system review**, including identity and revocation across **all** tool handlers, private media owner checks, state transitions, database-commit uncertainty and adversarial tests. Passing checks is not security approval.
+4. Run `npm run check` and `npx wrangler deploy --dry-run --outdir dist`, and preserve existing GitHub sign-in, owner PIN and publication boundaries. Do not merge or deploy without required approval.
+5. Never claim a media file was transferred solely because a model can view it. Independently verify **original bytes**, stored readiness and the correct target order; if the client cannot upload, use the owner's secure private browser fallback. Do not paste large encoded blobs or upload unpublished media into the public source repository.
+6. Track source approval, GitHub formal review status, production environment deployment, and real external-provider acceptance as **separate** gates. Do not treat a draft as approved or published.
+7. Record a dated handoff with exact issue, draft, commit, tests, limitations, and the next actionable task. Never report unverified work as complete.
