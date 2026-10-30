@@ -186,6 +186,45 @@ test("unconfirmed upload finalization preserves recoverable reference",async()=>
       /^upload:\/\//.test(error.reference));
 });
 
+test("a committed finalization with a lost acknowledgment preserves the verified R2 object",async()=>{
+  const {env,db,objects}=setup();
+  const originalPrepare=db.prepare.bind(db);
+  let committed=false,deleted=false,reference="";
+  const bucket=env.UPLOADS! as unknown as {delete:(key:string)=>Promise<void>};
+  bucket.delete=async()=>{deleted=true;throw new Error("Never delete after commit attempt");};
+  (db as unknown as {prepare:typeof originalPrepare}).prepare=(sql:string)=>{
+    const stmt=originalPrepare(sql);
+    if(!sql.includes("SET status = 'stored'"))return stmt;
+    return {bind:(...params:unknown[])=>{
+      const bound=stmt.bind(...params);
+      return {run:async()=>{
+        await bound.run();
+        committed=true;
+        throw new Error("Database committed, but acknowledgment was lost");
+      }};
+    }} as ReturnType<typeof originalPrepare>;
+  };
+  await assert.rejects(importChatGPTFile(env,"https://poster.test","GSGrimoire",file,
+    (async()=>good()) as typeof fetch),
+    (error:unknown)=>{
+      if(!(error instanceof NativeMediaImportError))return false;
+      reference=error.reference;
+      return error.storage_state==="unconfirmed";
+    });
+  assert.equal(committed,true,"the database really committed before throwing");
+  assert.equal(deleted,false,"a verified object must survive ambiguous finalization");
+  assert.equal(objects.size,1,"private object must still exist after lost acknowledgment");
+  const stored=await uploadStatusForOwner(env.DB,reference,"GSGrimoire");
+  assert.equal(stored?.status,"stored");
+  assert.equal(stored?.bytes,png.byteLength);
+  const ready=JSON.parse((await checkUploadForEditor(env,"GSGrimoire",reference)).content[0].text);
+  assert.equal(ready.ready,true);
+  assert.equal((await checkChatUploadBatch(env.DB,"GSGrimoire",[reference])).all_ready,true);
+  assert.deepEqual(await checkOwnedDraftMedia(env,"GSGrimoire",[reference]),[]);
+  const blob=objects.values().next().value as ArrayBuffer;
+  assert.equal(createHash("sha256").update(new Uint8Array(blob)).digest("hex"),digest);
+});
+
 test("invalid or redirected file references do not reserve or write private media",async()=>{
   const {env,db,objects}=setup();
   await assert.rejects(importChatGPTFile(env,"https://poster.test","GSGrimoire",
