@@ -40,27 +40,38 @@ export async function verifyPrivateStagingRepo(
   request: typeof fetch = fetch,
 ): Promise<{ok:true; private:true}> {
   const {owner,repo} = getStagingRepo(env);
-  const response = await request("https://api.github.com/repos/" + owner + "/" + repo,{
-    headers: {
-      "Authorization": "Bearer " + env.GITHUB_READ_TOKEN,
-      "User-Agent": "gs-poster",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Accept": "application/vnd.github+json",
-    },
-    redirect:"error",
-  });
+  let response: Response;
+  try {
+    response = await request("https://api.github.com/repos/" + owner + "/" + repo,{
+      headers: {
+        "Authorization": "Bearer " + env.GITHUB_READ_TOKEN,
+        "User-Agent": "gs-poster",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Accept": "application/vnd.github+json",
+      },
+      // Do not follow a redirect while carrying a private-repository token.
+      // A renamed repository must instead be corrected in Cloudflare Secrets.
+      redirect:"manual",
+    });
+  } catch {
+    throw new Error("GitHub staging HTTPS request failed before an HTTP response.");
+  }
   if (!response.ok) {
-    // Report only the HTTP category, never a URL, response body or credential.
+    // Report only the HTTP category, never a URL, body or credential.
     const code = response.status;
+    if (code >= 300 && code < 400)
+      throw new Error("GitHub staging repository lookup redirected (HTTP " + code + "). Verify the exact repository slug in Cloudflare Secrets.");
     if (code === 401) throw new Error("GitHub staging token was rejected (HTTP 401).");
     if (code === 403) throw new Error("GitHub staging token lacks access or is rate-limited (HTTP 403).");
     if (code === 404) throw new Error("GitHub staging repository was not found for this token (HTTP 404). Verify its exact owner/repo and token repository selection.");
     throw new Error("GitHub staging repository check returned HTTP " + code + ".");
   }
-  const metadata: unknown = await response.json();
+  let metadata: unknown;
+  try { metadata = await response.json(); }
+  catch { throw new Error("GitHub staging repository metadata was not valid JSON."); }
   if (!metadata || typeof metadata !== "object" ||
       (metadata as {private?: unknown}).private !== true)
-    throw new Error("Configured GitHub staging repository is not private.");
+    throw new Error("GitHub staging repository metadata did not confirm a private repository.");
   return {ok:true,private:true};
 }
 
