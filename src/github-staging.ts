@@ -34,6 +34,29 @@ function maxBytes(ext: UploadExt): number {
   return ext === "mp4" ? 20_000_000 : 10 * 1024 * 1024;
 }
 
+/** Read-only configuration probe. Never returns or logs the GitHub token. */
+export async function verifyPrivateStagingRepo(
+  env: Env,
+  request: typeof fetch = fetch,
+): Promise<{ok:true; private:true}> {
+  const {owner,repo} = getStagingRepo(env);
+  const response = await request("https://api.github.com/repos/" + owner + "/" + repo,{
+    headers: {
+      "Authorization": "Bearer " + env.GITHUB_READ_TOKEN,
+      "User-Agent": "gs-poster",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Accept": "application/vnd.github+json",
+    },
+    redirect:"error",
+  });
+  if (!response.ok) throw new Error("Configured GitHub staging repository is not accessible with the read token.");
+  const metadata: unknown = await response.json();
+  if (!metadata || typeof metadata !== "object" ||
+      (metadata as {private?: unknown}).private !== true)
+    throw new Error("Configured GitHub staging repository is not private.");
+  return {ok:true,private:true};
+}
+
 export async function fetchStagedBlob(
   env: Env,
   input: GitHubBlobImport,
@@ -52,17 +75,8 @@ export async function fetchStagedBlob(
     "User-Agent": "gs-poster",
     "X-GitHub-Api-Version": "2022-11-28",
   };
-  // A configured repository name is not proof that the source is private.
-  // Refuse to import from public or unexpectedly inaccessible repositories.
-  const details = await request(repositoryUrl,{
-    headers:{...authHeaders,"Accept":"application/vnd.github+json"},
-    redirect:"error",
-  });
-  if (!details.ok) throw new Error("The configured private GitHub staging repository is inaccessible.");
-  const metadata: unknown = await details.json();
-  if (!metadata || typeof metadata !== "object" ||
-      (metadata as {private?: unknown}).private !== true)
-    throw new Error("GitHub staging repository must be private.");
+  // Do not import media from an inaccessible or public staging repository.
+  await verifyPrivateStagingRepo(env,request);
   const response = await request(
     repositoryUrl + "/git/blobs/" + input.blob_sha.toLowerCase(),
     {
