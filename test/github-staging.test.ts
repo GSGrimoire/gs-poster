@@ -51,11 +51,16 @@ function setup(){
 function githubResponse(body:Uint8Array=png,headers:Record<string,string>={}){
   return new Response(body,{status:200,headers:{"Content-Length":String(body.length),...headers}});
 }
-const github=(response:Response)=>(async(url:string|URL|Request,options?:RequestInit)=>{
-  assert.equal(String(url),"https://api.github.com/repos/GSGrimoire/gs-media-staging/git/blobs/"+SHA);
+const github=(response:Response,privateRepo=true)=>(async(url:string|URL|Request,options?:RequestInit)=>{
   assert.equal(new Headers(options?.headers).get("Authorization"),"Bearer test-token");
-  assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github.raw+json");
   assert.equal(options?.redirect,"error");
+  const name=String(url);
+  if (name==="https://api.github.com/repos/GSGrimoire/gs-media-staging") {
+    assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github+json");
+    return Response.json({private:privateRepo});
+  }
+  assert.equal(name,"https://api.github.com/repos/GSGrimoire/gs-media-staging/git/blobs/"+SHA);
+  assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github.raw+json");
   return response;
 }) as typeof fetch;
 
@@ -74,6 +79,7 @@ test("downloads original binary bytes, checks signature and SHA-256",async()=>{
   assert.deepEqual(received.bytes,png);
   assert.equal(received.sha256,digest);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA,expected_sha256:"f".repeat(64)},github(githubResponse())),/does not match/);
+  await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(),false)),/must be private/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(new Uint8Array([1,2,3])))),/media type/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.exe",blob_sha:SHA},github(githubResponse())),/Only JPG/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:"not-a-sha"},github(githubResponse())),/Invalid GitHub blob/);
