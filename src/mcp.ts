@@ -232,6 +232,33 @@ export async function handleUpdateDraft(
       return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
 }
 
+/** The production handlers are exported for revoked-token regression tests.
+ * Authorization precedes any database, Facebook or scheduled-post activity.
+ */
+export async function handleDeleteDraft(env:Env,login:string,id:string){
+  if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
+  const okDel=await deletePost(env.DB,id,["draft","rejected"]);
+  if(!okDel)return fail("Not deleted: no draft or rejected post with that id.");
+  await audit(env.DB,actor(),"deleted",id);
+  return ok({deleted:id});
+}
+export async function handleListPosts(
+  env:Env,origin:string,login:string,input:{
+    status?:typeof STATUSES[number]; release?:string; limit?:number;
+  },
+){
+  if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
+  await refreshScheduled(env).catch(()=>undefined);
+  let posts=await listPosts(env.DB,{status:input.status as PostStatus|undefined,limit:input.limit??30});
+  if(input.release)posts=posts.filter(p=>(p.release??"").toLowerCase()===input.release!.toLowerCase());
+  return ok({count:posts.length,review_site:origin,posts:posts.map(p=>view(env,origin,p))});
+}
+export async function handleGetPost(env:Env,origin:string,login:string,id:string){
+  if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
+  const p=await getPost(env.DB,id);
+  return p?ok(view(env,origin,p)):fail(`No post with id ${id}.`);
+}
+
 /** The exact read-only readiness response used by check_upload.
  * Stored status is only granted after native integrity pre-finalization.
  */
@@ -516,13 +543,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       inputSchema: z.object({ id: z.string() }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id }) => {
-      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
-      const okDel = await deletePost(env.DB, id, ["draft", "rejected"]);
-      if (!okDel) return fail("Not deleted: no draft or rejected post with that id.");
-      await audit(env.DB, actor(), "deleted", id);
-      return ok({ deleted: id });
-    },
+    async ({ id }) => handleDeleteDraft(env,currentOwner(env),id),
   );
 
   server.registerTool(
@@ -538,13 +559,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ status, release, limit }) => {
-      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
-      await refreshScheduled(env).catch(() => undefined);
-      let posts = await listPosts(env.DB, { status: status as PostStatus | undefined, limit: limit ?? 30 });
-      if (release) posts = posts.filter((p) => (p.release ?? "").toLowerCase() === release.toLowerCase());
-      return ok({ count: posts.length, review_site: origin, posts: posts.map((p) => view(env, origin, p)) });
-    },
+    async input => handleListPosts(env,origin,currentOwner(env),input),
   );
 
   server.registerTool(
@@ -555,11 +570,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       inputSchema: z.object({ id: z.string() }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ id }) => {
-      if(!currentOwner(env))return fail("Editor access is no longer authorized.");
-      const p = await getPost(env.DB, id);
-      return p ? ok(view(env, origin, p)) : fail(`No post with id ${id}.`);
-    },
+    async ({ id }) => handleGetPost(env,origin,currentOwner(env),id),
   );
 
   server.registerTool(
