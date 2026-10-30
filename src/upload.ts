@@ -188,6 +188,9 @@ export async function handleUploadPut(
     .bind(id,new Date().toISOString()).run();
   if ((claim.meta.changes ?? 0) !== 1) return gone();
   let writeStarted = false;
+  // Once finalization is attempted, a failed response does not tell us
+  // whether the database committed. Never delete a verified R2 object then.
+  let finalizationAttempted = false;
   try {
     const body = await request.arrayBuffer();
     if (!body.byteLength) throw new UploadError("The file is empty.",400);
@@ -203,6 +206,7 @@ export async function handleUploadPut(
     // An integrity failure leaves status='uploading', which all readiness and
     // draft-attachment checks reject. Never reopen the consumed bearer token.
     if(options?.verifyBeforeFinalize)await options.verifyBeforeFinalize(ref);
+    finalizationAttempted = true;
     const mark = await env.DB.prepare("UPDATE uploads SET status = 'stored', bytes = ? WHERE id = ? AND status = 'uploading'")
       .bind(body.byteLength,id).run();
     if ((mark.meta.changes ?? 0) !== 1) throw new Error("Failed to finalize the upload record.");
@@ -212,11 +216,15 @@ export async function handleUploadPut(
     // overwrite its object. Failed verified imports are never draft-ready.
     if (!writeStarted) await env.DB.prepare("UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'uploading'")
       .bind(id).run();
-    if(writeStarted && options?.verifyBeforeFinalize && env.UPLOADS){
-      // Best-effort cleanup of this unique object. Readiness remains blocked
-      // by status='uploading' even when deletion is unavailable or fails.
-      try { await env.UPLOADS.delete(key({id,ext:row.ext})); } catch { /* quarantined status wins */ }
+    if(writeStarted && !finalizationAttempted && options?.verifyBeforeFinalize && env.UPLOADS){
+      // The database has not been asked to mark this object ready. Cleanup
+      // here cannot remove an upload already finalized by this invocation.
+      try { await env.UPLOADS.delete(key({id,ext:row.ext})); } catch { /* non-ready status wins */ }
     }
+    // After finalization is attempted, even a thrown DB response can mean
+    // the row is already 'stored'. Preserve the verified object. A retry
+    // cannot overwrite it because the one-use token stays consumed. Callers
+    // must inspect the owner-scoped status instead of assuming failure/success.
     return error instanceof UploadError
       ? json({error:error.message},error.status)
       : json({error:"Upload failed. Contact support if the link has been consumed."},500);
