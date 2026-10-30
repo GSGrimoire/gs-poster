@@ -232,6 +232,17 @@ export async function handleUpdateDraft(
       return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
 }
 
+/** The exact read-only readiness response used by check_upload.
+ * Stored status is only granted after native integrity pre-finalization.
+ */
+export async function checkUploadForEditor(env:Env,login:string,reference:string){
+  if(!isCurrentEditor(env,login))
+    return fail("Your authenticated account could not be identified. Reconnect GS Poster.");
+  const result=await uploadStatusForOwner(env.DB,reference,login);
+  return result ? ok({...result,ready:result.status==="stored"}) :
+    fail("Upload not found or not owned by this account.");
+}
+
 export function buildServer(env: Env, origin: string): McpServer {
   const server = new McpServer({ name: "gs-poster", version: "0.1.0" });
 
@@ -346,13 +357,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations:{readOnlyHint:true,openWorldHint:false},
     },
-    async ({reference})=>{
-      const login=currentOwner(env);
-      if(!login)return fail("Your authenticated account could not be identified. Reconnect GS Poster.");
-      const result=await uploadStatusForOwner(env.DB,reference,login);
-      return result ? ok({...result,ready:result.status==="stored"}) :
-        fail("Upload not found or not owned by this account.");
-    },
+    async ({reference})=>checkUploadForEditor(env,currentOwner(env),reference),
   );
 
 
