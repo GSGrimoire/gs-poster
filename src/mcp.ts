@@ -429,7 +429,6 @@ export function buildServer(env: Env, origin: string): McpServer {
       const nextImages = images ?? cur.images;
       const nextVideo = video === undefined ? cur.video : video;
       const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
-      const imgErrors:string[] = [];
       const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
       const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
@@ -438,7 +437,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         }):{errors:[],warnings:[]};
       const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
       const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
-      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
+      const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
       if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
       const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
       const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
@@ -449,8 +448,10 @@ export function buildServer(env: Env, origin: string): McpServer {
         ...(bsNext?.video?[bsNext.video.url]:[]),
       ]);
       if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
-      if(images)imgErrors.push(...(await checkImages(env,images)));
-      if(bluesky&&bsNext)bsErrors.push(...(await checkImages(env,bsNext.images.map(i=>i.url))));
+      // All media preflight errors must be added to the final error collection
+      // BEFORE updatePost can run. Do not mutate arrays already spread into it.
+      if(images)errors.push(...(await checkImages(env,images)));
+      if(bluesky&&bsNext)errors.push(...(await checkImages(env,bsNext.images.map(i=>i.url))));
       if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
       if (tiktok_images!==undefined&&!cur.tiktok_enabled)errors.push("TikTok gallery requires TikTok target.");
       if (tiktok_video!==undefined&&!cur.tiktok_enabled)errors.push("TikTok video requires TikTok target.");
