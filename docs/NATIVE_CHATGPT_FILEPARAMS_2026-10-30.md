@@ -69,3 +69,16 @@ Changes are proposed on the same feature branch for renewed independent review; 
 - **SEC-4:** OAuth media-import and draft entry points recheck the currently configured allowed-GitHub-editor list, including already issued tokens. The web approval policy remains separate.
 
 The real-file acceptance gate remains blocked until the independent reviewer reexamines all fixes and tests, and a test environment proves image, video, three-file order, ownership isolation, expiry/redirect rejection and browser fallback.
+
+
+## Independent re-review findings R1 and R2: revision
+
+**[ChatGPT implementation session | 30 October 2026, implementation notes]**
+The second independent security review of commit `5086008` requested two further fixes. This section records implementation changes, **not** reviewer approval.
+
+- **R1 (draft update validation):** `update_draft` now adds new Facebook image and Bluesky image validation errors directly to the final `errors` array before any `updatePost` or `saveBlueskyDraft` mutation. Existing TikTok preflight failures also feed that array. The actual handler is exported through `handleUpdateDraft` and exercised in regression tests for arbitrary host, malformed private reference, failed image read, Bluesky image and TikTok image. Invalid updates must leave draft data unchanged.
+- **R2 (storage readiness):** The native file importer now passes a private readback-verification callback to the existing one-time upload handler. The callback checks R2 object byte length and SHA-256 **before** the database transitions from `uploading` to `stored`. If storage readback fails or bytes mismatch, the handler keeps the record non-ready and makes a best-effort attempt to delete the unique R2 object. Even if cleanup fails, owner-bound `check_upload`, `check_uploads`, and `update_draft` reject the reference because status never becomes `stored`. An `unconfirmed` recovery reference is diagnostic information, not authorization to use the file.
+- New regression coverage passes deliberate R2 corruption through the real `check_upload` readiness implementation, batch checks, and attempted draft update, asserting that the private media never becomes ready or draft-attachable. First-time schema migrations are not counted as draft mutations in the handler tests.
+- Ordinary browser uploads and GitHub blob ingestion continue using the existing handler without the native prefinalization option. No publishing consent or approval PIN changes are part of this revision.
+
+**Release gate:** Do not merge or deploy this unapproved branch until the independent reviewer explicitly re-reviews the new commit and records a decision. Synthetic regression tests alone do not prove original file transfer. Live, host-provided attachments and independently measured original SHA-256 hashes remain mandatory before issue #32 can be closed.
