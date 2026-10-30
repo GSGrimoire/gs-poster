@@ -80,6 +80,14 @@ test("read-only setup check validates repository access and private visibility",
   await assert.rejects(verifyPrivateStagingRepo({...env,GITHUB_READ_TOKEN:undefined}),/GITHUB_READ_TOKEN/);
 });
 
+test("staging diagnostics distinguish GitHub authorization and repository selection",async()=>{
+  const {env}=setup();
+  for(const [status,expected] of [[401,/token was rejected/],[403,/lacks access/],[404,/not found for this token/]] as const) {
+    const request=(async()=>new Response(null,{status})) as typeof fetch;
+    await assert.rejects(verifyPrivateStagingRepo(env,request),expected);
+  }
+});
+
 test("downloads original binary bytes, checks signature and SHA-256",async()=>{
   const {env}=setup();
   const received=await fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA,expected_sha256:digest},github(githubResponse()));

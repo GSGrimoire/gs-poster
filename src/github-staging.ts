@@ -49,7 +49,14 @@ export async function verifyPrivateStagingRepo(
     },
     redirect:"error",
   });
-  if (!response.ok) throw new Error("Configured GitHub staging repository is not accessible with the read token.");
+  if (!response.ok) {
+    // Report only the HTTP category, never a URL, response body or credential.
+    const code = response.status;
+    if (code === 401) throw new Error("GitHub staging token was rejected (HTTP 401).");
+    if (code === 403) throw new Error("GitHub staging token lacks access or is rate-limited (HTTP 403).");
+    if (code === 404) throw new Error("GitHub staging repository was not found for this token (HTTP 404). Verify its exact owner/repo and token repository selection.");
+    throw new Error("GitHub staging repository check returned HTTP " + code + ".");
+  }
   const metadata: unknown = await response.json();
   if (!metadata || typeof metadata !== "object" ||
       (metadata as {private?: unknown}).private !== true)

@@ -530,10 +530,19 @@ export function buildServer(env: Env, origin: string): McpServer {
         try {
           github_staging = await verifyPrivateStagingRepo(env);
         } catch (e) {
-          // Only show vetted static errors; never surface a GitHub token or fetch URL.
+          // Explicitly allow only predefined diagnostic messages. Do not
+          // return a token, request URL, stack, or upstream response content.
           const message = e instanceof Error ? e.message : "";
-          github_staging = {ok:false,error:message.startsWith("Configured GitHub staging")
-            ? message : "Private GitHub staging access check failed."};
+          let safe = "GitHub connection failed before a usable response. Check the Worker network and GitHub API availability.";
+          if (message.startsWith("Private GitHub staging is not configured"))
+            safe = "Invalid GITHUB_STAGING_REPO value. Set only the exact owner/repository name, without a URL, quotes or variable-name prefix.";
+          else if (message.startsWith("Private GitHub staging requires GITHUB_READ_TOKEN"))
+            safe = "GITHUB_READ_TOKEN is not available in this Worker.";
+          else if (message.startsWith("GS Poster private upload storage is unavailable"))
+            safe = "Private upload storage is unavailable in this Worker.";
+          else if (/^GitHub staging (token was rejected|token lacks access|repository was not found|repository check returned HTTP|repository is not private)/.test(message))
+            safe = message;
+          github_staging = {ok:false,error:safe};
         }
       }
       return ok({
