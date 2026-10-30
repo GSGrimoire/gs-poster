@@ -7,7 +7,7 @@ export interface NativeBatchResult{
   uploads:Array<{index:number}&NativeMediaImport>;
   stopped_reason:string|null;
   audit_warnings:Array<{index:number;reason:string}>;
-  recoverable:Array<{index:number;reference:string;storage_state:"unconfirmed"|"stored_but_unverified"}>;
+  recoverable:Array<{index:number;reference:string;storage_state:"unconfirmed"}>;
 }
 export async function runNativeBatch(
   files:ChatGPTFile[],
