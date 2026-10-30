@@ -36,6 +36,35 @@ This works in Claude's web chat, ChatGPT, and on mobile without depending on mod
 
 This involves an explicit file selection in your browser, but requires **no GitHub staging, no command line, and no public media URL**.
 
+### C. ChatGPT attachments (native)
+
+In ChatGPT, attach the files and ask for `import_chatgpt_files`. ChatGPT passes the attachments to GS Poster directly; nothing is typed or base64-encoded by the model. Deployed 30 October 2026 (`082cf7b`); live acceptance still outstanding (issue #32). If the tool is missing or refuses a file, use path B.
+
+### D. Claude cloud sessions (claude.ai with code tools)
+
+**Why path A does not work here:** a Claude cloud session cannot reach `gs-poster.goofyspook.workers.dev`; its network allowlist refuses the connection (verified 30 October 2026). It can, however, call the GitHub API for repositories attached to the session. So Claude uses the private staging repository and `import_github_blob`, with the real file bytes read from disk by the shell.
+
+- **Staging repository:** `GSGrimoire/GSGrimoire-gs-poster-media-staging` (private). This is the same repository named in the Worker secret `GITHUB_STAGING_REPO`; `check_setup` reports it reachable and private.
+- **One-time owner step (blocking as of 30 Oct):** the Claude GitHub App must be allowed to see this repository. In GitHub: Settings, Applications, the Claude app, Configure, Repository access, add `GSGrimoire-gs-poster-media-staging`. Until then `add_repo` reports "you don't have access".
+- **Per release, in a Claude session:**
+  1. Attach the staging repository with push access.
+  2. The session's proxy refuses GitHub's REST `create_blob` endpoint (HTTP 403, verified 30 Oct), but it allows `git push`. So commit the files to a throwaway branch and push; git's blob SHA is exactly GitHub's blob SHA. In the shell (never type the bytes):
+
+     ```sh
+     git init -q staging && cd staging
+     cp /path/to/slides/*.png .
+     git add . && git commit -q -m "media: <release>"
+     git push https://github.com/GSGrimoire/GSGrimoire-gs-poster-media-staging HEAD:refs/heads/media/<release-slug>
+     for f in *.png; do echo "$f $(git hash-object "$f") $(sha256sum "$f" | cut -d' ' -f1)"; done
+     ```
+
+     Git may print "push negotiation failed; proceeding anyway"; that is harmless. Tested 30 Oct with a 4.4 MB PNG: the blob read back through the GitHub API had the identical SHA-256.
+  3. Call `import_github_blob` per file with the filename, blob SHA and `expected_sha256`, in order.
+  4. Call `check_uploads` with all references in order; use only `ready: true` files.
+  5. `draft_post` or `update_draft`. Never publish; Gus approves.
+- **Branch clean-up:** the proxy also refuses branch deletion, so Claude cannot remove `media/...` branches. Gus or ChatGPT deletes them after import; GS Poster keeps its own copy in R2. Deleting and recreating the staging repository purges everything.
+- Already-public art (the image library) may still be drafted by its raw URL. Do not put unreleased slides in the public library just to reach GS Poster.
+
 ## Composer recommendations for Claude
 
 When creating a GS Grimoire product, image carousel, or reel:
