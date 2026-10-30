@@ -53,12 +53,13 @@ function githubResponse(body:Uint8Array=png,headers:Record<string,string>={}){
 }
 const github=(response:Response,privateRepo=true)=>(async(url:string|URL|Request,options?:RequestInit)=>{
   assert.equal(new Headers(options?.headers).get("Authorization"),"Bearer test-token");
-  assert.equal(options?.redirect,"error");
   const name=String(url);
   if (name==="https://api.github.com/repos/GSGrimoire/gs-media-staging") {
+    assert.equal(options?.redirect,"manual");
     assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github+json");
     return Response.json({private:privateRepo});
   }
+  assert.equal(options?.redirect,"error");
   assert.equal(name,"https://api.github.com/repos/GSGrimoire/gs-media-staging/git/blobs/"+SHA);
   assert.equal(new Headers(options?.headers).get("Accept"),"application/vnd.github.raw+json");
   return response;
@@ -76,7 +77,7 @@ test("GitHub staging demands a configured private repository and read token",()=
 test("read-only setup check validates repository access and private visibility",async()=>{
   const {env}=setup();
   assert.deepEqual(await verifyPrivateStagingRepo(env,github(githubResponse())),{ok:true,private:true});
-  await assert.rejects(verifyPrivateStagingRepo(env,github(githubResponse(),false)),/not private/);
+  await assert.rejects(verifyPrivateStagingRepo(env,github(githubResponse(),false)),/did not confirm a private repository/);
   await assert.rejects(verifyPrivateStagingRepo({...env,GITHUB_READ_TOKEN:undefined}),/GITHUB_READ_TOKEN/);
 });
 
@@ -88,13 +89,23 @@ test("staging diagnostics distinguish GitHub authorization and repository select
   }
 });
 
+test("staging check reports redirects and transport failures without exposing credentials",async()=>{
+  const {env}=setup();
+  const redirected=(async()=>new Response(null,{status:301,headers:{Location:"https://api.github.com/repositories/123"}})) as typeof fetch;
+  await assert.rejects(verifyPrivateStagingRepo(env,redirected),/lookup redirected \(HTTP 301\)/);
+  const offline=(async()=>{throw new TypeError("private host, secret or internal request detail");}) as typeof fetch;
+  await assert.rejects(verifyPrivateStagingRepo(env,offline),/HTTPS request failed before an HTTP response/);
+  const notJson=(async()=>new Response("<html>proxy issue</html>",{status:200})) as typeof fetch;
+  await assert.rejects(verifyPrivateStagingRepo(env,notJson),/metadata was not valid JSON/);
+});
+
 test("downloads original binary bytes, checks signature and SHA-256",async()=>{
   const {env}=setup();
   const received=await fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA,expected_sha256:digest},github(githubResponse()));
   assert.deepEqual(received.bytes,png);
   assert.equal(received.sha256,digest);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA,expected_sha256:"f".repeat(64)},github(githubResponse())),/does not match/);
-  await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(),false)),/not private/);
+  await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(),false)),/did not confirm a private repository/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:SHA},github(githubResponse(new Uint8Array([1,2,3])))),/media type/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.exe",blob_sha:SHA},github(githubResponse())),/Only JPG/);
   await assert.rejects(fetchStagedBlob(env,{filename:"original.png",blob_sha:"not-a-sha"},github(githubResponse())),/Invalid GitHub blob/);

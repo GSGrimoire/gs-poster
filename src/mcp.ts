@@ -540,7 +540,7 @@ export function buildServer(env: Env, origin: string): McpServer {
             safe = "GITHUB_READ_TOKEN is not available in this Worker.";
           else if (message.startsWith("GS Poster private upload storage is unavailable"))
             safe = "Private upload storage is unavailable in this Worker.";
-          else if (/^GitHub staging (token was rejected|token lacks access|repository was not found|repository check returned HTTP|repository is not private)/.test(message))
+          else if (/^GitHub staging (token was rejected|token lacks access|repository was not found|repository check returned HTTP|repository lookup redirected|HTTPS request failed|repository metadata was not valid JSON|repository metadata did not confirm)/.test(message))
             safe = message;
           github_staging = {ok:false,error:safe};
         }
