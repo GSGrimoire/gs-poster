@@ -46,15 +46,27 @@ export async function fetchStagedBlob(
   if (input.expected_sha256 && !SHA256.test(input.expected_sha256))
     throw new Error("Expected SHA-256 must contain 64 hexadecimal characters.");
   const limit = maxBytes(ext);
+  const repositoryUrl = "https://api.github.com/repos/" + owner + "/" + repo;
+  const authHeaders = {
+    "Authorization": "Bearer " + env.GITHUB_READ_TOKEN,
+    "User-Agent": "gs-poster",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  // A configured repository name is not proof that the source is private.
+  // Refuse to import from public or unexpectedly inaccessible repositories.
+  const details = await request(repositoryUrl,{
+    headers:{...authHeaders,"Accept":"application/vnd.github+json"},
+    redirect:"error",
+  });
+  if (!details.ok) throw new Error("The configured private GitHub staging repository is inaccessible.");
+  const metadata: unknown = await details.json();
+  if (!metadata || typeof metadata !== "object" ||
+      (metadata as {private?: unknown}).private !== true)
+    throw new Error("GitHub staging repository must be private.");
   const response = await request(
-    "https://api.github.com/repos/" + owner + "/" + repo + "/git/blobs/" + input.blob_sha.toLowerCase(),
+    repositoryUrl + "/git/blobs/" + input.blob_sha.toLowerCase(),
     {
-      headers: {
-        "Accept": "application/vnd.github.raw+json",
-        "Authorization": "Bearer " + env.GITHUB_READ_TOKEN,
-        "User-Agent": "gs-poster",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
+      headers: {...authHeaders, "Accept": "application/vnd.github.raw+json"},
       redirect: "error",
     },
   );
