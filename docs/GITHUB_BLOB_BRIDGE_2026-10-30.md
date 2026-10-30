@@ -10,10 +10,10 @@ A chat assistant may have access to an original image or video in its execution 
 The GS Poster tool `import_github_blob` solves only the *GitHub-to-private-R2* half, and deliberately has no publishing operation.
 
 ## Required one-time setup
-1. Create a dedicated **private** GitHub repository, for example `GSGrimoire/gs-poster-media-staging`, separate from the public `gs-poster` source repository. Do not stage private media in a public repo.
+1. Create a dedicated **private** GitHub repository, for example `GSGrimoire/GSGrimoire-gs-poster-media-staging`, separate from the public `gs-poster` source repository. Do not stage private media in a public repo.
 2. Permit the connected GitHub app to write Git blobs in that private repository using Contents write permission.
 3. Create a repository-scoped **read-only** fine-grained GitHub token with Contents read access to this repository only. Set `GITHUB_READ_TOKEN` in Cloudflare Worker secrets. Do not share the token in chat, source files or documentation.
-4. Set `GITHUB_STAGING_REPO` to the exact `owner/repo`, e.g. `GSGrimoire/gs-poster-media-staging`, as a Worker variable or secret.
+4. Set `GITHUB_STAGING_REPO` to the exact `owner/repo`, e.g. `GSGrimoire/GSGrimoire-gs-poster-media-staging`, as a Worker variable or secret.
 5. Confirm the GS Poster connector's `check_setup` reports `GITHUB_READ_TOKEN: true` and `GITHUB_STAGING_REPO: true`, then verify with a non-sensitive test PNG before handling real assets.
 
 ## Per-file flow
