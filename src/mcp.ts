@@ -14,6 +14,7 @@ import { checkVideoUrl } from "./video.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
 import { importStagedGitHubBlob, verifyPrivateStagingRepo } from "./github-staging.ts";
 import { importChatGPTFile } from "./chatgpt-native.ts";
+import {checkOwnedDraftMedia,isCurrentEditor} from "./media-owner.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
@@ -32,6 +33,11 @@ function fail(message: string, extra?: Record<string, unknown>) {
 function ownerLogin():string {
   const login=getMcpAuthContext()?.props?.login;
   return typeof login==="string" ? login : "";
+}
+/** Issued OAuth tokens must still match the CURRENT editor allowlist. */
+function currentOwner(env:Env):string{
+  const login=ownerLogin();
+  return isCurrentEditor(env,login)?login:"";
 }
 function actor(): string {
   const props = getMcpAuthContext()?.props;
@@ -160,7 +166,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
     },
     async ({files})=>{
-      const login=ownerLogin();
+      const login=currentOwner(env);
       if(!login)return fail("Authenticated editor identity unavailable. Reconnect GS Poster.");
       const imported=[];
       let stopped_reason:string|null=null;
@@ -199,7 +205,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async (input) => {
-      const login = ownerLogin();
+      const login = currentOwner(env);
       if (!login) return fail("Account identity unavailable. Reconnect GS Poster.");
       try {
         const stored = await importStagedGitHubBlob(env,origin,login,input);
@@ -228,7 +234,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       try {
         // Upload ownership must use the authenticated GitHub login, not the
         // human-readable MCP actor string (which includes the client name).
-        const login=ownerLogin();
+        const login=currentOwner(env);
         if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
         const grant = await createUpload(env, origin, { filename, actor: login });
         await audit(env.DB, actor(), "upload-link", null, grant.reference);
@@ -255,7 +261,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations:{readOnlyHint:true,openWorldHint:false},
     },
     async ({reference})=>{
-      const login=ownerLogin();
+      const login=currentOwner(env);
       if(!login)return fail("Your authenticated account could not be identified. Reconnect GS Poster.");
       const result=await uploadStatusForOwner(env.DB,reference,login);
       return result ? ok({...result,ready:result.status==="stored"}) :
@@ -276,7 +282,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
     },
     async ({filenames})=>{
-      const login=ownerLogin();
+      const login=currentOwner(env);
       if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
       try{
         const result=await createChatUploadBatch(env,origin,login,filenames);
@@ -298,7 +304,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations:{readOnlyHint:true,openWorldHint:false},
     },
     async ({references})=>{
-      const login=ownerLogin();
+      const login=currentOwner(env);
       if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
       try{return ok(await checkChatUploadBatch(env.DB,login,references));}
       catch(error){return fail(error instanceof Error?error.message:String(error));}
@@ -344,6 +350,15 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ message, tiktok_caption, images = [], tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
+      const login=currentOwner(env);
+      if(!login)return fail("Editor access is no longer authorized.");
+      const privateErrors=await checkOwnedDraftMedia(env,login,[
+        ...images,...(tiktok_images??[]),...(video?[video]:[]),
+        ...(tiktok_video?[tiktok_video]:[]),
+        ...(bluesky?.images.map(i=>i.url)??[]),
+        ...(bluesky?.video?[bluesky.video.url]:[]),
+      ]);
+      if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
       const checks = facebook_enabled?
         checkMessage(message,{hasImages:images.length>0||!!video}):
         tiktok_enabled?checkMessage(tiktok_caption??message,{
@@ -413,6 +428,8 @@ export function buildServer(env: Env, origin: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky }) => {
+      const login=currentOwner(env);
+      if(!login)return fail("Editor access is no longer authorized.");
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
       if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
@@ -420,7 +437,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       const nextImages = images ?? cur.images;
       const nextVideo = video === undefined ? cur.video : video;
       const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
-      const imgErrors = images ? await checkImages(env, images) : [];
+      const imgErrors:string[] = [];
       const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
       const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
@@ -428,11 +445,20 @@ export function buildServer(env: Env, origin: string): McpServer {
           hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
         }):{errors:[],warnings:[]};
       const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
-      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors, ...(bluesky ? await checkImages(env, bsNext.images.map((i) => i.url)) : [])] : [];
+      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...imgErrors, ...bsErrors];
       if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
       const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
       const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
+      const privateErrors=await checkOwnedDraftMedia(env,login,[
+        ...nextImages,...(nextTTImages??[]),...(nextVideo?[nextVideo]:[]),
+        ...(nextTTVideo?[nextTTVideo]:[]),
+        ...(bsNext?.images.map(i=>i.url)??[]),
+        ...(bsNext?.video?[bsNext.video.url]:[]),
+      ]);
+      if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
+      if(images)imgErrors.push(...(await checkImages(env,images)));
+      if(bluesky&&bsNext)bsErrors.push(...(await checkImages(env,bsNext.images.map(i=>i.url))));
       if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
       if (tiktok_images!==undefined&&!cur.tiktok_enabled)errors.push("TikTok gallery requires TikTok target.");
       if (tiktok_video!==undefined&&!cur.tiktok_enabled)errors.push("TikTok video requires TikTok target.");
