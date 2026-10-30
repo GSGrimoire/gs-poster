@@ -6,7 +6,7 @@ import type {Env} from "../src/env.ts";
 import {uploadStatusForOwner} from "../src/upload.ts";
 import {checkChatUploadBatch} from "../src/chat-media.ts";
 import {checkOwnedDraftMedia} from "../src/media-owner.ts";
-import {checkUploadForEditor} from "../src/mcp.ts";
+import {checkUploadForEditor,handleUpdateDraft} from "../src/mcp.ts";
 
 const png=new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5WuioAAAAASUVORK5CYII=","base64"));
 const digest=createHash("sha256").update(png).digest("hex");
@@ -150,6 +150,25 @@ test("persisted bytes are independently hashed and corruption is reported with a
   assert.equal(batch.results[0].ready,false);
   const draftErrors=await checkOwnedDraftMedia(env,"GSGrimoire",[failedReference]);
   assert.match(draftErrors[0],/not stored/);
+  // Exercise the ACTUAL update_draft handler with this very same corrupted
+  // reference. A previously successful import may not make this object ready.
+  const originalPrepare=db.prepare.bind(db);
+  const postRow={
+    id:"p_test",status:"draft",message:"A GS Grimoire artwork preview.",
+    images:"[]",tiktok_images:"[]",video:null,tiktok_video:null,tiktok_caption:null,
+    facebook_enabled:1,tiktok_enabled:0,scheduled_at:null,bs_caption:null,
+  };
+  (db as unknown as {prepare:(sql:string)=>unknown}).prepare=(
+    (sql:string)=>sql.includes("FROM posts p LEFT JOIN bluesky_targets")
+      ? {bind:()=>({first:async()=>postRow})}
+      : originalPrepare(sql)
+  ) as (sql:string)=>unknown;
+  const before=JSON.stringify(db.rows);
+  const attempted=await handleUpdateDraft(env,"https://poster.test","GSGrimoire",
+    {id:"p_test",images:[failedReference]});
+  assert.equal(attempted.isError,true);
+  assert.match(attempted.content[0].text,/not stored or does not belong/);
+  assert.equal(JSON.stringify(db.rows),before,"rejected media must not change upload records");
 });
 
 test("unconfirmed upload finalization preserves recoverable reference",async()=>{
