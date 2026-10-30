@@ -1,6 +1,6 @@
 # Native ChatGPT file-parameter media intake
 
-**Status:** Draft implementation for issue #32. Not verified in the live ChatGPT plugin.
+**Status:** Security remediation in progress following independent review of PR #44. No production approval; no live ChatGPT transfer verified.
 
 ## Supported mechanism
 
@@ -56,3 +56,16 @@ It does **not** create, approve, schedule or publish posts.
 
 The GitHub staging bridge remains an optional compatibility path only. Native
 fileParams transfer is intended to eliminate it from the ordinary chat upload flow.
+
+
+## Security remediation after independent review of PR #44
+
+**[ChatGPT implementation session | 30 October 2026]**
+Changes are proposed on the same feature branch for renewed independent review; they are not security approval or proof of operational native intake.
+
+- **SEC-1:** Every private `upload://` image and video reference is checked for `stored` status and ownership against the currently authenticated editor before `draft_post` or `update_draft` performs media reads, including Facebook, TikTok and Bluesky fields beyond the first eight media preflight entries. This does not relax web approval.
+- **SEC-2:** A declared Content-Length must match bytes received, container completion checks reject visibly truncated PNG/JPEG/GIF/MP4 media, and R2 bytes are read back and independently hashed against the received stream before a confirmed import is returned. The returned SHA-256 authenticates the **received and persisted bytes**, not independently the original user-selected file. Live source-file comparison remains required.
+- **SEC-3:** Stored references are appended to batch results before auditing. An audit failure stops further imports but preserves a confirmed file reference. Ambiguous upload status returns an owner-checkable recovery reference instead of silently suggesting a duplicate import.
+- **SEC-4:** OAuth media-import and draft entry points recheck the currently configured allowed-GitHub-editor list, including already issued tokens. The web approval policy remains separate.
+
+The real-file acceptance gate remains blocked until the independent reviewer reexamines all fixes and tests, and a test environment proves image, video, three-file order, ownership isolation, expiry/redirect rejection and browser fallback.
