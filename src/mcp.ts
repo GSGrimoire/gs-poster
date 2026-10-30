@@ -13,6 +13,7 @@ import { checkBluesky } from "./bluesky.ts";
 import { checkVideoUrl } from "./video.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
 import { importStagedGitHubBlob, verifyPrivateStagingRepo } from "./github-staging.ts";
+import { importChatGPTFile } from "./chatgpt-native.ts";
 import { refreshScheduled } from "./publish.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
@@ -138,6 +139,52 @@ export function buildServer(env: Env, origin: string): McpServer {
   // Optional GitHub bridge when the assistant can write original bytes to a
   // private GitHub blob but cannot PUT directly to the private GS Poster upload.
   // Import is OAuth-owner scoped and NEVER creates, approves or publishes a post.
+
+  // ChatGPT's documented fileParams adapter injects authorized file objects
+  // without embedding original binary bytes in the model tool arguments.
+  // Other chat clients may not support it; the browser upload fallback remains.
+  server.registerTool(
+    "import_chatgpt_files",
+    {
+      title:"Import ChatGPT attachments privately into GS Poster",
+      description:"Transfer up to 35 original user-selected ChatGPT image or MP4 attachments directly into private GS Poster storage, preserving order and returning upload:// references. This uses ChatGPT's fileParams attachment adapter, not text base64 or GitHub staging. Files may not be available on every ChatGPT client. If missing or unsupported, use request_uploads and private browser upload pages. Imports never create or publish a post.",
+      inputSchema:z.object({
+        files:z.array(z.object({
+          download_url:z.string().min(1),
+          file_id:z.string().min(1),
+          mime_type:z.string().optional(),
+          file_name:z.string().optional(),
+        }).strict()).min(1).max(CHAT_BATCH_MAX_FILES),
+      }),
+      _meta:{"openai/fileParams":["files"]},
+      annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
+    },
+    async ({files})=>{
+      const login=ownerLogin();
+      if(!login)return fail("Authenticated editor identity unavailable. Reconnect GS Poster.");
+      const imported=[];
+      let stopped_reason:string|null=null;
+      for(const [index,file] of files.entries()){
+        try{
+          const stored=await importChatGPTFile(env,origin,login,file);
+          await audit(env.DB,actor(),"chatgpt-native-import",null,stored.reference);
+          imported.push({index:index+1,...stored});
+        }catch(error){
+          stopped_reason=error instanceof Error?error.message:"Private file import failed.";
+          break;
+        }
+      }
+      return ok({
+        requested:files.length,imported_count:imported.length,
+        all_ready:imported.length===files.length,
+        uploads:imported,stopped_reason,
+        next:stopped_reason
+          ?"Use request_uploads for missing files, verify all references with check_uploads, then create an unapproved draft."
+          :"All references are stored for this editor. Use them in intended order in an unapproved draft. Nothing was published.",
+      });
+    },
+  );
+
   server.registerTool(
     "import_github_blob",
     {
