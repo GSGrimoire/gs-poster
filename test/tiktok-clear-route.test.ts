@@ -105,3 +105,19 @@ test("signed-in editor with PIN and confirmation clears it once, revoking grants
   assert.equal(audit?.actor,"GSGrimoire");
   assert.equal((await send(id)).status,409);
 });
+
+test("a hand-made Direct Post form is refused while Direct Post is hidden",async()=>{
+  const p=await createPost(db,{message:"Carousel",images:[],video:null,created_by:"test",
+    scheduled_at:null,facebook_enabled:false,tiktok_enabled:true,bluesky:null});
+  await db.prepare("DELETE FROM pin_failures").run();
+  const raw=await makeSession(signer,"GSGrimoire");
+  const form=new URLSearchParams({csrf:await csrfToken(signer,{login:"GSGrimoire",raw} as Session),pin:PIN,
+    confirm_tiktok:"1",confirm_direct:"1",post_mode:"DIRECT_POST",media_type:"PHOTO",privacy_level:"SELF_ONLY",
+    expected_updated_at:p.updated_at});
+  const res=await mf.dispatchFetch(ORIGIN+"/post/"+p.id+"/tiktok-send",{method:"POST",redirect:"manual",
+    headers:{Origin:ORIGIN,"Sec-Fetch-Site":"same-origin",Cookie:SESSION_COOKIE+"="+raw,
+      "Content-Type":"application/x-www-form-urlencoded"},body:form.toString()});
+  assert.equal(res.status,400);
+  assert.match(await res.text(),/Direct Post is switched off/);
+  assert.equal(await getTikTokInboxTransfer(db,p.id),null);
+});
