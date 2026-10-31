@@ -8,7 +8,7 @@ import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {createPost,attachDraftImage,getPost} from "../src/db.ts";
 import {ensureTikTokSchema,sealTikTokTokens} from "../src/tiktok.ts";
 import {startTikTokContentTransfer,type TikTokPostOptions} from "../src/tiktok-posting.ts";
-import {getTikTokInboxTransfer,clearUnconfirmedTikTokTransfer,startTikTokInboxTransfer} from "../src/tiktok-inbox.ts";
+import {getTikTokInboxTransfer,clearUnconfirmedTikTokTransfer,startTikTokInboxTransfer,markTikTokRejected,classifyTikTokInit} from "../src/tiktok-inbox.ts";
 import {tiktokOptionsPage} from "../src/tiktok-options.ts";
 import {tiktokSettings} from "../src/tiktok-web.ts";
 import type {Env} from "../src/env.ts";
@@ -66,7 +66,7 @@ test("url_ownership_unverified is shown with its code and advice, and links are 
  const p=await draft();
  const {calls}=await withFetch(rejectWith("url_ownership_unverified"),async()=>{
   await assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("MEDIA_UPLOAD")),
-   /url_ownership_unverified.*Nothing was created on TikTok.*verification file/s);
+   /url_ownership_unverified.*no publish ID.*verification file/s);
  });
  assert.equal(calls.length,1);
  const row=(await getTikTokInboxTransfer(env.DB,p.id))!;
@@ -142,7 +142,9 @@ test("clearing an uncertain attempt needs no publish_id, then allows a resend",a
  assert.ok(await grants(p.id)>0);
  assert.equal(await clearUnconfirmedTikTokTransfer(env.DB,p.id,session.login),true);
  assert.equal(await grants(p.id),0);
- assert.equal((await getTikTokInboxTransfer(env.DB,p.id))?.status,"rejected");
+ const cleared=(await getTikTokInboxTransfer(env.DB,p.id))!;
+ assert.equal(cleared.status,"cleared");
+ assert.match(cleared.error??"",/Cleared by GSGrimoire.*never confirmed/);
  // One-shot: a second clear finds nothing to clear.
  assert.equal(await clearUnconfirmedTikTokTransfer(env.DB,p.id,session.login),false);
  const {result}=await withFetch(()=>Response.json({data:{publish_id:"p_inbox_url~after_clear"},error:{code:"ok"}}),
@@ -167,3 +169,129 @@ test("settings page says when no verification file is hosted",async()=>{
  assert.match(text,/no verification file hosted/);
  assert.match(text,/url_ownership_unverified/);
 });
+
+// ---- Review 31 Oct, finding 1: a publish_id always means "uncertain" ----
+for(const [label,mode] of [["PHOTO MEDIA_UPLOAD","MEDIA_UPLOAD"],["PHOTO DIRECT_POST","DIRECT_POST"]] as const){
+ test(`${label}: an error code WITH a publish_id is uncertain, keeps the id and blocks a resend`,async()=>{
+  const p=await draft();
+  await withFetch(url=>url.endsWith("/creator_info/query/")
+   ? Response.json({data:{creator_username:"t",creator_nickname:"T",privacy_level_options:["SELF_ONLY"],
+      comment_disabled:false,duet_disabled:false,stitch_disabled:false},error:{code:"ok"}})
+   : Response.json({data:{publish_id:"p_pub_url~maybe"},error:{code:"internal_error"}},{status:400}),
+   ()=>assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options(mode)),/not confirmed/));
+  const row=(await getTikTokInboxTransfer(env.DB,p.id))!;
+  assert.equal(row.status,"needs_review");
+  assert.equal(row.publish_id,"p_pub_url~maybe");
+  assert.ok(await grants(p.id)>0,"grants are kept while TikTok may still fetch");
+  assert.equal(await clearUnconfirmedTikTokTransfer(env.DB,p.id,session.login),false);
+  let inits=0;
+  await withFetch(url=>{
+   if(url.endsWith("/creator_info/query/"))return Response.json({data:{creator_username:"t",creator_nickname:"T",
+    privacy_level_options:["SELF_ONLY"],comment_disabled:false,duet_disabled:false,stitch_disabled:false},error:{code:"ok"}});
+   inits++;throw new Error("must not call TikTok init");
+  },()=>assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options(mode)),/already exists/));
+  assert.equal(inits,0);
+ });
+}
+test("a 5xx error with no publish_id is uncertain, not a refusal",async()=>{
+ const p=await draft();
+ await withFetch(()=>Response.json({error:{code:"internal_error"}},{status:500}),()=>
+  assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("MEDIA_UPLOAD")),/not confirmed/));
+ assert.equal((await getTikTokInboxTransfer(env.DB,p.id))?.status,"needs_review");
+});
+test("classification table",()=>{
+ assert.equal(classifyTikTokInit(403,{error:{code:"url_ownership_unverified"}}).kind,"rejected");
+ assert.equal(classifyTikTokInit(403,{data:{publish_id:"x"},error:{code:"url_ownership_unverified"}}).kind,"uncertain");
+ assert.equal(classifyTikTokInit(200,{data:{publish_id:"x"},error:{code:"spam_risk_too_many_posts"}}).kind,"uncertain");
+ assert.equal(classifyTikTokInit(200,{error:{code:"spam_risk_too_many_posts"}}).kind,"uncertain");
+ assert.equal(classifyTikTokInit(502,{}).kind,"uncertain");
+ assert.equal(classifyTikTokInit(200,{data:{publish_id:"bad id with spaces"},error:{code:"ok"}}).kind,"uncertain");
+ assert.equal(classifyTikTokInit(200,{data:{publish_id:"v_inbox~1"},error:{code:"ok"}}).kind,"ok");
+});
+
+// ---- Video inbox path ----
+const videoRef="upload://"+"c".repeat(32)+".mp4";
+function stubVideo(){
+ const bytes=new Uint8Array(4096);bytes.set([0,0,0,24,102,116,121,112,105,115,111,109],0);
+ env.UPLOADS={get:async()=>({arrayBuffer:async()=>bytes.buffer})} as unknown as R2Bucket;
+}
+async function videoDraft(){
+ const p=await createPost(env.DB,{message:"Video",images:[],video:videoRef,scheduled_at:null,
+  created_by:"test",facebook_enabled:false,tiktok_enabled:true,bluesky:null});
+ return (await getPost(env.DB,p.id))!;
+}
+test("VIDEO: a definitive refusal is recorded and a resend succeeds",async()=>{
+ stubVideo();const p=await videoDraft();
+ await withFetch(rejectWith("scope_not_authorized"),()=>
+  assert.rejects(startTikTokInboxTransfer(env,p.id,p.updated_at,session.login),/scope_not_authorized.*reconnect/is));
+ const row=(await getTikTokInboxTransfer(env.DB,p.id))!;
+ assert.equal(row.status,"rejected");
+ assert.equal(row.media_type,"VIDEO");
+ let puts=0;
+ const {result}=await withFetch((url)=>{
+  if(url.endsWith("/inbox/video/init/"))return Response.json({data:{publish_id:"v_inbox~retry",
+   upload_url:"https://open-upload.tiktokapis.com/video/?upload_id=1"},error:{code:"ok"}});
+  puts++;return new Response(null,{status:201});
+ },()=>startTikTokInboxTransfer(env,p.id,p.updated_at,session.login));
+ assert.equal(result.status,"transfer_complete");
+ assert.equal(result.publish_id,"v_inbox~retry");
+ assert.equal(puts,1);
+});
+test("VIDEO: error code with a publish_id is uncertain and keeps the id",async()=>{
+ stubVideo();const p=await videoDraft();
+ await withFetch(()=>Response.json({data:{publish_id:"v_inbox~maybe"},error:{code:"internal_error"}},{status:400}),()=>
+  assert.rejects(startTikTokInboxTransfer(env,p.id,p.updated_at,session.login),/clear answer/));
+ const row=(await getTikTokInboxTransfer(env.DB,p.id))!;
+ assert.equal(row.status,"needs_review");
+ assert.equal(row.publish_id,"v_inbox~maybe");
+ assert.equal(await clearUnconfirmedTikTokTransfer(env.DB,p.id,session.login),false);
+});
+
+// ---- Finding 2: attempt fencing and failure handling ----
+test("a stale rejection for an earlier attempt cannot touch a newer attempt or its grants",async()=>{
+ const p=await draft();
+ await withFetch(rejectWith("url_ownership_unverified"),()=>
+  assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("MEDIA_UPLOAD"))));
+ const first=(await getTikTokInboxTransfer(env.DB,p.id))!;
+ // A second attempt claims the row and has live grants while in flight.
+ await new Promise(r=>setTimeout(r,5));
+ await withFetch(()=>Response.json({data:{publish_id:"p_inbox~second"},error:{code:"ok"}}),
+  ()=>startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("MEDIA_UPLOAD")));
+ await env.DB.prepare("UPDATE tiktok_inbox_transfers SET status='transferring',publish_id=NULL WHERE post_id=?").bind(p.id).run();
+ const before=await grants(p.id);
+ assert.ok(before>0);
+ assert.equal(await markTikTokRejected(env.DB,p.id,first.created_at,"url_ownership_unverified","late"),false);
+ assert.equal(await grants(p.id),before,"newer attempt's grants survive");
+ assert.equal((await getTikTokInboxTransfer(env.DB,p.id))?.status,"transferring");
+});
+test("if recording the refusal fails, the attempt stays blocked instead of retryable",async()=>{
+ const p=await draft();
+ const real=env.DB;let broken=false;
+ const failing=new Proxy(real,{get(t,k){
+  if(k==="batch"&&broken)return async()=>{throw new Error("D1 unavailable");};
+  const v=Reflect.get(t,k);return typeof v==="function"?v.bind(t):v;
+ }}) as D1Database;
+ env.DB=failing;
+ try{
+  // D1 starts failing only once TikTok has answered, i.e. while recording the refusal.
+  await withFetch(()=>{broken=true;return rejectWith("url_ownership_unverified")();},()=>
+   assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("MEDIA_UPLOAD")),/could not record it safely/));
+ }finally{env.DB=real;}
+ assert.equal((await getTikTokInboxTransfer(env.DB,p.id))?.status,"needs_review");
+ await withFetch(()=>{throw new Error("must not call TikTok");},()=>
+  assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("MEDIA_UPLOAD")),/already exists/));
+});
+test("a failing clear reports failure and leaves the attempt and its grants alone",async()=>{
+ const p=await draft();
+ await withFetch(()=>{throw new TypeError("down");},()=>
+  assert.rejects(startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("MEDIA_UPLOAD"))));
+ const n=await grants(p.id);
+ const failing=new Proxy(env.DB,{get(t,k){
+  if(k==="batch")return async()=>{throw new Error("D1 unavailable");};
+  const v=Reflect.get(t,k);return typeof v==="function"?v.bind(t):v;
+ }}) as D1Database;
+ await assert.rejects(clearUnconfirmedTikTokTransfer(failing,p.id,session.login));
+ assert.equal((await getTikTokInboxTransfer(env.DB,p.id))?.status,"needs_review");
+ assert.equal(await grants(p.id),n);
+});
+

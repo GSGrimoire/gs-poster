@@ -443,7 +443,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to the inbox or initiating a private direct test.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
   }
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
-    const ttRetry=tiktokTransfer?.status==="rejected";
+    const ttRetry=tiktokTransfer?.status==="rejected"||tiktokTransfer?.status==="cleared";
     if((!tiktokTransfer||ttRetry) && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
       <div class="eyebrow">TikTok · ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
       <h3 style="margin:8px 0">Choose your TikTok publishing path</h3>
@@ -454,7 +454,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       actions += `<div class="card"><h2>TikTok inbox transfer</h2>
         <p>Status: <strong>${esc(tiktokTransfer.status.replaceAll("_"," "))}</strong></p>
         ${tiktokTransfer.error ? `<p class="notice err">${esc(tiktokTransfer.error)}</p>` : ""}
-        <p class="hint">${tiktokTransfer.status==="rejected"?"Nothing was created on TikTok. Fix the cause above, then use the TikTok posting options again.":
+        <p class="hint">${tiktokTransfer.status==="rejected"?"TikTok refused this attempt and returned no publish ID. Fix the cause above, then use the TikTok posting options again.":
+          tiktokTransfer.status==="cleared"?"You cleared this attempt after checking TikTok. GS Poster has no confirmation from TikTok. You can send it again; if a copy shows up on TikTok later, delete the duplicate there.":
           tiktokTransfer.status==="needs_review"?"The outcome is uncertain. Check TikTok before doing anything else.":
           tiktokTransfer.post_mode==="DIRECT_POST"?"TikTok is processing a private Direct Post.":"Open TikTok to finish editing and publishing if this was an inbox transfer."}</p>
         ${tiktokTransfer.status==="needs_review"&&!tiktokTransfer.publish_id?`<form method="post" action="/post/${p.id}/tiktok-clear">
@@ -795,7 +796,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         return postPage(env,session,id,{error:"Confirm you checked TikTok before clearing the attempt."},400);
       const cleared=await clearUnconfirmedTikTokTransfer(env.DB,id,session.login);
       return cleared
-        ? postPage(env,session,id,{notice:"TikTok attempt cleared. Nothing was sent. You can send it to TikTok again."})
+        ? postPage(env,session,id,{notice:"TikTok attempt cleared on your confirmation. GS Poster sent nothing new. You can send it to TikTok again."})
         : postPage(env,session,id,{error:"This TikTok attempt cannot be cleared: it has a TikTok publish ID or is not awaiting review."},409);
     }
     if (action === "tiktok-status") {

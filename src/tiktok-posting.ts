@@ -6,7 +6,7 @@ import type {Env} from "./env.ts";
 import {getPost,audit,tiktokMedia} from "./db.ts";
 import {tiktokAccessToken,getTikTokCreatorOptions} from "./tiktok.ts";
 import {createTikTokMediaGrant,ensureTikTokMediaSchema} from "./tiktok-media.ts";
-import {ensureTikTokInboxSchema,getTikTokInboxTransfer,markTikTokRejected,safeTikTokCode,TikTokRejected,TIKTOK_CLAIM_CONFLICT,type TikTokInboxTransfer} from "./tiktok-inbox.ts";
+import {classifyTikTokInit,ensureTikTokInboxSchema,getTikTokInboxTransfer,markTikTokRejected,markTikTokUncertain,TikTokRejected,TikTokUncertain,TIKTOK_CLAIM_CONFLICT,type TikTokInboxTransfer} from "./tiktok-inbox.ts";
 import {parseUploadRef} from "./upload.ts";
 
 export type TikTokPostMode="MEDIA_UPLOAD"|"DIRECT_POST";
@@ -59,22 +59,19 @@ async function contentInit(env:Env,options:TikTokPostOptions,urls:string[]) {
   };
   const endpoint=options.mediaType==="PHOTO"?
     "/v2/post/publish/content/init/":"/v2/post/publish/video/init/";
-  const result=await fetch(API+endpoint,{
-    method:"POST",headers:{"Authorization":"Bearer "+token,
-      "Content-Type":"application/json; charset=UTF-8"},
-    body:JSON.stringify(payload),redirect:"manual",
-  });
-  const data=await result.json().catch(()=>({})) as {
-    data?:{publish_id?:string};error?:{code?:string;message?:string};
-  };
-  // An explicit error code with no publish_id means TikTok created nothing.
-  if(data.error?.code&&data.error.code!=="ok")throw new TikTokRejected(safeTikTokCode(data.error.code));
-  if(!result.ok||data.error?.code!=="ok"||!data.data?.publish_id ||
-    data.data.publish_id.length>64) {
-    // No usable answer: the outcome is uncertain and stays for human review.
-    throw new Error("TikTok did not return a usable answer.");
-  }
-  return data.data.publish_id;
+  let result:Response;
+  try {
+    result=await fetch(API+endpoint,{
+      method:"POST",headers:{"Authorization":"Bearer "+token,
+        "Content-Type":"application/json; charset=UTF-8"},
+      body:JSON.stringify(payload),redirect:"manual",
+    });
+  }catch{throw new TikTokUncertain(null);}
+  const verdict=classifyTikTokInit<{publish_id?:string}>(result.status,
+    await result.json().catch(()=>({})) as {data?:{publish_id?:string};error?:{code?:string}});
+  if(verdict.kind==="rejected")throw new TikTokRejected(verdict.code);
+  if(verdict.kind==="uncertain")throw new TikTokUncertain(verdict.publishId);
+  return verdict.data.publish_id;
 }
 
 export async function startTikTokContentTransfer(
@@ -140,14 +137,14 @@ export async function startTikTokContentTransfer(
       postId,options.mode+" "+options.mediaType+"; processing by TikTok").catch(()=>undefined);
   }catch(error){
     if(error instanceof TikTokRejected){
-      await markTikTokRejected(env.DB,postId,error.code,actor);
-      throw error;
+      const recorded=await markTikTokRejected(env.DB,postId,when,error.code,actor).catch(()=>false);
+      if(recorded)throw error;
+      await markTikTokUncertain(env.DB,postId,when,null,
+        "TikTok refused the transfer, but GS Poster could not record it safely. Check TikTok, then clear this attempt.").catch(()=>undefined);
+      throw Error("TikTok refused the transfer ("+error.code+"), but GS Poster could not record it safely. Reload the post.");
     }
-    await env.DB.prepare(
-      "UPDATE tiktok_inbox_transfers SET status='needs_review',error=?,updated_at=? "+
-      "WHERE post_id=? AND status='transferring'"
-    ).bind("Transfer outcome uncertain or rejected. Check TikTok before attempting another transfer.",
-      new Date().toISOString(),postId).run().catch(()=>undefined);
+    await markTikTokUncertain(env.DB,postId,when,error instanceof TikTokUncertain?error.publishId:null,
+      "Transfer outcome uncertain. Check TikTok before attempting another transfer.").catch(()=>undefined);
     throw Error("TikTok transfer was not confirmed. Check TikTok and its permissions. No automatic retry was made.");
   }
   return (await getTikTokInboxTransfer(env.DB,postId))!;
