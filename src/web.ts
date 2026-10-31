@@ -26,7 +26,7 @@ import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
   markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
 } from "./facebook-queue.ts";
-import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost, editPendingCaptions, restoreCancelledPost } from "./publish.ts";
+import { approveAndPublish, backToDraft, cancelScheduled, refreshScheduled, rejectPost, retryFailedBluesky, retryFailedFacebook, reschedulePost, editPendingCaptions, restoreCancelledPost, isStuckPublishing, reconcileStuckPublishing } from "./publish.ts";
 import {
   checkCsrf,
   cookie,
@@ -121,7 +121,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -400,7 +400,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const tiktokConn = await tiktokConnection(env.DB);
   const tiktokTransfer = await getTikTokInboxTransfer(env.DB,p.id);
   const ttMedia=tiktokMedia(p);
-  const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at
+  // A draft may keep an old cancelled job row until it is approved again; hide it.
+  const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at && p.status !== "draft"
     ? await getFacebookUploadProgress(env.DB, p.id, p.images.length) : null;
   const message = state.message ?? p.message;
   const checks = p.facebook_enabled ? checkMessage(message, {hasImages:p.images.length>0||!!p.video}) : {errors:[],warnings:[]};
@@ -584,14 +585,24 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label for="reconcile-pin">PIN</label><input id="reconcile-pin" type="password" name="pin" required>
       <div class="row"><button class="primary">Mark verified Facebook post</button></div></form>
       <form method="post" action="/post/${p.id}/abandon-facebook">${hidden}
-      <p class="hint">Abandon stops further sending, without deleting anything already posted.</p>
+      <p class="hint">Abandon stops further sending, without deleting anything already posted. Afterwards you can move the post back to drafts, edit it and approve it again.</p>
       <label for="abandon-pin">PIN</label><input id="abandon-pin" type="password" name="pin" required>
       <div class="row"><button class="danger">Abandon unresolved Facebook queue</button></div></form></div>`;
+  }
+  // Issue #49: an approval request that ended before recording any result.
+  // Nothing is resent; the editor confirms absence on Facebook, then the post
+  // becomes `failed` and the existing PIN-gated redraft path applies.
+  if (!fbQueue && await isStuckPublishing(env.DB, p)) {
+    actions += `<form method="post" action="/post/${p.id}/reconcile-stuck" class="card">${hidden}
+      <p>This approval stopped before GS Poster recorded a Facebook result. Open Meta Business Suite and check both published and scheduled posts for this exact post. If it is there, leave this alone and note the Facebook post ID.</p>
+      <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post is neither published nor scheduled.</label>
+      <label for="stuck-pin">PIN</label><input id="stuck-pin" type="password" name="pin" inputmode="numeric" required>
+      <div class="row"><button>Mark as failed (sends nothing)</button></div></form>`;
   }
   if (p.status === "failed" && !p.fb_post_id &&
       !["scheduled", "publishing", "published"].includes(p.bluesky?.status ?? "")) {
     actions += `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
-      <p>Check Facebook first. This resets an unresolved failed draft without publishing it.</p>
+      <p>Check Facebook first. This moves the post back to drafts without publishing it, so you can edit it and approve it again later.</p>
       <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
       <label for="redraft-pin">PIN</label><input id="redraft-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button>Move back to drafts</button></div></form>`;
@@ -603,7 +614,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
     ${p.error ? `<div class="notice err">Publishing error: ${esc(p.error)}</div>` : ""}
     ${p.bluesky?.error ? `<div class="notice err">Bluesky error: ${esc(p.bluesky.error)}</div>` : ""}
-    ${fbQueue ? `<div class="notice">Facebook bulk upload: ${fbQueue.uploaded}/${fbQueue.total} photos. Status: ${esc(fbQueue.status)}.${fbQueue.error ? " " + esc(fbQueue.error) : ""}</div>` : ""}
+    ${fbQueue ? `<div class="notice">Facebook photo upload: ${fbQueue.uploaded}/${fbQueue.total} photos. Status: ${esc(fbQueue.status)}.${fbQueue.error ? " " + esc(fbQueue.error) : ""}</div>` : ""}
     ${p.status === "rejected" && p.note ? `<div class="notice">Your note for the drafting assistant: ${esc(p.note)}</div>` : ""}
     <div class="card preview">
       <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
@@ -817,6 +828,15 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         notice: confirmed ? "Verified Facebook post was recorded; no new post was sent." :
           "The Facebook post could not be reconciled.",
       });
+    }
+    if (action === "reconcile-stuck") {
+      if (form.get("confirmed_no_facebook") !== "1") {
+        return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
+      }
+      const reconciled = await reconcileStuckPublishing(env, id, String(form.get("expected_updated_at") || ""), session.login);
+      return reconciled
+        ? postPage(env, session, id, { notice: "Marked as failed. Nothing was sent. Move it back to drafts to approve it again." })
+        : postPage(env, session, id, { error: "This post is not eligible: it changed, is too recent, already has a Facebook result or has a queue job. Reload." }, 409);
     }
     if (action === "redraft" || action === "retry-facebook") {
       if (form.get("confirmed_no_facebook") !== "1") {
