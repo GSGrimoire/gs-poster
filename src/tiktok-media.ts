@@ -56,6 +56,12 @@ export async function saveTikTokVerificationFile(db:D1Database,filename:string,c
     "ON CONFLICT(filename) DO UPDATE SET contents=excluded.contents,updated_at=excluded.updated_at"
   ).bind(filename,contents,new Date().toISOString()).run();
 }
+/** Filenames only (never contents), for the settings readiness check. */
+export async function hostedTikTokVerificationFiles(db:D1Database):Promise<string[]> {
+  await ensureTikTokMediaSchema(db);
+  const rows=await db.prepare("SELECT filename FROM tiktok_media_verification ORDER BY updated_at DESC").all<{filename:string}>();
+  return rows.results.map(r=>r.filename);
+}
 export async function serveTikTokMedia(req:Request,env:Env):Promise<Response> {
   if(req.method!=="GET"&&req.method!=="HEAD")
     return new Response("Method not allowed",{status:405,headers:{Allow:"GET, HEAD"}});

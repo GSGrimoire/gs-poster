@@ -17,7 +17,7 @@ import { tiktokConnection } from "./tiktok.ts";
 import { tiktokOptionsPage } from "./tiktok-options.ts";
 import { serveTikTokMedia } from "./tiktok-media.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
-import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer } from "./tiktok-inbox.ts";
+import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
@@ -121,7 +121,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -443,8 +443,9 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to the inbox or initiating a private direct test.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
   }
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
-    if(!tiktokTransfer && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
-      <div class="eyebrow">TikTok · Ready for review</div>
+    const ttRetry=tiktokTransfer?.status==="rejected";
+    if((!tiktokTransfer||ttRetry) && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
+      <div class="eyebrow">TikTok · ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
       <h3 style="margin:8px 0">Choose your TikTok publishing path</h3>
       <p class="hint">Review the ${ttMedia.video?"video":"carousel"} before sending it to TikTok's inbox or starting a private Direct Post test. Both require a separate approval PIN. The calendar time does not trigger TikTok publication.</p>
       <p><a class="btn" href="/post/${p.id}/tiktok-options">Review TikTok posting options</a></p>
@@ -453,7 +454,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       actions += `<div class="card"><h2>TikTok inbox transfer</h2>
         <p>Status: <strong>${esc(tiktokTransfer.status.replaceAll("_"," "))}</strong></p>
         ${tiktokTransfer.error ? `<p class="notice err">${esc(tiktokTransfer.error)}</p>` : ""}
-        <p class="hint">${tiktokTransfer.post_mode==="DIRECT_POST"?"TikTok is processing a private Direct Post.":"Open TikTok to finish editing and publishing if this was an inbox transfer."}</p>
+        <p class="hint">${tiktokTransfer.status==="rejected"?"Nothing was created on TikTok. Fix the cause above, then use the TikTok posting options again.":
+          tiktokTransfer.status==="needs_review"?"The outcome is uncertain. Check TikTok before doing anything else.":
+          tiktokTransfer.post_mode==="DIRECT_POST"?"TikTok is processing a private Direct Post.":"Open TikTok to finish editing and publishing if this was an inbox transfer."}</p>
+        ${tiktokTransfer.status==="needs_review"&&!tiktokTransfer.publish_id?`<form method="post" action="/post/${p.id}/tiktok-clear">
+          ${hidden}<p class="hint">TikTok never returned a publish ID for this attempt. Check your TikTok inbox, drafts and profile first.</p>
+          <label><input type="checkbox" name="confirmed_not_on_tiktok" value="1" required> I checked TikTok and this ${tiktokTransfer.media_type==="VIDEO"?"video":"carousel"} is not there.</label>
+          <label for="tiktok-clear-pin">Approval PIN</label>
+          <input id="tiktok-clear-pin" name="pin" type="password" required>
+          <button type="submit">Clear this attempt (sends nothing)</button></form>`:""}
         ${tiktokTransfer.publish_id?`<form method="post" action="/post/${p.id}/tiktok-status">
           ${hidden}<label for="tiktok-status-pin">Approval PIN</label>
           <input id="tiktok-status-pin" name="pin" type="password" required>
@@ -780,6 +789,14 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         return postPage(env,session,id,{error:"Confirm that TikTok publication is manual."},400);
       await startTikTokInboxTransfer(env,id,String(form.get("expected_updated_at")||""),session.login);
       return postPage(env,session,id,{notice:"Video transferred to TikTok. Open your TikTok inbox to complete publication."});
+    }
+    if (action === "tiktok-clear") {
+      if (form.get("confirmed_not_on_tiktok") !== "1")
+        return postPage(env,session,id,{error:"Confirm you checked TikTok before clearing the attempt."},400);
+      const cleared=await clearUnconfirmedTikTokTransfer(env.DB,id,session.login);
+      return cleared
+        ? postPage(env,session,id,{notice:"TikTok attempt cleared. Nothing was sent. You can send it to TikTok again."})
+        : postPage(env,session,id,{error:"This TikTok attempt cannot be cleared: it has a TikTok publish ID or is not awaiting review."},409);
     }
     if (action === "tiktok-status") {
       const checked=await refreshTikTokInboxTransfer(env,id,session.login);

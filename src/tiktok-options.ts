@@ -15,7 +15,8 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const conn=await tiktokConnection(env.DB);
   if(!conn)return html(page("Connect TikTok",
     '<p><a href="/tiktok/settings">Connect TikTok first.</a></p>',{login:session.login}),{status:409});
-  if(await getTikTokInboxTransfer(env.DB,postId))
+  const existing=await getTikTokInboxTransfer(env.DB,postId);
+  if(existing&&existing.status!=="rejected")
     return html(page("Existing transfer",
       '<p>A TikTok transfer already exists. Review it on the post page before sending again.</p>'+
       '<p><a href="/post/'+esc(postId)+'">Back to post</a></p>',

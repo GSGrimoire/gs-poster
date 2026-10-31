@@ -6,7 +6,7 @@ import type {Env} from "./env.ts";
 import {getPost,audit,tiktokMedia} from "./db.ts";
 import {tiktokAccessToken,getTikTokCreatorOptions} from "./tiktok.ts";
 import {createTikTokMediaGrant,ensureTikTokMediaSchema} from "./tiktok-media.ts";
-import {ensureTikTokInboxSchema,getTikTokInboxTransfer,type TikTokInboxTransfer} from "./tiktok-inbox.ts";
+import {ensureTikTokInboxSchema,getTikTokInboxTransfer,markTikTokRejected,safeTikTokCode,TikTokRejected,TIKTOK_CLAIM_CONFLICT,type TikTokInboxTransfer} from "./tiktok-inbox.ts";
 import {parseUploadRef} from "./upload.ts";
 
 export type TikTokPostMode="MEDIA_UPLOAD"|"DIRECT_POST";
@@ -67,12 +67,12 @@ async function contentInit(env:Env,options:TikTokPostOptions,urls:string[]) {
   const data=await result.json().catch(()=>({})) as {
     data?:{publish_id?:string};error?:{code?:string;message?:string};
   };
+  // An explicit error code with no publish_id means TikTok created nothing.
+  if(data.error?.code&&data.error.code!=="ok")throw new TikTokRejected(safeTikTokCode(data.error.code));
   if(!result.ok||data.error?.code!=="ok"||!data.data?.publish_id ||
     data.data.publish_id.length>64) {
-    // Permit the platform's known error code, but never expose tokens or URLs.
-    const code=String(data.error?.code||"unknown");
-    throw new Error("TikTok rejected the transfer ("+
-      (/^[a-z0-9_]{1,100}$/.test(code)?code:"unknown")+").");
+    // No usable answer: the outcome is uncertain and stays for human review.
+    throw new Error("TikTok did not return a usable answer.");
   }
   return data.data.publish_id;
 }
@@ -120,9 +120,9 @@ export async function startTikTokContentTransfer(
   // calling TikTok prevents concurrent duplicate publishes.
   const when=new Date().toISOString();
   const inserted=await env.DB.prepare(
-    "INSERT OR IGNORE INTO tiktok_inbox_transfers "+
+    "INSERT INTO tiktok_inbox_transfers "+
     "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by,error,remote_status,post_mode,media_type) "+
-    "VALUES (?,'transferring',NULL,?,?,?,?,NULL,NULL,?,?)"
+    "VALUES (?,'transferring',NULL,?,?,?,?,NULL,NULL,?,?)"+TIKTOK_CLAIM_CONFLICT
   ).bind(postId,JSON.stringify(refs),when,when,actor,options.mode,options.mediaType).run();
   if(inserted.meta.changes!==1)
     throw Error("A TikTok transfer already exists for this post; check its status before retrying.");
@@ -138,7 +138,11 @@ export async function startTikTokContentTransfer(
     await audit(env.DB,actor,
       options.mode==="DIRECT_POST"?"tiktok-direct-post-started":"tiktok-carousel-upload-started",
       postId,options.mode+" "+options.mediaType+"; processing by TikTok").catch(()=>undefined);
-  }catch{
+  }catch(error){
+    if(error instanceof TikTokRejected){
+      await markTikTokRejected(env.DB,postId,error.code,actor);
+      throw error;
+    }
     await env.DB.prepare(
       "UPDATE tiktok_inbox_transfers SET status='needs_review',error=?,updated_at=? "+
       "WHERE post_id=? AND status='transferring'"
