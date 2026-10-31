@@ -12,7 +12,7 @@ import {
   TIKTOK_SCOPES,tiktokConfigured,tiktokConnection,tiktokRedirect,tiktokStateCookie,
 } from "./tiktok.ts";
 import {tiktokCallbackPlaceholder} from "./public-pages.ts";
-import {saveTikTokVerificationFile,TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
+import {saveTikTokVerificationFile,hostedTikTokVerificationFiles,TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
 const redirect=(location:string,cookieValue?:string):Response=>{
   const h=new Headers({Location:location,"Cache-Control":"no-store","Referrer-Policy":"no-referrer"});
@@ -66,12 +66,14 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   const enabled=tiktokConfigured(env);
   const csrf=await csrfToken(env,session);
   const granted=conn?.scopes.split(",").filter(Boolean)||[];
+  const hosted=await hostedTikTokVerificationFiles(env.DB);
   const readiness=`<div class="step-card">
       <div class="eyebrow">Connection readiness</div>
       <div class="summary-row"><span><span class="status-led ${enabled?"":"err"}"></span>Worker credentials</span><strong>${enabled?"Configured":"Action needed"}</strong></div>
       <div class="summary-row"><span><span class="status-led ${conn?"":"warn"}"></span>TikTok account</span><strong>${conn?"Connected":"Not connected"}</strong></div>
-      <div class="summary-row"><span><span class="status-led warn"></span>Media URL ownership</span><strong>Confirm in TikTok</strong></div>
-      <p class="rail-note">The last step is verified in TikTok's developer portal. GS Poster cannot check it automatically.</p>
+      <div class="summary-row"><span><span class="status-led ${hosted.length?"warn":"err"}"></span>Media URL ownership</span><strong>${hosted.length?"File hosted · confirm in TikTok":"Action needed: no verification file hosted"}</strong></div>
+      <p class="rail-note">${hosted.length?"The last step is verified in TikTok's developer portal. GS Poster cannot check it automatically.":
+        "Photo carousels fail with url_ownership_unverified until step 2 below is done."}</p>
     </div>`;
   const body=`<div class="hero">
     <div class="hero-kicker">GS Grimoire · Social connections</div>
