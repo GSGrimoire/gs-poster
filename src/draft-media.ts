@@ -17,21 +17,22 @@ export function draftMediaPanel(post: Post, csrf: string): string {
 .media-targets{display:flex;gap:15px;flex-wrap:wrap}
 .media-targets label{margin:0;display:flex;align-items:center;gap:7px}
 </style>
-<div class="card" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
+<div class="adders" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
  data-version="${esc(post.updated_at)}" data-facebook="${post.facebook_enabled ? "1" : "0"}"
  data-bluesky="${post.bluesky ? "1" : "0"}" data-tiktok="${post.tiktok_enabled ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}" data-tiktok-images="${tt.images.length}">
-  <h2>Add images to this draft</h2>
-  <p class="hint">Drop JPG, PNG or GIF images here, or select files. Files go into GS Poster's private storage and are attached to the chosen draft targets. No GitHub image commit and no publishing.</p>
+  <details class="adder" id="add-photos"><summary>+ Add photos</summary>
+  <p class="hint">JPG, PNG or GIF, up to 10 MB each. Choose which platforms get each photo. Files stay private; nothing is published.</p>
   <div id="media-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop images">
     Drop images here, or click to choose
     <input type="file" id="media-files" accept=".jpg,.jpeg,.png,.gif,image/jpeg,image/png,image/gif" multiple hidden>
   </div>
   <div id="media-upload-items" class="media-files" aria-live="polite"></div>
-  <p class="hint">Provide descriptive alternative text for each Bluesky image. Independent limits: 4 Bluesky images, 35 TikTok images, and 80 Facebook images. Choose destinations per file. Private uploads expire after 45 days, so do not schedule posts using them more than 45 days out.</p>
+  <p class="hint">Limits: 4 Bluesky, 35 TikTok and 80 Facebook photos. Bluesky photos need a description. Uploads are kept 45 days.</p>
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
-  <h2>${post.video || post.bluesky?.video || tt.video ? "Replace video in this draft" : "Add a video to this draft"}</h2>
-  <p class="hint">MP4 up to 20 MB. Videos and image galleries cannot be combined on the same platform. Uploading a new video replaces the previous video only on the platforms you select. No publication takes place.</p>
+  </details>
+  <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video ? "+ Replace video" : "+ Add video"}</summary>
+  <p class="hint">One MP4, up to 20 MB. A platform can have photos or a video, not both. Nothing is published.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
     <input type="file" id="video-file" accept=".mp4,video/mp4" hidden>
@@ -47,6 +48,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
   <div class="row"><button type="button" class="primary" id="video-upload-submit" disabled>${post.video || post.bluesky?.video || tt.video ? "Upload and replace video" : "Upload and attach video"}</button></div>
   <div id="video-upload-status" class="hint" role="status" aria-live="polite"></div>
+  </details>
 </div>
 <script src="/draft-media.js" defer></script>
 `;
@@ -187,8 +189,10 @@ export const DRAFT_MEDIA_JS = `
     return v;
   }
 
+  const unsaved = () => typeof window.gsEditorDirty === "function" && window.gsEditorDirty();
   videoSubmit.addEventListener("click",async()=>{
     if(running || !selectedVideo)return;
+    if(unsaved()){videoStatus.textContent="Save your text changes first, then add the video.";return;}
     const facebook=!!videoFacebook.checked,bluesky=!!videoBluesky.checked,tiktok=!!videoTikTok.checked;
     if (!facebook && !bluesky && !tiktok) {videoStatus.textContent="Choose at least one available platform.";return;}
     const alt=videoAlt.value.trim();
@@ -215,6 +219,7 @@ export const DRAFT_MEDIA_JS = `
   });
   submit.addEventListener("click", async () => {
     if (running) return;
+    if (unsaved()) {status.textContent = "Save your text changes first, then add photos.";return;}
     running = true;submit.disabled = true;status.textContent = "";
     let completed = 0;
     for (const item of files) {

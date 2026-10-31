@@ -4,7 +4,7 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
@@ -19,6 +19,7 @@ import { serveTikTokMedia } from "./tiktok-media.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
 import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
+import { DRAFT_EDITOR_JS, parseEditorForm, renderDraftEditor } from "./draft-editor.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
@@ -112,6 +113,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     return tiktokSettingsAction(req,env,session,path.split("/").pop()!);
 
   if (path === "/new-draft.js" && req.method === "GET") return new Response(NEW_DRAFT_JS, {headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+  if (path === "/draft-editor.js" && req.method === "GET") return new Response(DRAFT_EDITOR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
@@ -121,7 +123,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -471,6 +473,23 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       </div>`;
     }
   }
+  // Unapproved drafts get the one-page editor; the TikTok card goes in its rail.
+  if (["draft", "rejected"].includes(p.status) && !p.approved_at) {
+    const minLead = p.facebook_enabled && p.images.length > BULK_FACEBOOK_THRESHOLD ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
+    const timeProblem = p.scheduled_at ? checkWhen(new Date(p.scheduled_at), new Date(), minLead) : null;
+    const releaseProblems = [
+      ...(p.facebook_enabled && !p.message.trim() && !p.images.length && !p.video ? ["Facebook needs a caption or a photo."] : []),
+      ...(bs ? checkBluesky(bs).map((x) => "Bluesky: " + x) : []),
+      ...(timeProblem ? [timeProblem + " Change the time and save."] : []),
+    ];
+    const editor = renderDraftEditor({
+      post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p), error: state.error, notice: state.notice,
+      checksHtml: checkList, releaseProblems, mediaPanel: draftMediaPanel(p, csrf), tiktokCard: actions,
+      mediaLooksPending: p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release),
+      createdLine: `Drafted by ${p.created_by ?? "?"} · ${formatLocal(new Date(p.created_at), env.TIMEZONE)} · ${p.id}`,
+    });
+    return html(page(p.label || "Draft", editor, { login: session.login, wide: true }), { status });
+  }
   if (p.status === "draft" && (p.facebook_enabled || p.bluesky)) {
     actions += `
       <form method="post" action="/post/${p.id}/approve" class="card">
@@ -545,7 +564,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
   }
-  if ((p.status === "scheduled" || p.status === "draft" || p.status === "rejected") && p.scheduled_at) {
+  if (p.status === "scheduled" && p.scheduled_at) {
     actions += `<form method="post" action="/post/${p.id}/reschedule" class="card">${hidden}
       <h2>Change release time</h2>
       <p class="hint">Moves the pending schedule without creating another post. Facebook and Bluesky are updated together when both are pending.</p>
@@ -554,7 +573,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label for="move-pin">Approval PIN</label><input id="move-pin" type="password" name="pin" required autocomplete="off">
       <div class="row"><button class="primary">Save new time</button></div></form>`;
   }
-  if (p.status === "draft" || p.status === "rejected" || p.status === "scheduled") {
+  if (p.status === "scheduled") {
     actions += `<form method="post" action="/post/${p.id}/edit-caption" class="card">${hidden}
       <h2>Edit unreleased captions</h2>
       <p class="hint">Save caption changes without publishing. Media and publishing targets are fixed after approval. An approved post will be updated on Facebook where supported.</p>
@@ -738,20 +757,36 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     return postPage(env, session, id, { error: "The form expired. Reload the page and try again." }, 403);
   }
 
+  // Saving an unapproved draft is not a release, so it needs no PIN (owner
+  // decision, 31 Oct 2026). Session, same-origin, CSRF and the version fence
+  // above and in saveEditorDraft still apply. Approving still needs the PIN.
+  if (action === "save") {
+    const current = await getPost(env.DB, id);
+    if (!current || !["draft", "rejected"].includes(current.status) || current.approved_at)
+      return postPage(env, session, id, { error: "Only unapproved drafts can be edited here." }, 409);
+    const version = String(form.get("expected_updated_at") ?? "");
+    if (version !== current.updated_at)
+      return postPage(env, session, id, { error: "This draft changed somewhere else since you opened it. Your edits were not saved. Reload and edit again." }, 409);
+    const parsed = parseEditorForm(form, current, env.TIMEZONE);
+    if (parsed.errors.length || !parsed.next)
+      return postPage(env, session, id, { error: "Not saved: " + parsed.errors.join(" ") }, 400);
+    const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null);
+    if (!saved) return postPage(env, session, id, { error: "This draft changed while saving. Your edits were not saved. Reload and edit again." }, 409);
+    await audit(env.DB, session.login, current.status === "rejected" ? "revised-rejected" : "edited", id, "web editor");
+    return postPage(env, session, id, { notice: "Saved. Nothing was published." });
+  }
   if (action === "reject") {
     const ok = await rejectPost(env, id, String(form.get("reason") || "").slice(0, 500), session.login);
     return ok ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Only drafts can be rejected." }, 409);
   }
   // All publication, cancellation and failed-target recovery require the PIN
-  const message = String(form.get("message") ?? "");
   const whenRaw = String(form.get("when") ?? "").trim();
-  const keep = { message: action === "approve" ? message : undefined, when: action === "approve" ? whenRaw : undefined };
-  if (!env.APPROVE_PIN) return postPage(env, session, id, { ...keep, error: "APPROVE_PIN is not set, so nothing can be approved yet." }, 503);
-  if (await pinLocked(env.DB)) return postPage(env, session, id, { ...keep, error: "Too many wrong PINs. Approvals are locked for up to an hour." }, 429);
+  if (!env.APPROVE_PIN) return postPage(env, session, id, { error: "APPROVE_PIN is not set, so nothing can be approved yet." }, 503);
+  if (await pinLocked(env.DB)) return postPage(env, session, id, { error: "Too many wrong PINs. Approvals are locked for up to an hour." }, 429);
   if (!safeEqual(String(form.get("pin") || ""), env.APPROVE_PIN)) {
     await recordPinFailure(env.DB);
     await audit(env.DB, session.login, "wrong-pin", id);
-    return postPage(env, session, id, { ...keep, error: "Wrong PIN." }, 403);
+    return postPage(env, session, id, { error: "Wrong PIN." }, 403);
   }
 
   try {
@@ -893,58 +928,38 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       const succeeded = await retryFailedBluesky(env, id, session.login);
       return postPage(env, session, id, { notice: succeeded ? "Bluesky published." : "Bluesky retry failed. Review the error." });
     }
-    // approve: validate the human-selected targets before the atomic publishing claim.
+    // approve: release exactly the SAVED draft. The form carries only targets,
+    // confirmations, the PIN and the version; captions, media and time come
+    // from the database and are fenced by expected_updated_at in claimForPublish.
     const current = await getPost(env.DB, id);
     if (!current || current.status !== "draft") return postPage(env, session, id, { error: "Only drafts can be approved." }, 409);
     if (String(form.get("expected_updated_at") ?? "") !== current.updated_at) {
       return postPage(env, session, id, { error: "The draft changed since you opened this page. Reload and review the current version before approving." }, 409);
     }
-    const facebook = form.get("target_facebook") === "1";
-    const blueskySelected = form.get("target_bluesky") === "1";
-    if (!facebook && !blueskySelected) return postPage(env, session, id, { ...keep, error: "Choose at least one target." }, 400);
+    const facebook = current.facebook_enabled && form.get("target_facebook") === "1";
+    const blueskySelected = !!current.bluesky && form.get("target_bluesky") === "1";
+    if (!facebook && !blueskySelected) return postPage(env, session, id, { error: "Choose at least one target." }, 400);
     if (facebook && !current.images.length && !current.video && mediaLooksPending(current.label, current.release) &&
         form.get("publish_without_media") !== "1") {
-      return postPage(env, session, id, { ...keep, error: "This post's name says media is pending, but Facebook has no images or video. Attach the media, or tick \"Publish without media anyway\"." }, 400);
+      return postPage(env, session, id, { error: "This post's name says media is pending, but Facebook has no images or video. Attach the media, or tick \"Publish without media anyway\"." }, 400);
     }
     if (facebook && current.images.length > 12 && form.get("reviewed_all_images") !== "1") {
       return postPage(env, session, id, { error: "Review every photo before approving this large Facebook post." }, 400);
     }
-    if (facebook && !message.trim() && !current.images.length && !current.video) {
-      return postPage(env, session, id, { ...keep, error: "The Facebook post needs a caption or image." }, 400);
+    if (facebook && !current.message.trim() && !current.images.length && !current.video) {
+      return postPage(env, session, id, { error: "The Facebook post needs a caption or image." }, 400);
     }
-    let bluesky: BlueskyDraft | null = null;
-    if (blueskySelected) {
-      const images = Array.from({ length: 4 }, (_, i) => ({
-        url: String(form.get("bs_image_" + i) || "").trim(),
-        alt: String(form.get("bs_alt_" + i) || "").trim(),
-      })).filter((img) => img.url || img.alt);
-      const patreonUrl = String(form.get("bs_patreon_url") || "").trim();
-      bluesky = {
-        caption: String(form.get("bs_caption") || ""),
-        images,
-        video: String(form.get("bs_video_url") || "").trim() || String(form.get("bs_video_alt") || "").trim()
-          ? { url: String(form.get("bs_video_url") || "").trim(), alt: String(form.get("bs_video_alt") || "").trim() }
-          : null,
-        patreon: patreonUrl ? {
-          url: patreonUrl, title: String(form.get("bs_patreon_title") || ""),
-          description: String(form.get("bs_patreon_description") || ""),
-        } : null,
-      };
+    const bluesky: BlueskyDraft | null = blueskySelected ? current.bluesky : null;
+    if (bluesky) {
       const problems = checkBluesky(bluesky);
-      if (problems.length) return postPage(env, session, id, { ...keep, error: problems.join(" ") }, 400);
+      if (problems.length) return postPage(env, session, id, { error: "Fix in the editor and save first: " + problems.join(" ") }, 400);
     }
-    let when: Date | null = null;
-    if (whenRaw) {
-      try {
-        when = localToUtc(whenRaw, env.TIMEZONE);
-      } catch {
-        return postPage(env, session, id, { ...keep, error: "Could not read the publish time." }, 400);
-      }
-    }
+    const message = current.message;
+    const when: Date | null = current.scheduled_at ? new Date(current.scheduled_at) : null;
     const minLead = facebook && current.images.length > BULK_FACEBOOK_THRESHOLD
       ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
     const timeErr = checkWhen(when, new Date(), minLead);
-    if (timeErr) return postPage(env, session, id, { ...keep, error: timeErr }, 400);
+    if (timeErr) return postPage(env, session, id, { error: timeErr + " Change the time in the editor and save." }, 400);
 
     if (facebook && current.video) {
       if (current.images.length) return postPage(env,session,id,
@@ -983,7 +998,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       notice: result.status === "scheduled" ? `Scheduled for ${whenText(env, result)}.` : "Approved. Review each target status below.",
     });
   } catch (e) {
-    return postPage(env, session, id, { ...keep, error: e instanceof Error ? e.message : String(e) }, 409);
+    return postPage(env, session, id, { error: e instanceof Error ? e.message : String(e) }, 409);
   }
 }
 

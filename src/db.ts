@@ -418,6 +418,60 @@ export async function updatePost(db: D1Database, id: string, patch: Patch, onlyI
 }
 
 
+/** What the web editor may change on an unapproved draft. Media can only be
+ * removed or re-described here; new media still arrives through the private
+ * upload and attach routes. */
+export interface EditorDraft {
+  message: string;
+  tiktok_caption: string | null;
+  images: string[];
+  tiktok_images: string[] | null;
+  video: string | null;
+  tiktok_video: string | null;
+  facebook_enabled: boolean;
+  tiktok_enabled: boolean;
+  scheduled_at: string | null;
+  label: string | null;
+  release: string | null;
+}
+
+/**
+ * Save the web editor in ONE D1 transaction, fenced by the version the editor
+ * loaded. Only unapproved drafts and rejected posts change; a rejected post
+ * returns to draft. Never approves, schedules or publishes anything.
+ * Returns the new version, or null if the post changed or is not editable.
+ */
+export async function saveEditorDraft(
+  db: D1Database, id: string, expectedVersion: string, next: EditorDraft, bluesky: BlueskyDraft | null,
+): Promise<string | null> {
+  await ensureSchema(db);
+  if (!Number.isFinite(Date.parse(expectedVersion))) return null;
+  const version = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
+  const fenced = "EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ? AND status = 'draft' AND approved_at IS NULL)";
+  const statements = [
+    db.prepare(`UPDATE posts SET status = 'draft', message = ?, tiktok_caption = ?, images = ?, tiktok_images = ?,
+        video = ?, tiktok_video = ?, facebook_enabled = ?, tiktok_enabled = ?, scheduled_at = ?, label = ?, release = ?,
+        updated_at = ?
+      WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL`)
+      .bind(next.message, next.tiktok_caption, JSON.stringify(next.images),
+        next.tiktok_images === null ? null : JSON.stringify(next.tiktok_images),
+        next.video, next.tiktok_video, next.facebook_enabled ? 1 : 0, next.tiktok_enabled ? 1 : 0,
+        next.scheduled_at, next.label, next.release, version, id, expectedVersion),
+    bluesky
+      ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, video, patreon, facebook_enabled)
+          SELECT ?, ?, ?, ?, ?, ? WHERE ${fenced}
+          ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, images = excluded.images,
+            video = excluded.video, patreon = excluded.patreon, facebook_enabled = excluded.facebook_enabled,
+            status = 'draft', uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL, started_at = NULL`)
+        .bind(id, bluesky.caption, JSON.stringify(bluesky.images),
+          bluesky.video ? JSON.stringify(bluesky.video) : null,
+          bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, id, version)
+      : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version),
+  ];
+  const results = await db.batch(statements);
+  return (results[0].meta.changes ?? 0) === 1 ? version : null;
+}
+
 /** Draft-only Bluesky edits. Non-Bluesky drafts always publish to Facebook. */
 export async function saveBlueskyDraft(
   db: D1Database, id: string, draft: BlueskyDraft | null, facebookEnabled: boolean,
