@@ -76,3 +76,12 @@ export function checkWhen(when: Date | null, now: Date, minLeadMs: number): stri
   if (lead > FB_MAX_LEAD_MS) return "Facebook only schedules up to 30 days ahead.";
   return null;
 }
+
+/**
+ * A label or release that says media is still on its way ("images pending",
+ * "HOLD", "7 slides to attach"). Approving such a post with no media needs an
+ * explicit extra confirmation: two posts went out empty this way in Oct 2026.
+ */
+export function mediaLooksPending(label: string | null | undefined, release: string | null | undefined): boolean {
+  return /\b(pending|hold|attach|to attach|tba|tbd)\b/i.test(`${label ?? ""} ${release ?? ""}`);
+}

@@ -44,7 +44,7 @@ import {
 } from "./session.ts";
 import { isSameOrigin } from "./origin.ts";
 import { formatLocal, localToUtc, toLocalInput } from "./time.ts";
-import { APPROVE_MIN_LEAD_MS, checkMessage, checkWhen } from "./validate.ts";
+import { APPROVE_MIN_LEAD_MS, checkMessage, checkWhen, mediaLooksPending } from "./validate.ts";
 
 const redirect = (location: string, headers?: Headers): Response => {
   const h = headers ?? new Headers();
@@ -408,6 +408,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const checkList = [
     ...checks.errors.map((e) => `<li class="e">${esc(e)}</li>`),
     ...checks.warnings.map((w) => `<li class="w">${esc(w)}</li>`),
+    ...(p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release)
+      ? ['<li class="e">The name says media is pending, but Facebook has no images or video yet.</li>'] : []),
     ...(p.tiktok_enabled && (p.tiktok_caption??p.message).length>(ttMedia.video?2200:4000)
       ? ['<li class="e">TikTok caption is too long for this format.</li>'] : []),
     ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
@@ -494,6 +496,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <input id="when" type="datetime-local" name="when" value="${esc(whenValue)}">
         <p class="hint">Leave empty to post the moment you approve. Otherwise between 12 minutes and 30 days from now.</p>
         ${p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed every photo in the full sequence above.</label>` : ""}
+        ${mediaLooksPending(p.label, p.release) && !p.images.length && !p.video ? `<label><input type="checkbox" name="publish_without_media" value="1"> This post's name says media is pending, but it has no images or video. Publish without media anyway.</label>` : ""}
         <label for="pin">PIN</label>
         <input id="pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
         <div class="row"><button class="primary">Approve and ${p.scheduled_at ? "schedule" : "post"}</button></div>
@@ -900,6 +903,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const facebook = form.get("target_facebook") === "1";
     const blueskySelected = form.get("target_bluesky") === "1";
     if (!facebook && !blueskySelected) return postPage(env, session, id, { ...keep, error: "Choose at least one target." }, 400);
+    if (facebook && !current.images.length && !current.video && mediaLooksPending(current.label, current.release) &&
+        form.get("publish_without_media") !== "1") {
+      return postPage(env, session, id, { ...keep, error: "This post's name says media is pending, but Facebook has no images or video. Attach the media, or tick \"Publish without media anyway\"." }, 400);
+    }
     if (facebook && current.images.length > 12 && form.get("reviewed_all_images") !== "1") {
       return postPage(env, session, id, { error: "Review every photo before approving this large Facebook post." }, 400);
     }
