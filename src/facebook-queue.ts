@@ -59,12 +59,25 @@ export async function getFacebookUploadProgress(db: D1Database, postId: string, 
   return job ? { uploaded: job.next_index, total, status: job.status, error: job.error } : null;
 }
 
-/** Called only after claimForPublish and the human PIN gate. */
+/**
+ * Called only after claimForPublish and the human PIN gate.
+ *
+ * A post that went back to drafts after an abandoned queue (`cancelled`) or a
+ * verified-absent cancelled schedule (`done`) still has its old job row. A
+ * fresh approval of that draft resets the row in the same statement: old media
+ * ids, index, lease and error are discarded. Rows that are `uploading`, `busy`,
+ * `sending` or `failed` are never touched, so an active or ambiguous queue can
+ * never be reactivated or resent from here. The post must have no recorded
+ * Facebook id; both redraft paths refuse or clear it only after human checks.
+ */
 export async function enqueueFacebookUpload(env: Env, postId: string): Promise<void> {
   await ensureFacebookQueue(env.DB);
   const res = await env.DB.prepare(`INSERT INTO facebook_upload_jobs (post_id)
     SELECT id FROM posts WHERE id = ? AND status = 'publishing' AND approved_at IS NOT NULL
-    ON CONFLICT(post_id) DO NOTHING`).bind(postId).run();
+      AND fb_post_id IS NULL
+    ON CONFLICT(post_id) DO UPDATE SET media_ids = '[]', next_index = 0, status = 'uploading',
+      started_at = NULL, error = NULL
+    WHERE facebook_upload_jobs.status IN ('cancelled','done')`).bind(postId).run();
   if ((res.meta.changes ?? 0) !== 1) throw new Error("Could not enqueue the approved Facebook upload.");
 }
 
@@ -176,7 +189,7 @@ export async function abandonFacebookUpload(env: Env, id: string, actor: string)
     WHERE post_id = ? AND status IN ('failed','sending')`).bind(id).run();
   if ((result.meta.changes ?? 0) !== 1) return false;
   await updatePost(env.DB, id, {
-    status: "failed", error: "The Facebook bulk queue was abandoned after manual reconciliation; no further Facebook sends are allowed.",
+    status: "failed", error: "The Facebook queue was abandoned after manual reconciliation. Nothing more will be sent for this approval. Check Facebook, then move it back to drafts to edit and approve it again.",
   }, ["publishing"]);
   await audit(env.DB, actor, "facebook-bulk-abandoned", id);
   return true;

@@ -400,7 +400,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const tiktokConn = await tiktokConnection(env.DB);
   const tiktokTransfer = await getTikTokInboxTransfer(env.DB,p.id);
   const ttMedia=tiktokMedia(p);
-  const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at
+  // A draft may keep an old cancelled job row until it is approved again; hide it.
+  const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at && p.status !== "draft"
     ? await getFacebookUploadProgress(env.DB, p.id, p.images.length) : null;
   const message = state.message ?? p.message;
   const checks = p.facebook_enabled ? checkMessage(message, {hasImages:p.images.length>0||!!p.video}) : {errors:[],warnings:[]};
@@ -584,7 +585,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label for="reconcile-pin">PIN</label><input id="reconcile-pin" type="password" name="pin" required>
       <div class="row"><button class="primary">Mark verified Facebook post</button></div></form>
       <form method="post" action="/post/${p.id}/abandon-facebook">${hidden}
-      <p class="hint">Abandon stops further sending, without deleting anything already posted.</p>
+      <p class="hint">Abandon stops further sending, without deleting anything already posted. Afterwards you can move the post back to drafts, edit it and approve it again.</p>
       <label for="abandon-pin">PIN</label><input id="abandon-pin" type="password" name="pin" required>
       <div class="row"><button class="danger">Abandon unresolved Facebook queue</button></div></form></div>`;
   }
@@ -601,7 +602,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   if (p.status === "failed" && !p.fb_post_id &&
       !["scheduled", "publishing", "published"].includes(p.bluesky?.status ?? "")) {
     actions += `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
-      <p>Check Facebook first. This resets an unresolved failed draft without publishing it.</p>
+      <p>Check Facebook first. This moves the post back to drafts without publishing it, so you can edit it and approve it again later.</p>
       <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
       <label for="redraft-pin">PIN</label><input id="redraft-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button>Move back to drafts</button></div></form>`;
