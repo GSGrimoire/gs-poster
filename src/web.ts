@@ -623,6 +623,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   // becomes `failed` and the existing PIN-gated redraft path applies.
   if (!fbQueue && await isStuckPublishing(env.DB, p)) {
     actions += `<form method="post" action="/post/${p.id}/reconcile-stuck" class="card">${hidden}
+      ${p.approved_at ? "" : '<p class="hint">This post was approved with an older version of GS Poster that did not record the approval time. It is recovered the same way.</p>'}
       <p>This approval stopped before GS Poster recorded a Facebook result. Open Meta Business Suite and check both published and scheduled posts for this exact post. If it is there, leave this alone and note the Facebook post ID.</p>
       <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post is neither published nor scheduled.</label>
       <label for="stuck-pin">PIN</label><input id="stuck-pin" type="password" name="pin" inputmode="numeric" required>

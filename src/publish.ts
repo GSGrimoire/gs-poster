@@ -197,10 +197,18 @@ export const STUCK_PUBLISHING_MS = 15 * 60_000;
 
 /** A `publishing` post with no Facebook id and no queue job: the approval request
  * ended before recording any result (issue #49). Read-only check used by the page. */
+/**
+ * `approved_at` is deliberately NOT required. GS Poster v0.1.0 (live until
+ * 27 Oct 2026) moved a PIN-approved post to `publishing` first and wrote
+ * `approved_at` only after Facebook answered, so a request that died mid-upload
+ * left `publishing` with `approved_at = NULL`. Current code sets both in one
+ * claim. Such legacy records are recovered the same way and never backfilled.
+ */
 export async function isStuckPublishing(db: D1Database, p: Post, now = Date.now()): Promise<boolean> {
-  if (p.status !== "publishing" || !p.approved_at || !p.facebook_enabled || p.fb_post_id) return false;
+  if (p.status !== "publishing" || !p.facebook_enabled || p.fb_post_id) return false;
   if (now - Date.parse(p.updated_at) < STUCK_PUBLISHING_MS) return false;
-  if (p.bluesky?.status === "publishing") return false;
+  if (p.bluesky && (["scheduled", "publishing", "published"].includes(p.bluesky.status) ||
+      p.bluesky.uri || p.bluesky.cid || p.bluesky.card_uri || p.bluesky.permalink)) return false;
   await ensureFacebookQueue(db);
   const job = await db.prepare("SELECT 1 AS present FROM facebook_upload_jobs WHERE post_id = ?").bind(p.id).first();
   return !job;
@@ -218,17 +226,23 @@ export async function reconcileStuckPublishing(
   const p = await getPost(env.DB, id);
   if (!p || p.updated_at !== expectedVersion || !(await isStuckPublishing(env.DB, p, now))) return false;
   const cutoff = new Date(now - STUCK_PUBLISHING_MS).toISOString();
+  const legacy = !p.approved_at;
   const res = await env.DB.prepare(`UPDATE posts SET status = 'failed', error = ?, updated_at = ?
-    WHERE id = ? AND status = 'publishing' AND approved_at IS NOT NULL AND facebook_enabled = 1
+    WHERE id = ? AND status = 'publishing' AND facebook_enabled = 1
       AND fb_post_id IS NULL AND updated_at = ? AND updated_at <= ?
-      AND NOT EXISTS (SELECT 1 FROM facebook_upload_jobs WHERE post_id = ?)`)
+      AND NOT EXISTS (SELECT 1 FROM facebook_upload_jobs WHERE post_id = ?)
+      AND NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND
+        (b.status IN ('scheduled','publishing','published') OR b.uri IS NOT NULL OR b.cid IS NOT NULL
+         OR b.card_uri IS NOT NULL OR b.permalink IS NOT NULL))`)
     .bind(
-      "The approval request ended before a Facebook result was recorded. " +
-        "The editor confirmed on Facebook that no post exists. Nothing was resent.",
+      "The approval request ended before a Facebook result was recorded" +
+        (legacy ? " (approved with an older GS Poster version that did not record the approval time)" : "") +
+        ". The editor confirmed on Facebook that no post exists. Nothing was resent.",
       new Date(now).toISOString(), id, expectedVersion, cutoff, id,
     ).run();
   if ((res.meta.changes ?? 0) !== 1) return false;
-  await audit(env.DB, actor, "stuck-publishing-reconciled", id, "confirmed absent on Facebook");
+  await audit(env.DB, actor, "stuck-publishing-reconciled", id,
+    "confirmed absent on Facebook" + (legacy ? "; legacy record without approved_at" : ""));
   return true;
 }
 
