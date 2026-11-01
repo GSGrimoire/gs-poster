@@ -66,7 +66,7 @@ test("cancelled video safely reopens to a draft only when deleted on Facebook",a
     assert.equal(restored.message,p.message);
     assert.equal(await restoreCancelledPost(env,p.id,p.updated_at,"reviewer"),false);
     const panel=draftMediaPanel(restored,"csrf");
-    assert.match(panel,/Replace video in this draft/);
+    assert.match(panel,/\+ Replace video/);
     assert.match(panel,/video-facebook" checked/);
     assert.match(panel,/video-bluesky" checked/);
   }finally {globalThis.fetch=originalFetch;}
