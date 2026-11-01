@@ -1,5 +1,6 @@
 import { esc } from "./html.ts";
 import {tiktokMedia,type Post} from "./db.ts";
+import {PLATFORMS} from "./platforms.ts";
 
 /** Does not grant approval or change media for already approved posts. */
 export function draftMediaPanel(post: Post, csrf: string): string {
@@ -27,7 +28,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
     <input type="file" id="media-files" accept=".jpg,.jpeg,.png,.gif,image/jpeg,image/png,image/gif" multiple hidden>
   </div>
   <div id="media-upload-items" class="media-files" aria-live="polite"></div>
-  <p class="hint">Limits: 4 Bluesky, 35 TikTok and 80 Facebook photos. Bluesky photos need a description. Uploads are kept 45 days.</p>
+  <p class="hint">Limits: ${PLATFORMS.bluesky.maxPhotos} Bluesky, ${PLATFORMS.tiktok.maxPhotos} TikTok and ${PLATFORMS.facebook.maxPhotos} Facebook photos. Bluesky photos need a description. Uploads are kept 45 days.</p>
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
   </details>
@@ -143,7 +144,7 @@ export const DRAFT_MEDIA_JS = `
         box.type = "checkbox";
         const base=Number(panel.dataset[kind+"Images"]||0);
         const selected=files.filter(x=>!!x[kind]?.checked).length;
-        const limit=kind==="bluesky"?4:kind==="tiktok"?35:80;
+        const limit=kind==="bluesky"?${PLATFORMS.bluesky.maxPhotos}:kind==="tiktok"?${PLATFORMS.tiktok.maxPhotos}:${PLATFORMS.facebook.maxPhotos};
         box.checked=base+selected<limit;
         if(!box.checked)text.title="Platform gallery already has its maximum number of images.";
         if (kind === "facebook") record.facebook = box;
