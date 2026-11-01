@@ -110,12 +110,14 @@ test("Direct PHOTO requires fresh TikTok creator options and SELF_ONLY",async()=
   return Response.json({data:{publish_id:"p_pub_url~test"},error:{code:"ok"}});
  };
  try{
-  const page=await tiktokOptionsPage(env,session,p.id);
-  assert.match(await page.text(),/Publish privately now/);
+  // Direct Post is hidden for now; the backend path stays tested for later.
+  const text=await (await tiktokOptionsPage(env,session,p.id)).text();
+  assert.doesNotMatch(text,/Publish privately now/);
+  assert.match(text,/Send to TikTok inbox/);
   const result=await startTikTokContentTransfer(env,p.id,p.updated_at,session.login,options("DIRECT_POST"));
   assert.equal(result.status,"processing");
   assert.equal(result.post_mode,"DIRECT_POST");
-  assert.ok(calls>=3);
+  assert.ok(calls>=2);
  }finally{globalThis.fetch=old;}
 });
 test("Unreviewed direct publishing never accepts PUBLIC_TO_EVERYONE",()=>{

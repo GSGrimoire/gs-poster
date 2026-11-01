@@ -4,7 +4,7 @@
  */
 import type { Env } from "./env.ts";
 import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
-import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, type Post, type ApprovalSnapshot, tiktokMedia } from "./db.ts";
+import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, reopenFailedDraft, type Post, type ApprovalSnapshot, tiktokMedia } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchVideo } from "./video.ts";
@@ -420,21 +420,19 @@ export async function restoreCancelledPost(
   return restored;
 }
 
-/** Failed or rejected → draft again, so it can be fixed and re-approved. */
-export async function backToDraft(env: Env, id: string, actor: string, reconciled = false): Promise<boolean> {
-  const p = await getPost(env.DB, id);
-  // Approved failures may have reached Facebook despite a lost response.
-  // Require a PIN-gated human reconciliation before restoring such a draft.
-  if (p?.approved_at && !reconciled) return false;
-  if (p?.fb_post_id) return false;
-  // Never reapprove Facebook when Bluesky may already have been scheduled/published.
-  if (p?.bluesky && ["scheduled", "publishing", "published"].includes(p.bluesky.status)) return false;
-  const ok = await updatePost(env.DB, id, { status: "draft", error: null }, ["failed", "rejected"]);
-  if (ok && p?.bluesky?.status === "failed") {
-    await setBlueskyStatus(env.DB, id, { status: "draft", error: null }, ["failed"]);
-  }
-  if (ok) await audit(env.DB, actor, "back-to-draft", id);
-  return ok;
+/**
+ * Failed or rejected -> an ordinary, unapproved draft that the editor can
+ * change and that needs a fresh PIN approval. Approved failures may have
+ * reached Facebook despite a lost response, so the caller must pass
+ * `reconciled` only after the PIN-gated "I checked Facebook" confirmation.
+ * All guards and the approval revocation run in one D1 transaction.
+ */
+export async function backToDraft(
+  env: Env, id: string, actor: string, reconciled = false, expectedVersion?: string,
+): Promise<boolean> {
+  const version = await reopenFailedDraft(env.DB, id, { reconciled, expectedVersion });
+  if (version) await audit(env.DB, actor, "back-to-draft", id, reconciled ? "approval revoked after owner check" : undefined);
+  return !!version;
 }
 
 /**

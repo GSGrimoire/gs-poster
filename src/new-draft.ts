@@ -134,15 +134,15 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <label class="choice-tile"><input type="checkbox" name="bluesky" value="1" ${fields.bluesky?"checked":""}> Bluesky</label>
           <label class="choice-tile"><input type="checkbox" name="tiktok" value="1" ${fields.tiktok?"checked":""}> TikTok</label>
         </div>
-        <p class="choice-advice" id="new-platform-advice">TikTok videos and carousels can go to the inbox for manual publication. Private direct posting requires separate permission and approval. Calendar times do not automatically publish to TikTok.</p>
+        <p class="choice-advice" id="new-platform-advice">TikTok posts go to your TikTok inbox. You add music and publish in the TikTok app. Calendar times do not publish to TikTok.</p>
       </section>
 
       <section class="step-card" aria-labelledby="draft-content-title">
-        <div class="step-heading"><span class="step-number">2</span><div><h3 id="draft-content-title">What are you sharing?</h3><p class="hint">Choose a format, then add media below.</p></div></div>
+        <div class="step-heading"><span class="step-number">2</span><div><h3 id="draft-content-title">Photos or video</h3><p class="hint">Add photos or one video, or keep it a text post.</p></div></div>
         <div class="choice-tiles new-choice-group" role="group" aria-label="Post content type">
-          <label class="choice-tile"><input type="radio" name="content_kind" value="text" ${kind==="text"?"checked":""}> Text</label>
-          <label class="choice-tile"><input type="radio" name="content_kind" value="images" ${kind==="images"?"checked":""}> Image carousel</label>
-          <label class="choice-tile"><input type="radio" name="content_kind" value="video" ${kind==="video"?"checked":""}> Video</label>
+          <label class="choice-tile"><input type="radio" name="content_kind" value="images" ${kind==="images"?"checked":""}> + Add photos</label>
+          <label class="choice-tile"><input type="radio" name="content_kind" value="video" ${kind==="video"?"checked":""}> + Add video</label>
+          <label class="choice-tile"><input type="radio" name="content_kind" value="text" ${kind==="text"?"checked":""}> Text only</label>
         </div>
         <section id="new-images-panel" ${kind!=="images"?"hidden":""}>
           <p class="form-info" id="new-image-guidance">Select each image’s destinations. Each platform keeps its own gallery and count: Facebook 80, TikTok 35, Bluesky 4. Use Move up/down to reorder the shared source sequence.</p>

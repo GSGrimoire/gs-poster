@@ -12,7 +12,8 @@ import {
   TIKTOK_SCOPES,tiktokConfigured,tiktokConnection,tiktokRedirect,tiktokStateCookie,
 } from "./tiktok.ts";
 import {tiktokCallbackPlaceholder} from "./public-pages.ts";
-import {saveTikTokVerificationFile,TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
+import {TIKTOK_DIRECT_POST_VISIBLE} from "./tiktok-options.ts";
+import {saveTikTokVerificationFile,hostedTikTokVerificationFiles,TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
 const redirect=(location:string,cookieValue?:string):Response=>{
   const h=new Headers({Location:location,"Cache-Control":"no-store","Referrer-Policy":"no-referrer"});
@@ -66,12 +67,14 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   const enabled=tiktokConfigured(env);
   const csrf=await csrfToken(env,session);
   const granted=conn?.scopes.split(",").filter(Boolean)||[];
+  const hosted=await hostedTikTokVerificationFiles(env.DB);
   const readiness=`<div class="step-card">
       <div class="eyebrow">Connection readiness</div>
       <div class="summary-row"><span><span class="status-led ${enabled?"":"err"}"></span>Worker credentials</span><strong>${enabled?"Configured":"Action needed"}</strong></div>
       <div class="summary-row"><span><span class="status-led ${conn?"":"warn"}"></span>TikTok account</span><strong>${conn?"Connected":"Not connected"}</strong></div>
-      <div class="summary-row"><span><span class="status-led warn"></span>Media URL ownership</span><strong>Confirm in TikTok</strong></div>
-      <p class="rail-note">The last step is verified in TikTok's developer portal. GS Poster cannot check it automatically.</p>
+      <div class="summary-row"><span><span class="status-led ${hosted.length?"warn":"err"}"></span>Media URL ownership</span><strong>${hosted.length?"File hosted · confirm in TikTok":"Action needed: no verification file hosted"}</strong></div>
+      <p class="rail-note">${hosted.length?"The last step is verified in TikTok's developer portal. GS Poster cannot check it automatically.":
+        "Photo carousels fail with url_ownership_unverified until step 2 below is done."}</p>
     </div>`;
   const body=`<div class="hero">
     <div class="hero-kicker">GS Grimoire · Social connections</div>
@@ -112,7 +115,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <p><strong>Account identifier:</strong> ${esc(conn.open_id)}</p>
       <p><strong>Granted permissions:</strong> ${esc(granted.join(", "))}</p>
       <p><strong>Connected by:</strong> ${esc(conn.connected_by)}</p>
-      <p class="hint">This page never shows access or refresh tokens. TikTok uploads require a separate editor action. Manual inbox publication happens in TikTok. Direct Post requires separate user confirmation.</p>
+      <p class="hint">This page never shows access or refresh tokens. TikTok uploads require a separate editor action. You finish and publish inbox transfers in the TikTok app.</p>
       <form method="post" action="/tiktok/disconnect">
         <input name="csrf" type="hidden" value="${esc(csrf)}">
         <label><input type="checkbox" name="confirm" value="yes" required> Disconnect this TikTok account and revoke its access</label>
@@ -126,13 +129,13 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <input name="csrf" type="hidden" value="${esc(csrf)}">
       <p><label><input type="checkbox" checked disabled> Read basic account profile (required)</label></p>
       <p><label><input type="checkbox" name="video.upload" value="1" checked> Upload videos and photo carousels to your TikTok inbox for manual publication</label></p>
-      <p><label><input type="checkbox" name="video.publish" value="1"> Request direct publishing access (private testing; separate explicit consent required)</label></p>
+      ${TIKTOK_DIRECT_POST_VISIBLE?'<p><label><input type="checkbox" name="video.publish" value="1"> Request direct publishing access (private testing; separate explicit consent required)</label></p>':""}
       <button class="primary" type="submit" ${enabled?"":"disabled"}>Connect TikTok</button>
       <p class="hint">Connecting only grants access. No content is posted until a separate explicit publishing action is implemented and approved.</p>
     </form>`}
   <div class="step-card"><div class="eyebrow">Next step</div>
     <h3 style="margin:8px 0">Create your next post</h3>
-    <p class="hint">Try a two-image carousel first. Sending to the TikTok inbox is safer for initial testing than immediate Direct Post.</p>
+    <p class="hint">Send a carousel or video to your TikTok inbox, then add music and publish it in the TikTok app.</p>
     <p class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/new?preset=tiktok-video">+ TikTok video</a><a class="btn" href="/">Open planner</a></p>
     <p class="rail-note">Automatic TikTok scheduling is not enabled. Every TikTok transfer is a separate approval action, independent of your planner time.</p>
   </div>`;

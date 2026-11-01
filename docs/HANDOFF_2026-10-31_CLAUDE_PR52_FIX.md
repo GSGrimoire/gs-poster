@@ -57,3 +57,34 @@ Abandon still requires the editor's PIN and is still the only way out of `sendin
 > 6. Record every result, blocker and next step on issues #49, #52, #32 and in a new dated handoff `docs/HANDOFF_2026-10-31_CHATGPT_2.md` on its own branch and PR.
 >
 > Never publish, never approve on the owner's behalf, never weaken the approval guards, never print or ask for secrets or the PIN.
+
+## Second correction, 1 November 2026
+
+ChatGPT-2 reviewed head `bca5714` on 31 October and asked for one change: **recovered drafts must be editable**. `backToDraft` moved `failed -> draft` but kept `approved_at`, so the owner's edit and time controls refused the post.
+
+What changed:
+- `main` merged in (#56, #57, #58). Drafts now open in the one-page editor, and the route list keeps `reconcile-stuck` alongside `save` and `tiktok-clear`.
+- New `reopenFailedDraft` (`src/db.ts`): one D1 batch that
+  - sets `status='draft'`, `approved_at=NULL` and `error=NULL`
+  - clears `scheduled_at` only if that time has passed
+  - is fenced on the version the owner saw
+  - refuses posts with a Facebook id
+  - refuses approved posts unless `reconciled` is true (that is, after the PIN-gated "I checked Facebook")
+  - refuses Bluesky targets that are scheduled, publishing, published or hold remote ids
+  - resets a failed or cancelled Bluesky target to draft in the same transaction
+- `backToDraft` uses it. The web `redraft` action passes `expected_updated_at`.
+- The Facebook queue row stays `cancelled` until a fresh approval resets it (first correction).
+
+Evidence:
+- `test/recovery-editor-route.test.ts` runs the real `handleWeb` in workerd. It covers:
+  - for 1, 7 and 11 photos: approve → simulated cron failure → abandon (PIN) → redraft (PIN + confirmation + version) → editor page → save without PIN (caption and new time) → approve without PIN refused → approve with PIN → queue reset to 0
+  - stuck post: reconcile-stuck → redraft clears the past time → edit → release
+  - a future time survives redraft
+  - combined Facebook + failed Bluesky: both reset, both edited, both released
+  - an active or published Bluesky target, or a Facebook id, still blocks redraft
+- With the old `backToDraft`, 5 of these 7 tests fail.
+- `npm run check`: 221/221. Wrangler dry-run: OK.
+
+### Prompt for ChatGPT
+
+> You are **ChatGPT-2 | Independent Reviewer** for GSGrimoire/gs-poster. Read `AGENTS.md`, `CLAUDE.md`, the Hub review playbook and this handoff. Do a **Full review** of PR #52 at its new exact head. Check that `reopenFailedDraft` revokes `approved_at` atomically; that it keeps the Facebook-id, reconciled-only and Bluesky-active guards plus the version fence; that the queue `cancelled` row is only reset by a fresh PIN approval; and that `test/recovery-editor-route.test.ts` drives the real web routes. Confirm CI on the exact head. If it passes, merge #52 alone and watch Deploy and live smoke. Then walk the owner through recovering one stuck post (`p_mvppbkvn27705754cc`) with his own sign-in and PIN, verifying each step with `get_post` and, after release, `list_page_posts`. Never publish, never use the owner's PIN, never print secrets.

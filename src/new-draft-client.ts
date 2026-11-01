@@ -41,7 +41,7 @@ export const NEW_DRAFT_JS = String.raw`
     const k=kind(),tt=target("tiktok"),bs=target("bluesky");
     const platforms=["facebook","bluesky","tiktok"].filter(target).map(x=>x==="facebook"?"Facebook":x==="bluesky"?"Bluesky":"TikTok");
     summary("summary-platforms").textContent=platforms.length ? platforms.join(" · ") : "None selected";
-    summary("summary-format").textContent=k==="images"?"Image carousel":k==="video"?"Video":"Text";
+    summary("summary-format").textContent=k==="images"?"Photos":k==="video"?"Video":"Text only";
     summary("summary-media").textContent=k==="images" ? images.length+" source images" :
       k==="video" ? (video ? video.name : "No video selected") : "Text only";
     summary("summary-timing").textContent=asap.value==="1" ? "Earliest available" :
@@ -132,7 +132,7 @@ export const NEW_DRAFT_JS = String.raw`
     if(tt&&k==="text") {
       form.querySelector('input[name="content_kind"][value="images"]').checked=true;
       k="images";
-      statusText("TikTok needs images or video. Image carousel selected.");
+      statusText("TikTok needs images or video. Add photos selected.");
     }
     $("new-images-panel").hidden=k!=="images";
     $("new-video-panel").hidden=k!=="video";

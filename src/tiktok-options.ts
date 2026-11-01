@@ -8,6 +8,13 @@ import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
 import {esc,html,page} from "./html.ts";
 import {TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
+/**
+ * Direct Post is hidden while the TikTok app is unaudited: it only works on a
+ * private account and has never succeeded for GS Grimoire. Inbox transfer is the
+ * one path shown. Flip to true to bring the Direct Post form and route back.
+ */
+export const TIKTOK_DIRECT_POST_VISIBLE=false;
+
 export async function tiktokOptionsPage(env:Env,session:Session,postId:string):Promise<Response> {
   const p=await getPost(env.DB,postId);
   if(!p||!p.tiktok_enabled)return html(page("Not found",
@@ -15,7 +22,8 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const conn=await tiktokConnection(env.DB);
   if(!conn)return html(page("Connect TikTok",
     '<p><a href="/tiktok/settings">Connect TikTok first.</a></p>',{login:session.login}),{status:409});
-  if(await getTikTokInboxTransfer(env.DB,postId))
+  const existing=await getTikTokInboxTransfer(env.DB,postId);
+  if(existing&&existing.status!=="rejected"&&existing.status!=="cleared")
     return html(page("Existing transfer",
       '<p>A TikTok transfer already exists. Review it on the post page before sending again.</p>'+
       '<p><a href="/post/'+esc(postId)+'">Back to post</a></p>',
@@ -28,7 +36,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const post=p;
   const scopes=conn.scopes.split(",");
   let creator:TikTokCreatorOptions|null=null,creatorError="";
-  if(scopes.includes("video.publish")) {
+  if(TIKTOK_DIRECT_POST_VISIBLE&&scopes.includes("video.publish")) {
     try{creator=await getTikTokCreatorOptions(env);}
     catch(e){creatorError=e instanceof Error?e.message:"TikTok creator information unavailable.";}
   }
@@ -54,7 +62,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
       <label>Approval PIN<input type="password" name="pin" required autocomplete="off"></label>`;
   }
   const inbox=scopes.includes("video.upload")?`<form method="post" action="/post/${esc(p.id)}/tiktok-send" class="step-card">
-      <div class="eyebrow">Option A · Controlled transfer</div>
+      ${TIKTOK_DIRECT_POST_VISIBLE?'<div class="eyebrow">Option A · Controlled transfer</div>':""}
       <h3 style="margin:9px 0">Send to TikTok inbox</h3>
       <p class="form-info">Send ${type==="PHOTO"?"this carousel":"the video"} to TikTok and finish its caption, privacy and publication in TikTok itself. No publication occurs from this choice until you finish it inside TikTok.</p>
       ${type==="VIDEO"?'<p class="hint">TikTok does not accept video inbox captions through this endpoint. Set the final caption inside TikTok.</p>':""}
@@ -65,7 +73,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const privacy=creator?.privacy_level_options.map(v=>
     '<option value="'+esc(v)+'"'+(v!=="SELF_ONLY"?' disabled':'')+'>'+
     esc(v==="SELF_ONLY"?"Only me (private test)":v+" (needs app audit)")+'</option>').join("")||"";
-  const direct=creator&&creator.privacy_level_options.includes("SELF_ONLY")?
+  const direct=!TIKTOK_DIRECT_POST_VISIBLE?"":creator&&creator.privacy_level_options.includes("SELF_ONLY")?
     `<form method="post" action="/post/${esc(p.id)}/tiktok-send" class="step-card">
       <div class="eyebrow">Option B · Immediate private publication</div>
       <h3 style="margin:9px 0">Direct Post test</h3>
@@ -88,8 +96,8 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
     '<p class="hint">'+esc(creatorError||"Direct Post requires video.publish consent and the SELF_ONLY option. Reconnect in TikTok settings if necessary.")+'</p>';
   const body=`<div class="hero">
     <div class="hero-kicker">GS Grimoire · Final review</div>
-    <h2>Choose how to share on TikTok.</h2>
-    <p>${type==="PHOTO"?media.images.length+" images in carousel order":"One MP4 video"} · ${esc(p.label||"Untitled post")}. Both methods require a separate approval PIN. Your calendar date does not trigger TikTok posting.</p>
+    <h2>${TIKTOK_DIRECT_POST_VISIBLE?"Choose how to share on TikTok.":"Send to your TikTok inbox."}</h2>
+    <p>${type==="PHOTO"?media.images.length+" images in carousel order":"One MP4 video"} · ${esc(p.label||"Untitled post")}. ${TIKTOK_DIRECT_POST_VISIBLE?"Both methods require":"Sending requires"} your approval PIN. Your calendar date does not trigger TikTok posting. Add music, edit and publish inside the TikTok app.</p>
     </div>
     <p><a href="/post/${esc(p.id)}">← Back to post</a></p>
     <style>
@@ -103,7 +111,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
       ${preview}
     </section>
     <p class="choice-advice">For photo carousels or link-based videos, TikTok must verify <code>${esc(TIKTOK_MEDIA_PREFIX)}</code> in your developer app. Original media stays private, and temporary links are created only after an explicit transfer.</p>
-    <div class="step-heading" style="margin-top:23px"><span class="step-number">✓</span><div><h3>Select one publishing method</h3><p class="hint">These are independent choices. Nothing has been transferred yet.</p></div></div>
+    ${TIKTOK_DIRECT_POST_VISIBLE?'<div class="step-heading" style="margin-top:23px"><span class="step-number">✓</span><div><h3>Select one publishing method</h3><p class="hint">These are independent choices. Nothing has been transferred yet.</p></div></div>':""}
     ${inbox}${direct}`;
   return html(page("TikTok publishing options",body,{login:session.login}));
 }
