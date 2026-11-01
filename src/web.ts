@@ -14,7 +14,7 @@ import { CHAT_UPLOAD_JS } from "./chat-upload.ts";
 import { publicPage } from "./public-pages.ts";
 import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction } from "./tiktok-web.ts";
 import { tiktokConnection } from "./tiktok.ts";
-import { tiktokOptionsPage } from "./tiktok-options.ts";
+import { tiktokOptionsPage, TIKTOK_DIRECT_POST_VISIBLE } from "./tiktok-options.ts";
 import { serveTikTokMedia } from "./tiktok-media.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
 import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
@@ -440,15 +440,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   let actions = "";
   const postVideo=ttMedia.video;
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && !tiktokConn) {
-    actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to the inbox or initiating a private direct test.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
+    actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
   }
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
     const ttRetry=tiktokTransfer?.status==="rejected"||tiktokTransfer?.status==="cleared";
     if((!tiktokTransfer||ttRetry) && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
       <div class="eyebrow">TikTok · ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
-      <h3 style="margin:8px 0">Choose your TikTok publishing path</h3>
-      <p class="hint">Review the ${ttMedia.video?"video":"carousel"} before sending it to TikTok's inbox or starting a private Direct Post test. Both require a separate approval PIN. The calendar time does not trigger TikTok publication.</p>
-      <p><a class="btn" href="/post/${p.id}/tiktok-options">Review TikTok posting options</a></p>
+      <h3 style="margin:8px 0">${TIKTOK_DIRECT_POST_VISIBLE?"Choose your TikTok publishing path":"Send to your TikTok inbox"}</h3>
+      <p class="hint">Review the ${ttMedia.video?"video":"carousel"} before sending it to your TikTok inbox${TIKTOK_DIRECT_POST_VISIBLE?" or starting a private Direct Post test":""}. Sending needs your approval PIN. The calendar time does not trigger TikTok publication; you finish and publish in the TikTok app.</p>
+      <p><a class="btn" href="/post/${p.id}/tiktok-options">${TIKTOK_DIRECT_POST_VISIBLE?"Review TikTok posting options":"Review and send to TikTok inbox"}</a></p>
     </div>`;
     if (tiktokTransfer) {
       actions += `<div class="card"><h2>TikTok inbox transfer</h2>
@@ -760,6 +760,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         return postPage(env,session,id,{error:"Confirm TikTok transfer consent."},400);
       const mode=String(form.get("post_mode")||"");
       const mediaType=String(form.get("media_type")||"");
+      if(mode==="DIRECT_POST"&&!TIKTOK_DIRECT_POST_VISIBLE)
+        return postPage(env,session,id,{error:"Direct Post is switched off. Use Send to TikTok inbox."},400);
       if(mode==="DIRECT_POST"&&form.get("confirm_direct")!=="1")
         return postPage(env,session,id,{error:"Direct publication requires separate explicit consent."},400);
       if(mode!=="MEDIA_UPLOAD"&&mode!=="DIRECT_POST"||

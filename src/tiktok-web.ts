@@ -12,6 +12,7 @@ import {
   TIKTOK_SCOPES,tiktokConfigured,tiktokConnection,tiktokRedirect,tiktokStateCookie,
 } from "./tiktok.ts";
 import {tiktokCallbackPlaceholder} from "./public-pages.ts";
+import {TIKTOK_DIRECT_POST_VISIBLE} from "./tiktok-options.ts";
 import {saveTikTokVerificationFile,hostedTikTokVerificationFiles,TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
 const redirect=(location:string,cookieValue?:string):Response=>{
@@ -114,7 +115,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <p><strong>Account identifier:</strong> ${esc(conn.open_id)}</p>
       <p><strong>Granted permissions:</strong> ${esc(granted.join(", "))}</p>
       <p><strong>Connected by:</strong> ${esc(conn.connected_by)}</p>
-      <p class="hint">This page never shows access or refresh tokens. TikTok uploads require a separate editor action. Manual inbox publication happens in TikTok. Direct Post requires separate user confirmation.</p>
+      <p class="hint">This page never shows access or refresh tokens. TikTok uploads require a separate editor action. You finish and publish inbox transfers in the TikTok app.</p>
       <form method="post" action="/tiktok/disconnect">
         <input name="csrf" type="hidden" value="${esc(csrf)}">
         <label><input type="checkbox" name="confirm" value="yes" required> Disconnect this TikTok account and revoke its access</label>
@@ -128,13 +129,13 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <input name="csrf" type="hidden" value="${esc(csrf)}">
       <p><label><input type="checkbox" checked disabled> Read basic account profile (required)</label></p>
       <p><label><input type="checkbox" name="video.upload" value="1" checked> Upload videos and photo carousels to your TikTok inbox for manual publication</label></p>
-      <p><label><input type="checkbox" name="video.publish" value="1"> Request direct publishing access (private testing; separate explicit consent required)</label></p>
+      ${TIKTOK_DIRECT_POST_VISIBLE?'<p><label><input type="checkbox" name="video.publish" value="1"> Request direct publishing access (private testing; separate explicit consent required)</label></p>':""}
       <button class="primary" type="submit" ${enabled?"":"disabled"}>Connect TikTok</button>
       <p class="hint">Connecting only grants access. No content is posted until a separate explicit publishing action is implemented and approved.</p>
     </form>`}
   <div class="step-card"><div class="eyebrow">Next step</div>
     <h3 style="margin:8px 0">Create your next post</h3>
-    <p class="hint">Try a two-image carousel first. Sending to the TikTok inbox is safer for initial testing than immediate Direct Post.</p>
+    <p class="hint">Send a carousel or video to your TikTok inbox, then add music and publish it in the TikTok app.</p>
     <p class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/new?preset=tiktok-video">+ TikTok video</a><a class="btn" href="/">Open planner</a></p>
     <p class="rail-note">Automatic TikTok scheduling is not enabled. Every TikTok transfer is a separate approval action, independent of your planner time.</p>
   </div>`;
