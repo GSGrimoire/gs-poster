@@ -418,6 +418,43 @@ export async function updatePost(db: D1Database, id: string, patch: Patch, onlyI
 }
 
 
+/**
+ * Failed or rejected post -> unapproved draft, in ONE D1 transaction.
+ * The old approval is revoked (approved_at = NULL), so only a fresh PIN
+ * approval can release it again. A schedule that has already passed is
+ * cleared; a future one is kept for the editor to confirm or change.
+ * Refuses posts with a recorded Facebook id, an approved post unless the
+ * caller confirmed human reconciliation, and any Bluesky target that is
+ * scheduled, publishing, published or carries a remote record.
+ * With expectedVersion, the post must still be the version the editor saw.
+ */
+export async function reopenFailedDraft(
+  db: D1Database, id: string, opts: { reconciled: boolean; expectedVersion?: string; now?: number },
+): Promise<string | null> {
+  await ensureSchema(db);
+  const nowMs = opts.now ?? Date.now();
+  const cur = await db.prepare("SELECT updated_at FROM posts WHERE id = ?").bind(id).first<{ updated_at: string }>();
+  if (!cur) return null;
+  const base = opts.expectedVersion ?? cur.updated_at;
+  if (!Number.isFinite(Date.parse(base))) return null;
+  const version = new Date(Math.max(nowMs, Date.parse(base) + 1)).toISOString();
+  const results = await db.batch([
+    db.prepare(`UPDATE posts SET status = 'draft', approved_at = NULL, error = NULL,
+        scheduled_at = CASE WHEN scheduled_at > ? THEN scheduled_at ELSE NULL END, updated_at = ?
+      WHERE id = ? AND updated_at = ? AND status IN ('failed','rejected') AND fb_post_id IS NULL
+        AND (approved_at IS NULL OR ? = 1)
+        AND NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND
+          (b.status IN ('scheduled','publishing','published') OR b.uri IS NOT NULL OR b.cid IS NOT NULL
+           OR b.card_uri IS NOT NULL OR b.permalink IS NOT NULL))`)
+      .bind(new Date(nowMs).toISOString(), version, id, base, opts.reconciled ? 1 : 0),
+    db.prepare(`UPDATE bluesky_targets SET status = 'draft', error = NULL, started_at = NULL
+      WHERE post_id = ? AND status IN ('failed','cancelled','draft') AND uri IS NULL AND cid IS NULL
+        AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ? AND status = 'draft' AND approved_at IS NULL)`)
+      .bind(id, id, version),
+  ]);
+  return (results[0].meta.changes ?? 0) === 1 ? version : null;
+}
+
 /** What the web editor may change on an unapproved draft. Media can only be
  * removed or re-described here; new media still arrives through the private
  * upload and attach routes. */
