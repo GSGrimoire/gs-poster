@@ -470,6 +470,8 @@ export interface EditorDraft {
   scheduled_at: string | null;
   label: string | null;
   release: string | null;
+  /** Undefined keeps the stored link (the web editor does not edit links). */
+  link?: string | null;
 }
 
 /**
@@ -488,12 +490,13 @@ export async function saveEditorDraft(
   const statements = [
     db.prepare(`UPDATE posts SET status = 'draft', message = ?, tiktok_caption = ?, images = ?, tiktok_images = ?,
         video = ?, tiktok_video = ?, facebook_enabled = ?, tiktok_enabled = ?, scheduled_at = ?, label = ?, release = ?,
-        updated_at = ?
+        link = CASE WHEN ? = 1 THEN ? ELSE link END, updated_at = ?
       WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL`)
       .bind(next.message, next.tiktok_caption, JSON.stringify(next.images),
         next.tiktok_images === null ? null : JSON.stringify(next.tiktok_images),
         next.video, next.tiktok_video, next.facebook_enabled ? 1 : 0, next.tiktok_enabled ? 1 : 0,
-        next.scheduled_at, next.label, next.release, version, id, expectedVersion),
+        next.scheduled_at, next.label, next.release,
+        next.link === undefined ? 0 : 1, next.link ?? null, version, id, expectedVersion),
     bluesky
       ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, video, patreon, facebook_enabled)
           SELECT ?, ?, ?, ?, ?, ? WHERE ${fenced}

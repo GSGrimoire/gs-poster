@@ -7,7 +7,7 @@ import { getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import type { Env } from "./env.ts";
 import { missingSecrets } from "./env.ts";
-import { audit, createPost, deletePost, getPost, listPosts, updatePost, type Post, type PostStatus, type BlueskyDraft, saveBlueskyDraft } from "./db.ts";
+import { audit, createPost, deletePost, getPost, listPosts, saveEditorDraft, type Post, type PostStatus, type BlueskyDraft } from "./db.ts";
 import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { checkVideoUrl } from "./video.ts";
@@ -152,6 +152,7 @@ const updateDraftSchema = z.object({
         publish_at: z.string().nullable().optional(),
         label: z.string().max(120).optional(),
         release: z.string().max(120).optional(),
+        expected_updated_at: z.string().optional().describe("The updated_at you last read from get_post, list_posts or a previous save. If the draft has changed since, nothing is saved and you must fetch it again. Strongly recommended; when omitted, the version read at the start of this call is used."),
       });
 
 /** Actual update_draft handler. Exported so regression tests exercise the same
@@ -160,11 +161,15 @@ const updateDraftSchema = z.object({
 export async function handleUpdateDraft(
   env:Env,origin:string,login:string,input:z.infer<typeof updateDraftSchema>,
 ){
-  const {id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky}=input;
-      if(!login)return fail("Editor access is no longer authorized.");
+  const {id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky, expected_updated_at}=input;
+      if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
       if (cur.status !== "draft" && cur.status !== "rejected") return fail(`This post is ${cur.status}; only drafts and rejected posts can be changed.`);
+      if (cur.approved_at) return fail("This post carries an approval and cannot be changed here.");
+      if (expected_updated_at !== undefined && expected_updated_at !== cur.updated_at)
+        return fail("Not saved: the draft changed since you read it. Fetch it again with get_post and reapply your change.", { current_updated_at: cur.updated_at });
+      const baseVersion = cur.updated_at;
       const nextMessage = message ?? cur.message;
       const nextImages = images ?? cur.images;
       const nextVideo = video === undefined ? cur.video : video;
@@ -189,7 +194,7 @@ export async function handleUpdateDraft(
       ]);
       if(privateErrors.length)return fail("Draft media access denied.",{problems:privateErrors});
       // All media preflight errors must be added to the final error collection
-      // BEFORE updatePost can run. Do not mutate arrays already spread into it.
+      // BEFORE saveEditorDraft can run. Do not mutate arrays already spread into it.
       if(images)errors.push(...(await checkImages(env,images)));
       if(bluesky&&bsNext)errors.push(...(await checkImages(env,bsNext.images.map(i=>i.url))));
       if (cur.tiktok_enabled && (nextTTImages??nextImages).length > 35) errors.push("TikTok carousels support at most 35 images.");
@@ -205,31 +210,53 @@ export async function handleUpdateDraft(
       if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
       if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
-      const changed = await updatePost(
-        env.DB,
-        id,
-        {
-          status: "draft",
-          message: nextMessage,
-          tiktok_caption:nextTikTokCaption,
-          images: nextImages,
-          tiktok_images:nextTTImages,
-          tiktok_video:nextTTVideo,
-          video:nextVideo,
-          link: link === undefined ? cur.link : link,
-          scheduled_at: time.when?.toISOString() ?? null,
-          label: label ?? cur.label,
-          release: release ?? cur.release,
-          note: cur.status === "rejected" ? cur.note : null,
-        },
-        ["draft", "rejected"],
-      );
-      if (!changed) return fail("The post changed status while saving. Fetch it again.");
-      if (bluesky !== undefined || facebook_enabled !== undefined) {
-        if (!(await saveBlueskyDraft(env.DB, id, bsNext, fbNext))) return fail("Could not save the Bluesky target.");
+      // One fenced D1 transaction for the post row AND its Bluesky target (#63).
+      // facebook_enabled is written to posts, which is what approval reads.
+      const nextLink = link === undefined ? cur.link : link;
+      const nextLabel = label ?? cur.label;
+      const nextRelease = release ?? cur.release;
+      const nextScheduled = time.when?.toISOString() ?? null;
+      let version: string | null;
+      try {
+        version = await saveEditorDraft(env.DB, id, baseVersion, {
+          message: nextMessage, tiktok_caption: nextTikTokCaption,
+          images: nextImages, tiktok_images: nextTTImages,
+          video: nextVideo, tiktok_video: nextTTVideo,
+          facebook_enabled: fbNext, tiktok_enabled: cur.tiktok_enabled === true,
+          scheduled_at: nextScheduled, label: nextLabel, release: nextRelease, link: nextLink,
+        }, bsNext);
+      } catch {
+        // The commit may or may not have happened (lost response). Read back
+        // rather than guess, and never retry blindly.
+        const after = await getPost(env.DB, id).catch(() => null);
+        if (after && after.updated_at !== baseVersion)
+          return fail("Save outcome uncertain: the draft changed during this call. Fetch it with get_post and check every field before saving again.", { current_updated_at: after.updated_at });
+        return fail("Not saved: the database did not confirm the change. Nothing was approved or published; try again.");
       }
-      await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id);
-      return ok({ saved: true, warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])], post: view(env, origin, (await getPost(env.DB, id))!) });
+      if (!version) {
+        const after = await getPost(env.DB, id).catch(() => null);
+        return fail(after && after.status !== "draft" && after.status !== "rejected"
+          ? `Not saved: the post is now ${after.status}.`
+          : "Not saved: the draft changed while saving (another edit or an approval). Fetch it again with get_post.",
+          { current_updated_at: after?.updated_at ?? null });
+      }
+      const saved = await getPost(env.DB, id);
+      if (!saved || saved.updated_at !== version)
+        return fail("Saved, but the draft changed again straight after. Fetch it with get_post before doing anything else.");
+      // Read back what approval will see. A mismatch means the save is not
+      // what the caller asked for; say so rather than report success.
+      const mismatch: string[] = [];
+      if (saved.facebook_enabled !== fbNext) mismatch.push("facebook_enabled");
+      if (!!saved.bluesky !== !!bsNext) mismatch.push("bluesky");
+      if (saved.message !== nextMessage) mismatch.push("message");
+      if (mismatch.length) return fail("Saved draft does not match the request. Fetch it with get_post and check before review.", { fields: mismatch, post: view(env, origin, saved) });
+      const auditOk = await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id).then(() => true, () => false);
+      return ok({
+        saved: true, updated_at: version,
+        ...(auditOk ? {} : { audit_warning: "The draft was saved, but the audit entry could not be written." }),
+        warnings: [...checks.warnings, ...(bsHouse?.warnings ?? [])],
+        post: view(env, origin, saved),
+      });
 }
 
 /** The production handlers are exported for revoked-token regression tests.
@@ -528,7 +555,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     {
       title: "Revise a draft",
       description:
-        "Change a draft or a rejected post. A rejected post goes back to draft for Gus to review again; read gus_note first to see what he asked for. Only the fields you pass are changed. Pass publish_at as an empty string to post on approval instead of at a set time.",
+        "Change a draft or a rejected post. A rejected post goes back to draft for Gus to review again; read gus_note first to see what he asked for. Only the fields you pass are changed. Pass expected_updated_at from your last read so a newer edit is never overwritten; the reply returns the new updated_at and the saved post, which is exactly what Gus will review. Pass publish_at as an empty string to post on approval instead of at a set time.",
       inputSchema: updateDraftSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
