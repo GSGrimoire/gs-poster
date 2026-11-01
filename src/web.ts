@@ -626,7 +626,6 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       ${p.approved_at ? "" : '<p class="hint">This post was approved with an older version of GS Poster that did not record the approval time. It is recovered the same way.</p>'}
       <p>This approval stopped before GS Poster recorded a Facebook result. Open Meta Business Suite and check both published and scheduled posts for this exact post. If it is there, leave this alone and note the Facebook post ID.</p>
       <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post is neither published nor scheduled.</label>
-      <label for="stuck-pin">PIN</label><input id="stuck-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button>Mark as failed (sends nothing)</button></div></form>`;
   }
   if (p.status === "failed" && !p.fb_post_id &&
@@ -634,7 +633,6 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     actions += `<form method="post" action="/post/${p.id}/redraft" class="card">${hidden}
       <p>Check Facebook first. This moves the post back to drafts without publishing it, so you can edit it and approve it again later.</p>
       <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
-      <label for="redraft-pin">PIN</label><input id="redraft-pin" type="password" name="pin" inputmode="numeric" required>
       <div class="row"><button>Move back to drafts</button></div></form>`;
   }
 
@@ -793,6 +791,26 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
   // All publication, cancellation and failed-target recovery require the PIN
   const whenRaw = String(form.get("when") ?? "").trim();
+  // Recovery steps that send nothing need no PIN (Gus's decision, 1 Nov 2026).
+  // "Mark as failed" only moves an aged, stuck `publishing` record to `failed`;
+  // "Move back to drafts" makes an unapproved draft that still needs a fresh
+  // PIN approval. Session, same-origin, CSRF, the "I checked Facebook"
+  // confirmation and the version fence still apply.
+  if (action === "reconcile-stuck" || action === "redraft") {
+    if (form.get("confirmed_no_facebook") !== "1") {
+      return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
+    }
+    const version = String(form.get("expected_updated_at") || "");
+    if (action === "reconcile-stuck") {
+      const reconciled = await reconcileStuckPublishing(env, id, version, session.login);
+      return reconciled
+        ? postPage(env, session, id, { notice: "Marked as failed. Nothing was sent. Move it back to drafts to edit and approve it again." })
+        : postPage(env, session, id, { error: "This post is not eligible: it changed, is too recent, already has a Facebook result or has a queue job. Reload." }, 409);
+    }
+    const restored = await backToDraft(env, id, session.login, true, version);
+    return restored ? redirect(`/post/${id}`) :
+      postPage(env, session, id, { error: "Cannot move this back to drafts: it changed since you opened it, has a Facebook result, or has an active or published Bluesky post. Reload and check." }, 409);
+  }
   if (!env.APPROVE_PIN) return postPage(env, session, id, { error: "APPROVE_PIN is not set, so nothing can be approved yet." }, 503);
   if (await pinLocked(env.DB)) return postPage(env, session, id, { error: "Too many wrong PINs. Approvals are locked for up to an hour." }, 429);
   if (!safeEqual(String(form.get("pin") || ""), env.APPROVE_PIN)) {
@@ -885,23 +903,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
           "The Facebook post could not be reconciled.",
       });
     }
-    if (action === "reconcile-stuck") {
+    if (action === "retry-facebook") {
       if (form.get("confirmed_no_facebook") !== "1") {
         return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
-      }
-      const reconciled = await reconcileStuckPublishing(env, id, String(form.get("expected_updated_at") || ""), session.login);
-      return reconciled
-        ? postPage(env, session, id, { notice: "Marked as failed. Nothing was sent. Move it back to drafts to approve it again." })
-        : postPage(env, session, id, { error: "This post is not eligible: it changed, is too recent, already has a Facebook result or has a queue job. Reload." }, 409);
-    }
-    if (action === "redraft" || action === "retry-facebook") {
-      if (form.get("confirmed_no_facebook") !== "1") {
-        return postPage(env, session, id, { error: "Confirm you checked Facebook for an existing post before recovering." }, 400);
-      }
-      if (action === "redraft") {
-        const restored = await backToDraft(env, id, session.login, true, String(form.get("expected_updated_at") || ""));
-        return restored ? redirect(`/post/${id}`) :
-          postPage(env, session, id, { error: "Cannot move this back to drafts: it changed since you opened it, has a Facebook result, or has an active or published Bluesky post. Reload and check." }, 409);
       }
       const retried = await retryFailedFacebook(env, id, session.login);
       return postPage(env, session, id, {

@@ -82,23 +82,51 @@ test("the legacy record shows the recovery form, with a note about the older ver
   assert.match(html,/older version of GS Poster/);
 });
 
-test("refused without sign-in, allowlisted login, same origin, CSRF, PIN or confirmation",async()=>{
+test("refused without sign-in, allowlisted login, same origin, CSRF or the Facebook confirmation",async()=>{
   const p=await legacy();
   assert.ok([302,303].includes((await reconcile(p,{},{login:null})).status));
   assert.ok([302,303].includes((await reconcile(p,{},{login:"stranger"})).status));
   assert.equal((await reconcile(p,{},{origin:"https://evil.example"})).status,403);
   assert.equal((await reconcile(p,{},{csrf:"forged"})).status,403);
-  assert.equal((await reconcile(p,{pin:"000000"})).status,403);
-  assert.equal((await send("/post/"+p.id+"/reconcile-stuck",{expected_updated_at:p.updated_at,pin:PIN})).status,400);
+  assert.equal((await send("/post/"+p.id+"/reconcile-stuck",{expected_updated_at:p.updated_at})).status,400);
   assert.equal((await cur(p.id)).status,"publishing");
 });
 
-test("PIN lockout blocks reconciliation even with the right PIN",async()=>{
+// Owner decision, 1 Nov 2026: the two recovery steps send nothing, so no PIN.
+test("Mark as failed and Move back to drafts need no PIN; the forms do not ask for one",async()=>{
+  const p=await legacy();
+  const html=await page(p.id);
+  const stuckForm=html.slice(html.indexOf('action="/post/'+p.id+'/reconcile-stuck"'));
+  assert.doesNotMatch(stuckForm.slice(0,stuckForm.indexOf("</form>")),/name="pin"/);
+  const r=await send("/post/"+p.id+"/reconcile-stuck",{expected_updated_at:p.updated_at,confirmed_no_facebook:"1"});
+  assert.equal(r.status,200);
+  const f=await cur(p.id);
+  assert.equal(f.status,"failed");
+  const failedHtml=await page(p.id);
+  const redraftForm=failedHtml.slice(failedHtml.indexOf('action="/post/'+p.id+'/redraft"'));
+  assert.doesNotMatch(redraftForm.slice(0,redraftForm.indexOf("</form>")),/name="pin"/);
+  const rd=await send("/post/"+p.id+"/redraft",{expected_updated_at:f.updated_at,confirmed_no_facebook:"1"});
+  assert.ok([200,302,303].includes(rd.status));
+  const d=await cur(p.id);
+  assert.equal(d.status,"draft");
+  assert.equal(d.approved_at,null);
+  // Releasing it still needs the PIN.
+  assert.equal((await send("/post/"+p.id+"/approve",{expected_updated_at:d.updated_at,target_facebook:"1"})).status,403);
+  assert.equal((await cur(p.id)).status,"draft");
+});
+
+test("a PIN lockout does not block recovery, but still blocks approval",async()=>{
   const p=await legacy();
   await db.prepare("DELETE FROM pin_failures").run();
-  for(let i=0;i<5;i++)await reconcile(p,{pin:"000000"},{keepPinFailures:true});
-  assert.equal((await reconcile(p,{},{keepPinFailures:true})).status,429);
-  assert.equal((await cur(p.id)).status,"publishing");
+  for(let i=0;i<5;i++)await send("/post/"+p.id+"/approve",{expected_updated_at:p.updated_at,pin:"000000"},{keepPinFailures:true});
+  assert.equal((await reconcile(p,{},{keepPinFailures:true})).status,200);
+  const f=await cur(p.id);
+  const rd=await send("/post/"+p.id+"/redraft",{expected_updated_at:f.updated_at,confirmed_no_facebook:"1"},{keepPinFailures:true});
+  assert.ok([200,302,303].includes(rd.status));
+  const d=await cur(p.id);
+  assert.equal(d.status,"draft");
+  assert.equal((await send("/post/"+p.id+"/approve",{expected_updated_at:d.updated_at,target_facebook:"1",pin:PIN},{keepPinFailures:true})).status,429);
+  assert.equal((await cur(p.id)).status,"draft");
   await db.prepare("DELETE FROM pin_failures").run();
 });
 
