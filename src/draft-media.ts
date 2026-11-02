@@ -66,8 +66,8 @@ export const DRAFT_MEDIA_JS = `
   const submit = document.getElementById("media-upload-submit");
   const status = document.getElementById("media-upload-status");
   let files = [];
-  let running = false;
-  let currentVersion = panel.dataset.version;
+  let running = window.gsMediaBusy = false;
+  // Read the version on every action: the editor's autosave (#61) moves it.
   const post = panel.dataset.post;
   const csrf = panel.dataset.csrf;
 
@@ -198,7 +198,7 @@ export const DRAFT_MEDIA_JS = `
     if (!facebook && !bluesky && !tiktok) {videoStatus.textContent="Choose at least one available platform.";return;}
     const alt=videoAlt.value.trim();
     if (bluesky && !alt) {videoStatus.textContent="Bluesky requires alternative text.";return;}
-    running=true;videoSubmit.disabled=true;
+    running=window.gsMediaBusy=true;videoSubmit.disabled=true;
     try {
       videoStatus.textContent="Creating private upload...";
       const grant=await api("video-link",{filename:selectedVideo.name});
@@ -208,20 +208,20 @@ export const DRAFT_MEDIA_JS = `
       if (!uploaded.ok || !body.ok)throw new Error(body.error || "Video upload failed.");
       videoStatus.textContent="Attaching video to the draft...";
       const saved=await api("attach-video",{
-        reference:body.reference,alt,facebook,bluesky,tiktok,expected_updated_at:currentVersion
+        reference:body.reference,alt,facebook,bluesky,tiktok,expected_updated_at:panel.dataset.version
       });
-      currentVersion=saved.updated_at;
+      panel.dataset.version=saved.updated_at;
       videoStatus.textContent="Video attached. Refreshing...";
       location.reload();
     } catch(error) {
       videoStatus.textContent="Could not attach: "+(error instanceof Error?error.message:String(error));
       videoSubmit.disabled=false;
-    } finally {running=false;}
+    } finally {running = window.gsMediaBusy = false;}
   });
   submit.addEventListener("click", async () => {
     if (running) return;
     if (unsaved()) {status.textContent = "Save your text changes first, then add photos.";return;}
-    running = true;submit.disabled = true;status.textContent = "";
+    running = window.gsMediaBusy = true;submit.disabled = true;status.textContent = "";
     let completed = 0;
     for (const item of files) {
       if (item.result.textContent === "Attached") continue;
@@ -239,8 +239,8 @@ export const DRAFT_MEDIA_JS = `
         const uploadedBody = await uploaded.json().catch(() => ({}));
         if (!uploaded.ok || !uploadedBody.ok) throw new Error(uploadedBody.error || "Upload transfer failed.");
         item.result.textContent = "Attaching to draft...";
-        const result = await api("attach-image", {reference:uploadedBody.reference, alt,facebook,bluesky,tiktok,expected_updated_at:currentVersion});
-        currentVersion = result.updated_at;
+        const result = await api("attach-image", {reference:uploadedBody.reference, alt,facebook,bluesky,tiktok,expected_updated_at:panel.dataset.version});
+        panel.dataset.version = result.updated_at;
         item.result.textContent = "Attached";
         completed++;
       } catch (error) {
@@ -250,7 +250,7 @@ export const DRAFT_MEDIA_JS = `
         break;
       }
     }
-    running = false;submit.disabled = false;
+    running = window.gsMediaBusy = false;submit.disabled = false;
     if (completed && files.every(x=>x.result.textContent === "Attached")) {
       status.textContent = "All images attached. Refreshing post preview...";
       location.reload();

@@ -242,9 +242,12 @@ export function renderDraftEditor(v: EditorView): string {
       ${v.releaseProblems.length ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
       ${v.mediaLooksPending ? `<label><input type="checkbox" name="publish_without_media" value="1"> The name says media is pending, but Facebook has none. Publish without media anyway.</label>` : ""}
+      ${p.scheduled_at ? `<label class="rollover"><input type="checkbox" name="auto_rollover" value="1"> Automatically move to the next valid time if necessary</label>
+      <p class="hint">Off: if ${esc(v.whenText)} has become too close, approval is refused and you pick a new time. On: it moves to the earliest valid time and tells you the new time.</p>`
+      : p.facebook_enabled && p.images.length ? `<p class="hint">Photo posts go through the upload queue and usually appear on Facebook within a few minutes.</p>` : ""}
       <label for="release-pin">PIN</label>
       <input id="release-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
-      <p class="hint release-dirty" id="release-dirty" hidden>Save your changes first. Release uses the saved version.</p>
+      <p class="hint release-dirty" id="release-dirty" hidden>Saving your changes. Approval unlocks when they are saved; it releases the saved version.</p>
       <div class="row"><button class="primary" id="release-button">${p.scheduled_at ? "Approve and schedule" : "Approve and post now"}</button></div>
       <p class="rail-note">Releases exactly the saved draft. TikTok is sent separately below.</p>
       ${ig ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
@@ -340,6 +343,9 @@ export function renderDraftEditor(v: EditorView): string {
 .release-card{background:var(--panel);border:1px solid var(--accent2);border-radius:14px;padding:18px}
 .release-card h3{margin:6px 0 10px}
 .time-row{display:flex;flex-wrap:wrap;gap:8px}
+.mode-line{font:13px system-ui,sans-serif;color:var(--muted);margin:-6px 0 14px}
+.rollover{font-weight:600!important;color:var(--text)!important}
+.save-state.failed{color:var(--err);font-weight:600}
 .time-row input{flex:1 1 210px}
 .time-row button{padding:9px 12px;font-size:13px}
 @media(max-width:860px){.editor-grid{grid-template-columns:1fr}.editor-rail{position:static}}
@@ -351,6 +357,7 @@ export function renderDraftEditor(v: EditorView): string {
   ${v.notice ? `<div class="notice ok" role="status">${esc(v.notice)}</div>` : ""}
   ${p.status === "rejected" && p.note ? `<div class="notice">Your note for the drafting assistant: ${esc(p.note)}</div>` : ""}
   <div class="editor-head"><span class="chip s-${esc(p.status)}">${esc(p.status)}</span><strong>${esc(p.label || "Untitled draft")}</strong>${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(v.whenText)}</span></div>
+  <p class="mode-line">Draft. Changes save automatically. Nothing is published until you approve with your PIN.</p>
   <div class="editor-grid">
   <form method="post" action="/post/${id}/save" id="draft-editor">
     <input type="hidden" name="csrf" value="${esc(v.csrf)}">
@@ -455,15 +462,16 @@ export function renderDraftEditor(v: EditorView): string {
       <label for="ed-when">Publish time (${esc(v.tz)})</label>
       <div class="time-row">
         <input id="ed-when" type="datetime-local" name="when" value="${esc(when)}">
-        <button type="button" id="ed-asap">In 15 minutes</button>
-        <button type="button" id="ed-clear">No time</button>
+        <button type="button" id="ed-now">Post now</button>
+        <button type="button" id="ed-earliest">Earliest valid time</button>
       </div>
-      <p class="hint">Empty means it posts when you approve. Scheduled posts need to be at least 12 minutes ahead (30 for photo posts) when you release.</p>
+      <p class="hint" id="ed-time-hint">"Post now" leaves the time empty: it goes out when you approve. "Earliest valid time" asks the server for the first time that will still be valid in about ten minutes. At approval a scheduled post must be at least 12 minutes ahead, 30 for Facebook photo posts (they go through the upload queue).</p>
     </section>
 
     <div class="save-bar">
       <button class="primary" type="submit" id="ed-save">Save changes</button>
       <span class="save-state" id="ed-state" role="status" aria-live="polite">All changes saved</span>
+      <span class="hint">Saves automatically.</span>
     </div>
     <p class="hint">${esc(v.createdLine)}</p>
   </form>
@@ -492,15 +500,20 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   const state = document.getElementById("ed-state");
   const releaseBtn = document.getElementById("release-button");
   const releaseNote = document.getElementById("release-dirty");
-  const snapshot = () => JSON.stringify(Array.from(new FormData(form).entries()));
-  const initial = snapshot();
+  // The version and CSRF fields change on every save; they are not edits.
+  const entries = () => Array.from(new FormData(form).entries())
+    .filter(([k]) => k !== "expected_updated_at" && k !== "csrf").map(([k, v]) => [k, String(v)]);
+  const snapshot = () => JSON.stringify(entries());
+  let baseline = snapshot();
   let submitting = false;
-  const dirty = () => snapshot() !== initial;
+  let saveState = "";
+  const dirty = () => snapshot() !== baseline;
   window.gsEditorDirty = dirty;
   function refresh() {
     const d = dirty();
-    state.textContent = d ? "Unsaved changes" : "All changes saved";
-    state.classList.toggle("dirty", d);
+    state.textContent = saveState || (d ? "Unsaved changes" : "All changes saved");
+    state.classList.toggle("dirty", d && !saveState.startsWith("Save failed"));
+    state.classList.toggle("failed", saveState.startsWith("Save failed"));
     if (releaseBtn) releaseBtn.disabled = d;
     if (releaseNote) releaseNote.hidden = !d;
     // A frame, caption or other unsaved editor change also makes the saved
@@ -637,7 +650,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     let pool = [], BGS = {};
     try { pool = JSON.parse(igList.dataset.pool || "[]"); BGS = JSON.parse(igList.dataset.bgs || "{}"); } catch {}
     const MAXZ = Number(igList.dataset.maxZoom || 4), MAX = Number(igList.dataset.max || 10);
-    const savedValue = igField.value;
+    let savedValue = igField.value;
     let items = [];
     try { items = JSON.parse(igField.value || "[]"); } catch {}
     const srcOf = url => (pool.find(x => x.url === url) || {}).src || "";
@@ -811,6 +824,19 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     document.getElementById("ig-add-all")?.addEventListener("click", () => { pool.forEach(x => add(x.url)); render(); });
     form.querySelectorAll('input[name="ig_frame"]').forEach(r => r.addEventListener("change", () => igList.querySelectorAll(".ig-item").forEach(draw)));
     form.querySelectorAll("[data-ig-all]").forEach(b => b.addEventListener("click", () => { items.forEach(it => { it.mode = b.dataset.igAll; }); render(); }));
+    // After an autosave, the download links must name exactly the saved photos.
+    document.addEventListener("gs-saved", () => {
+      savedValue = igField.value;
+      const dl = document.getElementById("ig-downloads"), post = igList.dataset.post;
+      if (!dl) return;
+      dl.querySelectorAll("a").forEach(a => a.remove());
+      items.forEach((_, n) => {
+        if (n) dl.append(" · ");
+        const a = el("a", { href: "/instagram/" + post + "/" + n + ".jpg", download: "instagram-" + post + "-" + (n + 1) + ".jpg" }, "Photo " + (n + 1));
+        dl.append(a);
+      });
+      sync();
+    });
     igApi = { get items() { return items; }, lowRes: () => igList.querySelectorAll('.ig-item[data-lowres="1"]').length };
     render();
   }
@@ -818,22 +844,91 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   form.addEventListener("change", recheck);
   recheck();
   const when = document.getElementById("ed-when");
-  const pad = n => String(n).padStart(2, "0");
-  document.getElementById("ed-asap")?.addEventListener("click", () => {
-    const d = new Date(Date.now() + 15 * 60000);
-    when.value = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
-    refresh();
+  const touch = el => { el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); };
+  document.getElementById("ed-now")?.addEventListener("click", () => { when.value = ""; touch(when); });
+  document.getElementById("ed-earliest")?.addEventListener("click", async () => {
+    const btn = document.getElementById("ed-earliest");
+    const fb = form.querySelector('input[name="p_facebook"]')?.checked;
+    const photos = Array.from(form.querySelectorAll('[data-media="facebook"] [data-tile="photo"]'))
+      .filter(t => !t.querySelector(".tile-remove input")?.checked).length;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/earliest-time?facebook=" + (fb ? "1" : "0") + "&photos=" + photos, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      const body = await r.json();
+      if (r.ok && body.local) { when.value = body.local; touch(when); }
+    } catch {} finally { btn.disabled = false; }
   });
-  document.getElementById("ed-clear")?.addEventListener("click", () => { when.value = ""; refresh(); });
+
+  // Autosave (#61): about a second after the last edit, the same signed-in,
+  // CSRF and version-fenced save runs and returns JSON. One save at a time;
+  // edits made while one is in flight are saved next. A refused save keeps
+  // every edit on the page. Saving never approves or publishes.
+  const STRUCTURAL = /^(p_|remove_|when$)/;
+  const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
+  let timer = null, inflight = false, stopped = false, needsReload = false;
+  function setVersion(v) {
+    document.querySelectorAll('input[name="expected_updated_at"]').forEach(i => { i.value = v; });
+    const panel = document.getElementById("draft-media-panel");
+    if (panel) panel.dataset.version = v;
+  }
+  function maybeReload() {
+    if (!needsReload || inflight || dirty()) return;
+    // Platforms, removed media or the time changed: reload so the release
+    // panel lists exactly what is saved. Not while the time field is in use.
+    if (document.activeElement === when) { when.addEventListener("blur", maybeReload, { once: true }); return; }
+    submitting = true;
+    location.reload();
+  }
+  function schedule(delay) {
+    if (stopped) return;
+    clearTimeout(timer);
+    timer = setTimeout(autosave, delay ?? 1000);
+  }
+  async function autosave() {
+    if (stopped || !dirty()) { refresh(); return; }
+    if (inflight || window.gsMediaBusy) { schedule(); return; }
+    inflight = true;
+    saveState = "Saving...";
+    refresh();
+    const sent = snapshot(), before = baseline;
+    try {
+      const r = await fetch(form.action, { method: "POST", body: new FormData(form), credentials: "same-origin",
+        headers: { "X-GS-Autosave": "1", Accept: "application/json" } });
+      let body = {};
+      try { body = await r.json(); } catch {}
+      if (r.ok && body.ok && body.updated_at) {
+        setVersion(body.updated_at);
+        baseline = sent;
+        saveState = "";
+        if (structural(before) !== structural(sent)) needsReload = true;
+        document.dispatchEvent(new CustomEvent("gs-saved"));
+      } else {
+        // 409: changed elsewhere or no longer a draft. Stop, keep the edits.
+        if (r.status === 409) stopped = true;
+        saveState = "Save failed: " + (body.error || "the server answered " + r.status + ".") + (stopped ? " Your text is still on this page: copy what you need before reloading." : "");
+      }
+    } catch {
+      saveState = "Save failed: no connection. Your changes are still here and will be saved when you edit again.";
+    } finally {
+      inflight = false;
+      refresh();
+      if (!stopped && dirty() && !saveState) schedule();
+      maybeReload();
+    }
+  }
+  form.addEventListener("input", () => { if (!saveState.startsWith("Save failed") || !stopped) { if (!inflight) saveState = ""; } schedule(); });
+  form.addEventListener("change", () => schedule());
+  // The Save button saves now instead of a full page post; without JavaScript
+  // the form still posts normally.
+  form.addEventListener("submit", e => { e.preventDefault(); clearTimeout(timer); autosave(); });
   // Enter inside the media uploader must not submit the editor form.
   document.getElementById("draft-media-panel")?.addEventListener("keydown", e => {
     if (e.key === "Enter" && e.target instanceof HTMLInputElement) e.preventDefault();
   });
   form.addEventListener("input", refresh);
   form.addEventListener("change", refresh);
-  form.addEventListener("submit", () => { submitting = true; });
   window.addEventListener("beforeunload", e => {
-    if (!submitting && dirty()) { e.preventDefault(); e.returnValue = ""; }
+    if (!submitting && (dirty() || inflight)) { e.preventDefault(); e.returnValue = ""; }
   });
   refresh();
 })();
