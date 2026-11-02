@@ -10,6 +10,7 @@ import { BSKY_TEXT_LIMIT, textLength } from "./bluesky.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 import { captionLimit, checkTarget, PLATFORM_ORDER, PLATFORMS, platformRulesJson, FACEBOOK_CAPTION_MAX,
   type PlatformId, type TargetState } from "./platforms.ts";
+import type { TikTokReleasePlan } from "./tiktok-release.ts";
 import { countHashtags, defaultItem, INSTAGRAM_BACKGROUNDS, INSTAGRAM_CAPTION_MAX, INSTAGRAM_FRAMES, INSTAGRAM_MAX_ITEMS,
   INSTAGRAM_MAX_ZOOM, INSTAGRAM_PLAN_JS, instagramSaveErrors, readInstagramItems,
   type InstagramDraft, type InstagramFrame } from "./instagram.ts";
@@ -142,6 +143,8 @@ export interface EditorView {
   releaseProblems: string[];
   mediaPanel: string;
   tiktokCard: string;
+  /** What the one-PIN release would send to TikTok (#61). */
+  tiktokPlan?: TikTokReleasePlan;
   mediaLooksPending: boolean;
   createdLine: string;
 }
@@ -195,7 +198,7 @@ function checkItems(t: TargetState): string {
   return [...c.errors.map((e) => `<li class="e">${esc(e)}</li>`), ...c.warnings.map((w) => `<li class="w">${esc(w)}</li>`)].join("");
 }
 
-const photos = (n: number) => n + (n === 1 ? " photo" : " photos");
+const photos = (n: number) => (n ? n + (n === 1 ? " photo" : " photos") : "text only");
 const chip = (name: string, label: string, on: boolean) =>
   `<label class="platform-chip"><input type="checkbox" name="${name}" value="1" data-platform-toggle="${name.slice(2)}"${on ? " checked" : ""}> ${label}</label>`;
 
@@ -231,28 +234,56 @@ export function renderDraftEditor(v: EditorView): string {
     p.facebook_enabled ? `<label><input type="checkbox" name="target_facebook" value="1" checked> Facebook · ${p.video ? "video" : photos(p.images.length)}</label>` : "",
     bs ? `<label><input type="checkbox" name="target_bluesky" value="1" checked> Bluesky · ${bs.video ? "video" : photos(bs.images.length)}</label>` : "",
   ].join("");
-  const canRelease = !!(p.facebook_enabled || bs);
+  const ttPlan = v.tiktokPlan;
+  const ttOk = ttPlan?.ok ? ttPlan : null;
+  const fbBs = !!(p.facebook_enabled || bs);
+  const canRelease = fbBs || !!ttOk;
+  const scheduledOthers = fbBs && p.scheduled_at;
+  const ttPreview = ttOk ? (ttOk.type === "VIDEO"
+    ? `<video class="tt-video" controls playsinline preload="metadata" src="/video/${id}/tiktok"></video>`
+    : `<div class="tt-strip">${Array.from({ length: Math.min(ttOk.count, 12) }, (_, i) => `<img loading="lazy" src="/media/${id}/${i}?platform=tiktok" alt="TikTok photo ${i + 1}">`).join("")}${ttOk.count > 12 ? `<span class="tt-more">+${ttOk.count - 12}</span>` : ""}</div>`) : "";
+  const ttBlock = ttOk ? `
+      <fieldset class="tt-release">
+        <legend class="sr-only">TikTok</legend>
+        <label class="tt-target"><input type="checkbox" name="target_tiktok" value="1" checked data-tt-toggle> ${ttOk.retry ? "Send again: " : ""}TikTok · ${ttOk.type === "VIDEO" ? "video" : ttOk.count + "-photo carousel"} to your inbox</label>
+        <div class="tt-details" data-tt-details>
+          ${ttPreview}
+          <p class="hint">${ttOk.type === "VIDEO"
+            ? "TikTok takes no caption for inbox videos; add it in the app."
+            : `Title: <strong>${esc(ttOk.title)}</strong>. Caption: ${esc(ttOk.caption.slice(0, 140))}${ttOk.caption.length > 140 ? "..." : ""} <span class="tt-edit">(edit it in the TikTok card; it saves automatically)</span>`}</p>
+          <p class="tt-now" role="note"><strong>Sent to your TikTok inbox the moment you approve</strong>${scheduledOthers ? `, even though ${p.facebook_enabled && bs ? "Facebook and Bluesky are" : p.facebook_enabled ? "Facebook is" : "Bluesky is"} scheduled for ${esc(v.whenText)}` : ""}. Nothing is published on TikTok: you finish and post it in the TikTok app.</p>
+          <label><input type="checkbox" name="is_aigc" value="1"> AI-generated content (declared to TikTok)</label>
+          <label><input type="checkbox" name="confirm_tiktok" value="1" required data-tt-required> I have the rights to this media and want it sent to TikTok now.</label>
+        </div>
+      </fieldset>` : ttPlan && !ttPlan.ok && ttPlan.offered ? `<p class="hint tt-blocked">TikTok: ${esc(ttPlan.reason)}</p>` : "";
+  const effects = [
+    ...(ttOk ? [`<li><strong>Now:</strong> TikTok inbox</li>`] : []),
+    ...(fbBs ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", bs ? "Bluesky" : ""].filter(Boolean).join(" and ")}</li>`] : []),
+  ];
+  const buttonText = ttOk && fbBs ? "Approve selected targets" : ttOk ? "Approve and send to TikTok inbox" : p.scheduled_at ? "Approve and schedule" : "Approve and post now";
   const release = canRelease ? `
     <form method="post" action="/post/${id}/approve" class="release-card" id="release-form">
       <input type="hidden" name="csrf" value="${esc(v.csrf)}">
       <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
       <div class="eyebrow">Release</div>
-      <h3>${p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
+      <h3>${!fbBs ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
       ${releaseTargets}
-      ${v.releaseProblems.length ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
       ${v.mediaLooksPending ? `<label><input type="checkbox" name="publish_without_media" value="1"> The name says media is pending, but Facebook has none. Publish without media anyway.</label>` : ""}
-      ${p.scheduled_at ? `<label class="rollover"><input type="checkbox" name="auto_rollover" value="1"> Automatically move to the next valid time if necessary</label>
+      ${fbBs && p.scheduled_at ? `<label class="rollover"><input type="checkbox" name="auto_rollover" value="1"> Automatically move to the next valid time if necessary</label>
       <p class="hint">Off: if ${esc(v.whenText)} has become too close, approval is refused and you pick a new time. On: it moves to the earliest valid time and tells you the new time.</p>`
       : p.facebook_enabled && p.images.length ? `<p class="hint">Photo posts go through the upload queue and usually appear on Facebook within a few minutes.</p>` : ""}
+      ${ttBlock}
+      ${effects.length > 1 ? `<ul class="effects" aria-label="What approving does">${effects.join("")}</ul>` : ""}
       <label for="release-pin">PIN</label>
       <input id="release-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
       <p class="hint release-dirty" id="release-dirty" hidden>Saving your changes. Approval unlocks when they are saved; it releases the saved version.</p>
-      <div class="row"><button class="primary" id="release-button">${p.scheduled_at ? "Approve and schedule" : "Approve and post now"}</button></div>
-      <p class="rail-note">Releases exactly the saved draft. TikTok is sent separately below.</p>
+      <div class="row"><button class="primary" id="release-button">${buttonText}</button></div>
+      <p class="rail-note">Releases exactly the saved draft. Each platform's result is shown separately; nothing is retried automatically.</p>
       ${ig ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
-    </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok only</h3>
-      <p class="hint">Facebook and Bluesky are off. Send it to your TikTok inbox below.</p></div>`
+    </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok</h3>
+      <p class="hint">${esc(ttPlan && !ttPlan.ok ? ttPlan.reason : "Nothing to release yet.")}</p></div>`
     : `<div class="release-card"><div class="eyebrow">Release</div><h3>Instagram only</h3>
       <p class="hint">Instagram is not connected yet, so there is nothing to approve. Download the finished photos from the Instagram card.</p></div>`;
 
@@ -343,6 +374,17 @@ export function renderDraftEditor(v: EditorView): string {
 .release-card{background:var(--panel);border:1px solid var(--accent2);border-radius:14px;padding:18px}
 .release-card h3{margin:6px 0 10px}
 .time-row{display:flex;flex-wrap:wrap;gap:8px}
+.tt-release{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:12px 0;display:grid;gap:8px}
+.tt-target{font-weight:650!important;color:var(--text)!important;margin:0!important}
+.tt-details{display:grid;gap:8px}
+.tt-details[hidden]{display:none}
+.tt-strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
+.tt-strip img{flex:0 0 52px;width:52px;height:70px;object-fit:cover;border-radius:5px}
+.tt-more{align-self:center;font:600 12px system-ui,sans-serif;color:var(--muted)}
+.tt-video{width:100%;max-height:220px;border-radius:8px;background:#000}
+.tt-now{margin:0;padding:8px 10px;border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel));font:13px system-ui,sans-serif}
+.tt-edit{color:var(--muted)}
+.effects{list-style:none;margin:8px 0 0;padding:0;font:13px system-ui,sans-serif;display:grid;gap:2px}
 .mode-line{font:13px system-ui,sans-serif;color:var(--muted);margin:-6px 0 14px}
 .rollover{font-weight:600!important;color:var(--text)!important}
 .save-state.failed{color:var(--err);font-weight:600}
@@ -927,6 +969,17 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   });
   form.addEventListener("input", refresh);
   form.addEventListener("change", refresh);
+  // TikTok in the release form: unticking it hides its details and drops
+  // the consent requirement; the server checks the same on approval.
+  const ttToggle = document.querySelector("[data-tt-toggle]");
+  if (ttToggle) {
+    const sync = () => {
+      document.querySelector("[data-tt-details]").hidden = !ttToggle.checked;
+      document.querySelector("[data-tt-required]").required = ttToggle.checked;
+    };
+    ttToggle.addEventListener("change", sync);
+    sync();
+  }
   window.addEventListener("beforeunload", e => {
     if (!submitting && (dirty() || inflight)) { e.preventDefault(); e.returnValue = ""; }
   });

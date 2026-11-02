@@ -48,6 +48,7 @@ import { isSameOrigin } from "./origin.ts";
 import { formatLocal, localToUtc, toLocalInput } from "./time.ts";
 import { APPROVE_MIN_LEAD_MS, checkMessage, checkWhen, mediaLooksPending } from "./validate.ts";
 import { decideReleaseTime, earliestValidTime, EDITOR_BUFFER_MS } from "./schedule.ts";
+import { sendTikTokOnApproval, tiktokReleasePlan } from "./tiktok-release.ts";
 
 const redirect = (location: string, headers?: Headers): Response => {
   const h = headers ?? new Headers();
@@ -458,7 +459,10 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   }
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
     const ttRetry=tiktokTransfer?.status==="rejected"||tiktokTransfer?.status==="cleared";
-    if((!tiktokTransfer||ttRetry) && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
+    // Unapproved drafts send TikTok from the editor's release form (#61); the
+    // separate options step stays for scheduled and published posts.
+    const inEditor=["draft","rejected"].includes(p.status)&&!p.approved_at;
+    if((!tiktokTransfer||ttRetry) && !inEditor && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
       <div class="eyebrow">TikTok · ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
       <h3 style="margin:8px 0">${TIKTOK_DIRECT_POST_VISIBLE?"Choose your TikTok publishing path":"Send to your TikTok inbox"}</h3>
       <p class="hint">Review the ${ttMedia.video?"video":"carousel"} before sending it to your TikTok inbox${TIKTOK_DIRECT_POST_VISIBLE?" or starting a private Direct Post test":""}. Sending needs your approval PIN. The calendar time does not trigger TikTok publication; you finish and publish in the TikTok app.</p>
@@ -499,6 +503,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     const editor = renderDraftEditor({
       post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p), error: state.error, notice: state.notice,
       checksHtml: checkList, releaseProblems, mediaPanel: draftMediaPanel(p, csrf), tiktokCard: actions,
+      tiktokPlan: tiktokReleasePlan(p, tiktokConn, tiktokTransfer),
       mediaLooksPending: p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release),
       createdLine: `Drafted by ${p.created_by ?? "?"} · ${formatLocal(new Date(p.created_at), env.TIMEZONE)} · ${p.id}`,
     });
@@ -986,7 +991,15 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     }
     const facebook = current.facebook_enabled && form.get("target_facebook") === "1";
     const blueskySelected = !!current.bluesky && form.get("target_bluesky") === "1";
-    if (!facebook && !blueskySelected) return postPage(env, session, id, { error: "Choose at least one target." }, 400);
+    // TikTok in the same approval (#61 point 5): one inbox transfer of the
+    // saved TikTok media, sent now. Checked here, before anything is sent.
+    const tiktokSelected = !!current.tiktok_enabled && form.get("target_tiktok") === "1";
+    const ttPlan = tiktokSelected
+      ? tiktokReleasePlan(current, await tiktokConnection(env.DB), await getTikTokInboxTransfer(env.DB, id)) : null;
+    if (ttPlan && !ttPlan.ok) return postPage(env, session, id, { error: "TikTok: " + ttPlan.reason }, 400);
+    if (tiktokSelected && form.get("confirm_tiktok") !== "1")
+      return postPage(env, session, id, { error: "Confirm that TikTok gets the media now, in your inbox, and that you have the rights to it." }, 400);
+    if (!facebook && !blueskySelected && !tiktokSelected) return postPage(env, session, id, { error: "Choose at least one target." }, 400);
     if (facebook && !current.images.length && !current.video && mediaLooksPending(current.label, current.release) &&
         form.get("publish_without_media") !== "1") {
       return postPage(env, session, id, { error: "This post's name says media is pending, but Facebook has no images or video. Attach the media, or tick \"Publish without media anyway\"." }, 400);
@@ -1006,7 +1019,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     // A null time is "post now" and stays null. A too-close time is moved only
     // when the owner ticked the opt-in rollover box on THIS approval (#61); the
     // moved time is written by the same version-fenced claim below.
-    const saved: Date | null = current.scheduled_at ? new Date(current.scheduled_at) : null;
+    // TikTok alone ignores the calendar time: the inbox transfer is immediate.
+    const saved: Date | null = current.scheduled_at && (facebook || blueskySelected) ? new Date(current.scheduled_at) : null;
     const lead = { facebook, photos: current.images.length };
     const decision = decideReleaseTime(saved, new Date(), lead, form.get("auto_rollover") === "1");
     if (!decision.ok) return postPage(env, session, id, {
@@ -1044,18 +1058,41 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         }
       }
     }
-    const result = await approveAndPublish(env, id, {
-      message, scheduledAt: when, actor: session.login,
-      facebookEnabled: facebook, bluesky, expectedUpdatedAt: current.updated_at,
-    });
-    const moved = decision.movedFrom && when
-      ? ` Moved from ${formatLocal(decision.movedFrom, env.TIMEZONE)} because that time was too close, as you allowed.` : "";
-    if (moved) await audit(env.DB, session.login, "schedule-rolled-over", id,
-      `${decision.movedFrom!.toISOString()} -> ${when!.toISOString()}`).catch(() => undefined);
-    if (result.status === "failed") return postPage(env, session, id, { error: "A selected target failed. Review the target-specific error below." + moved }, 502);
-    return postPage(env, session, id, {
-      notice: (result.status === "scheduled" ? `Scheduled for ${whenText(env, result)}.` : "Approved. Review each target status below.") + moved,
-    });
+    // Every check has passed. Send TikTok first, fenced on the same saved
+    // version the Facebook/Bluesky claim uses; the transfer row does not change
+    // that version. Each platform's outcome is reported on its own and nothing
+    // is retried: a second click cannot resend TikTok (claimed row) or
+    // re-approve Facebook (no longer a draft).
+    const outcomes: { ok: boolean; text: string }[] = [];
+    if (ttPlan?.ok) {
+      try {
+        await sendTikTokOnApproval(env, ttPlan, id, current.updated_at, session.login, form.get("is_aigc") === "1");
+        outcomes.push({ ok: true, text: `TikTok: ${ttPlan.type === "VIDEO" ? "video" : ttPlan.count + "-photo carousel"} sent to your TikTok inbox now. Finish and publish it in the TikTok app.` });
+      } catch (error) {
+        outcomes.push({ ok: false, text: "TikTok: " + (error instanceof Error ? error.message : String(error)) + " See the TikTok card for the safe next step." });
+      }
+    }
+    if (facebook || bluesky) {
+      try {
+        const result = await approveAndPublish(env, id, {
+          message, scheduledAt: when, actor: session.login,
+          facebookEnabled: facebook, bluesky, expectedUpdatedAt: current.updated_at,
+        });
+        const moved = decision.movedFrom && when
+          ? ` Moved from ${formatLocal(decision.movedFrom, env.TIMEZONE)} because that time was too close, as you allowed.` : "";
+        if (moved) await audit(env.DB, session.login, "schedule-rolled-over", id,
+          `${decision.movedFrom!.toISOString()} -> ${when!.toISOString()}`).catch(() => undefined);
+        const names = [facebook ? "Facebook" : "", bluesky ? "Bluesky" : ""].filter(Boolean).join(" and ");
+        outcomes.push(result.status === "failed"
+          ? { ok: false, text: `${names}: a selected target failed. Review the target-specific error below.${moved}` }
+          : { ok: true, text: (result.status === "scheduled" ? `${names}: scheduled for ${whenText(env, result)}.` : `${names}: approved. Review each target status below.`) + moved });
+      } catch (error) {
+        outcomes.push({ ok: false, text: (facebook ? "Facebook" : "Bluesky") + ": " + (error instanceof Error ? error.message : String(error)) });
+      }
+    }
+    const text = outcomes.map((o) => o.text).join(" ");
+    if (outcomes.every((o) => o.ok)) return postPage(env, session, id, { notice: text });
+    return postPage(env, session, id, { error: text }, outcomes.some((o) => o.ok) ? 200 : 502);
   } catch (e) {
     return postPage(env, session, id, { error: e instanceof Error ? e.message : String(e) }, 409);
   }
