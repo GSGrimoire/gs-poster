@@ -527,7 +527,7 @@ export async function saveEditorDraft(
         video = ?, tiktok_video = ?, facebook_enabled = ?, tiktok_enabled = ?, scheduled_at = ?, label = ?, release = ?,
         link = CASE WHEN ? = 1 THEN ? ELSE link END, updated_at = ?
       WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL`)
-      .bind(next.message, next.tiktok_caption, next.tiktok_title, JSON.stringify(next.images),
+      .bind(next.message, next.tiktok_caption, next.tiktok_title ?? null, JSON.stringify(next.images),
         next.tiktok_images === null ? null : JSON.stringify(next.tiktok_images),
         next.video, next.tiktok_video, next.facebook_enabled ? 1 : 0, next.tiktok_enabled ? 1 : 0,
         next.scheduled_at, next.label, next.release,
@@ -540,13 +540,13 @@ export async function saveEditorDraft(
             status = excluded.status, uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL, started_at = NULL`)
         .bind(id, bluesky.caption, JSON.stringify(bluesky.images),
           bluesky.video ? JSON.stringify(bluesky.video) : null,
-          bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, next.bluesky_enabled ? "draft" : "disabled", id, version)
+          bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, (next.bluesky_enabled ?? !!bluesky) ? "draft" : "disabled", id, version)
       : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version),
   ];
   if (instagram) statements.push(db.prepare(`INSERT INTO instagram_targets (post_id, caption, frame, items, status)
       SELECT ?, ?, ?, ?, ? WHERE ${fenced}
       ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items, status = excluded.status`)
-    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), next.instagram_enabled ? "draft" : "disabled", id, version));
+    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), (next.instagram_enabled ?? !!instagram) ? "draft" : "disabled", id, version));
   else if (instagram === null) statements.push(
     db.prepare(`DELETE FROM instagram_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version));
   const results = await db.batch(statements);
