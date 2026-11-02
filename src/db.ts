@@ -30,6 +30,8 @@ export type PostStatus =
   | "failed"
   | "cancelled";
 
+import type { InstagramDraft } from "./instagram.ts";
+
 export interface Post {
   id: string;
   created_at: string;
@@ -58,9 +60,14 @@ export interface Post {
   /** TikTok inbox-only workflow; no automatic publication. */
   tiktok_enabled?: boolean;
   bluesky: BlueskyTarget | null;
+  /** Instagram feed target, prepared only: nothing sends it yet. */
+  instagram: InstagramDraft | null;
 }
 
-interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky"> {
+interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky" | "instagram"> {
+  ig_caption?: string | null;
+  ig_frame?: string | null;
+  ig_items?: string | null;
   facebook_enabled: number;
   tiktok_enabled: number;
   images: string;
@@ -81,8 +88,10 @@ interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled"
 const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
  b.video AS bs_video, b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
  b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
- b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error
- FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id`;
+ b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error,
+ i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items
+ FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id
+ LEFT JOIN instagram_targets i ON p.id = i.post_id`;
 
 let schemaReady = false;
 
@@ -138,6 +147,15 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       started_at TEXT
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS bluesky_due ON bluesky_targets(status)`),
+    // Instagram is prepared only. A status column exists for the future
+    // publishing adapter; nothing reads or advances it yet.
+    db.prepare(`CREATE TABLE IF NOT EXISTS instagram_targets (
+      post_id TEXT PRIMARY KEY,
+      caption TEXT NOT NULL,
+      frame TEXT NOT NULL,
+      items TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'draft'
+    )`),
   ]);
   // Existing deployed D1 databases predate the optional video column.
   const columns = await db.prepare("PRAGMA table_info(bluesky_targets)").all<{name:string}>();
@@ -183,6 +201,11 @@ function fromRow(r: Row): Post {
       card_uri: r.bs_card_uri,
       permalink: r.bs_permalink,
       error: r.bs_error,
+    },
+    instagram: r.ig_caption == null ? null : {
+      caption: r.ig_caption,
+      frame: (r.ig_frame ?? "4:5") as InstagramDraft["frame"],
+      items: JSON.parse(r.ig_items || "[]"),
     },
   };
 }
@@ -480,6 +503,8 @@ export interface EditorDraft {
  */
 export async function saveEditorDraft(
   db: D1Database, id: string, expectedVersion: string, next: EditorDraft, bluesky: BlueskyDraft | null,
+  /** Undefined leaves the Instagram target as it is; null removes it. */
+  instagram?: InstagramDraft | null,
 ): Promise<string | null> {
   await ensureSchema(db);
   if (!Number.isFinite(Date.parse(expectedVersion))) return null;
@@ -505,6 +530,12 @@ export async function saveEditorDraft(
           bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, id, version)
       : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version),
   ];
+  if (instagram) statements.push(db.prepare(`INSERT INTO instagram_targets (post_id, caption, frame, items, status)
+      SELECT ?, ?, ?, ?, 'draft' WHERE ${fenced}
+      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items, status = 'draft'`)
+    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), id, version));
+  else if (instagram === null) statements.push(
+    db.prepare(`DELETE FROM instagram_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version));
   const results = await db.batch(statements);
   return (results[0].meta.changes ?? 0) === 1 ? version : null;
 }
@@ -634,6 +665,7 @@ export async function deletePost(db: D1Database, id: string, onlyIfStatus: PostS
     .run();
   if ((res.meta.changes ?? 0) > 0) {
     await db.prepare("DELETE FROM bluesky_targets WHERE post_id = ?").bind(id).run();
+    await db.prepare("DELETE FROM instagram_targets WHERE post_id = ?").bind(id).run();
     return true;
   }
   return false;

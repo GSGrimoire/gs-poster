@@ -4,14 +4,15 @@
  * guidance only warns. Display guidance describes how a feed tends to show a
  * picture; it is not a provider acceptance range and never blocks a save.
  *
- * Adding a platform (Instagram is next, see the 1 November review) means a
- * new entry here plus its adapter. Do not add Instagram here before its
- * placements and media hosting have been decided and reviewed.
+ * Adding a platform means a new entry here plus its adapter. Instagram is
+ * here for preparation only (feed carousel, crop or pad); it has no
+ * publishing adapter and no media hosting yet, see the 1 November review.
  */
 import { BSKY_IMAGE_COUNT, BSKY_TEXT_LIMIT } from "./bluesky.ts";
 import { MAX_IMAGES } from "./validate.ts";
+import { INSTAGRAM_CAPTION_MAX, INSTAGRAM_HASHTAG_MAX, INSTAGRAM_MAX_ITEMS } from "./instagram.ts";
 
-export type PlatformId = "facebook" | "bluesky" | "tiktok";
+export type PlatformId = "facebook" | "bluesky" | "tiktok" | "instagram";
 
 export interface AspectGuide {
   /** Width / height bounds a single photo shows uncropped in the feed. */
@@ -40,6 +41,10 @@ export interface PlatformRules {
   aspect: AspectGuide;
   /** One line describing how the platform delivers the post. */
   delivery: string;
+  /** Hashtag cap, when the platform has one. */
+  maxHashtags?: number;
+  /** Every photo is fitted to one frame by crop or pad, so shape is never a note. */
+  framed?: boolean;
 }
 
 export const TIKTOK_PHOTO_MAX = 35;
@@ -72,9 +77,18 @@ export const PLATFORMS: Record<PlatformId, PlatformRules> = {
       outside: "TikTok shows other shapes full width with bars above and below." },
     delivery: "Sent to your TikTok inbox. You add sound and post in the app.",
   },
+  instagram: {
+    id: "instagram", label: "Instagram",
+    caption: { photo: INSTAGRAM_CAPTION_MAX, video: INSTAGRAM_CAPTION_MAX, text: 0 },
+    graphemes: false, maxPhotos: INSTAGRAM_MAX_ITEMS, textOnly: false, mixPhotoVideo: false, altRequired: false,
+    aspect: { min: 0.8, max: 1.91, label: "4:5 to 1.91:1",
+      outside: "Each photo is cropped or padded to the frame you choose." },
+    delivery: "Not connected yet. Download the finished photos and post them in the Instagram app.",
+    maxHashtags: INSTAGRAM_HASHTAG_MAX, framed: true,
+  },
 };
 
-export const PLATFORM_ORDER: PlatformId[] = ["facebook", "bluesky", "tiktok"];
+export const PLATFORM_ORDER: PlatformId[] = ["facebook", "instagram", "bluesky", "tiktok"];
 
 /** Which caption limit applies for the media a target carries. */
 export function captionLimit(id: PlatformId, media: { photos: number; video: boolean }): number {
@@ -91,6 +105,7 @@ export interface TargetState {
   missingAlt: number;
   /** Width / height of each photo, when known. */
   ratios?: number[];
+  hashtags?: number;
 }
 
 export interface TargetCheck { errors: string[]; warnings: string[] }
@@ -108,8 +123,9 @@ export function checkTarget(t: TargetState): TargetCheck {
   if (!t.photos && !t.video && !r.textOnly) errors.push(`${r.label} needs photos or a video.`);
   if (limit && t.captionLength > limit) errors.push(`Caption is ${t.captionLength} characters; ${r.label} allows ${limit}.`);
   if (r.altRequired && t.missingAlt) errors.push(`${t.missingAlt} ${t.missingAlt === 1 ? "description is" : "descriptions are"} missing.`);
+  if (r.maxHashtags && (t.hashtags ?? 0) > r.maxHashtags) errors.push(`${t.hashtags} hashtags; ${r.label} allows ${r.maxHashtags}.`);
   if (!t.captionLength && t.id !== "tiktok") warnings.push("Caption is empty.");
-  const off = (t.ratios ?? []).filter((x) => x < r.aspect.min - 0.01 || x > r.aspect.max + 0.01).length;
+  const off = r.framed ? 0 : (t.ratios ?? []).filter((x) => x < r.aspect.min - 0.01 || x > r.aspect.max + 0.01).length;
   if (off) warnings.push(`${off} ${off === 1 ? "photo is" : "photos are"} outside ${r.aspect.label}. ${r.aspect.outside}`);
   return { errors, warnings };
 }

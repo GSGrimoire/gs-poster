@@ -10,6 +10,9 @@ import { BSKY_TEXT_LIMIT, textLength } from "./bluesky.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 import { captionLimit, checkTarget, PLATFORM_ORDER, PLATFORMS, platformRulesJson, FACEBOOK_CAPTION_MAX,
   type PlatformId, type TargetState } from "./platforms.ts";
+import { countHashtags, defaultItem, INSTAGRAM_BACKGROUNDS, INSTAGRAM_CAPTION_MAX, INSTAGRAM_FRAMES, INSTAGRAM_MAX_ITEMS,
+  INSTAGRAM_MAX_ZOOM, INSTAGRAM_PLAN_JS, instagramSaveErrors, readInstagramItems,
+  type InstagramDraft, type InstagramFrame } from "./instagram.ts";
 
 const FB_MAX = FACEBOOK_CAPTION_MAX;
 const MAX_ALT = 1000;
@@ -18,6 +21,14 @@ export interface EditorParse {
   errors: string[];
   next?: EditorDraft;
   bluesky?: BlueskyDraft | null;
+  instagram?: InstagramDraft | null;
+}
+
+/** Every photo already on the post, in a stable order, for the Instagram picker. */
+export function postPhotos(p: Post): string[] {
+  const all = [...p.images, ...(p.tiktok_images ?? []), ...(p.bluesky?.images.map((i) => i.url) ?? []),
+    ...(p.instagram?.items.map((i) => i.url) ?? [])];
+  return [...new Set(all)];
 }
 
 const text = (form: FormData, key: string, fallback: string): string => {
@@ -39,7 +50,8 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   const facebook = form.get("p_facebook") === "1";
   const blueskyOn = form.get("p_bluesky") === "1";
   const tiktok = form.get("p_tiktok") === "1";
-  if (!facebook && !blueskyOn && !tiktok) errors.push("Choose at least one platform.");
+  const instagramOn = form.get("p_instagram") === "1";
+  if (!facebook && !blueskyOn && !tiktok && !instagramOn) errors.push("Choose at least one platform.");
 
   const message = text(form, "message", cur.message);
   if (message.length > FB_MAX) errors.push(`The Facebook caption is ${message.length} characters; Facebook allows ${FB_MAX}.`);
@@ -78,6 +90,24 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     };
   }
 
+  // Instagram may only use photos already on this post; new media still comes
+  // through the private upload routes.
+  let instagram: InstagramDraft | null = null;
+  if (instagramOn) {
+    const base = cur.instagram ?? { caption: "", frame: "4:5" as InstagramFrame, items: [] };
+    const rawItems = form.get("ig_items");
+    const items = rawItems === null ? base.items : readInstagramItems(String(rawItems));
+    if (!items) errors.push("Could not read the Instagram photo settings. Reload the page and try again.");
+    else {
+      instagram = {
+        caption: text(form, "ig_caption", base.caption),
+        frame: text(form, "ig_frame", base.frame) as InstagramFrame,
+        items,
+      };
+      errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur))));
+    }
+  }
+
   let scheduledAt: string | null = cur.scheduled_at;
   const whenRaw = form.get("when");
   if (whenRaw !== null) {
@@ -92,6 +122,7 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   return {
     errors,
     bluesky,
+    instagram,
     next: {
       message, tiktok_caption: tiktokCaption, images, tiktok_images: tiktokImages, video,
       tiktok_video: tiktokVideo, facebook_enabled: facebook, tiktok_enabled: tiktok,
@@ -136,6 +167,8 @@ export function targetStates(p: Post): Record<PlatformId, TargetState> {
     bluesky: { id: "bluesky", captionLength: bs ? textLength(bs.caption) : 0,
       photos: bs?.video ? 0 : (bs?.images.length ?? 0), video: !!bs?.video,
       missingAlt: (bs?.images.filter((i) => !i.alt.trim()).length ?? 0) + (bs?.video && !bs.video.alt.trim() ? 1 : 0) },
+    instagram: { id: "instagram", captionLength: p.instagram?.caption.length ?? 0,
+      photos: p.instagram?.items.length ?? 0, video: false, missingAlt: 0, hashtags: countHashtags(p.instagram?.caption ?? "") },
     tiktok: { id: "tiktok", captionLength: (p.tiktok_caption ?? p.message).length,
       photos: ttShared ? (p.video ? 0 : p.images.length) : tt.images.length,
       video: ttShared ? !!p.video : !!tt.video, missingAlt: 0 },
@@ -148,10 +181,11 @@ function formatLine(id: PlatformId): string {
     ? `${r.caption.photo.toLocaleString("en-GB")} characters`
     : `${r.caption.photo.toLocaleString("en-GB")} characters with photos, ${r.caption.video.toLocaleString("en-GB")} with video`;
   return [
-    `Up to ${r.maxPhotos} photos or 1 video`,
+    r.framed ? `Up to ${r.maxPhotos} photos` : `Up to ${r.maxPhotos} photos or 1 video`,
     caps,
     r.altRequired ? "descriptions required" : "",
-    `shows best at ${r.aspect.label}`,
+    r.maxHashtags ? `${r.maxHashtags} hashtags` : "",
+    r.framed ? "JPEG, one frame for all photos" : `shows best at ${r.aspect.label}`,
   ].filter(Boolean).join(" · ");
 }
 
@@ -172,7 +206,11 @@ export function renderDraftEditor(v: EditorView): string {
   const tt = tiktokMedia(p);
   const ttShared = p.tiktok_images === null;
   const hide = (on: boolean) => (on ? "" : " hidden");
-  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!bs, tiktok: !!p.tiktok_enabled };
+  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!bs, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
+  const ig = p.instagram;
+  const pool = postPhotos(p);
+  const igItems = ig?.items ?? [];
+  const igFrame: InstagramFrame = ig?.frame ?? "4:5";
   const states = targetStates(p);
   const fbMedia = p.video
     ? video(`/video/${p.id}/facebook`, "remove_fb_video")
@@ -209,8 +247,11 @@ export function renderDraftEditor(v: EditorView): string {
       <p class="hint release-dirty" id="release-dirty" hidden>Save your changes first. Release uses the saved version.</p>
       <div class="row"><button class="primary" id="release-button">${p.scheduled_at ? "Approve and schedule" : "Approve and post now"}</button></div>
       <p class="rail-note">Releases exactly the saved draft. TikTok is sent separately below.</p>
-    </form>` : `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok only</h3>
-      <p class="hint">Facebook and Bluesky are off. Send it to your TikTok inbox below.</p></div>`;
+      ${ig ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
+    </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok only</h3>
+      <p class="hint">Facebook and Bluesky are off. Send it to your TikTok inbox below.</p></div>`
+    : `<div class="release-card"><div class="eyebrow">Release</div><h3>Instagram only</h3>
+      <p class="hint">Instagram is not connected yet, so there is nothing to approve. Download the finished photos from the Instagram card.</p></div>`;
 
   return `
 <style>
@@ -261,6 +302,36 @@ export function renderDraftEditor(v: EditorView): string {
 .readiness [data-ready]{color:var(--ok)}
 .readiness li.has-e [data-ready]{color:var(--err)}
 .readiness li.has-w [data-ready]{color:var(--warn)}
+.ig-frames{border:0;padding:0;margin:4px 0 0;display:flex;flex-wrap:wrap;gap:6px}
+.ig-frames legend,.ig-mode legend{font:600 13px system-ui,sans-serif;color:var(--muted);padding:0;margin-bottom:6px}
+.seg{display:inline-flex!important;align-items:center;gap:6px;margin:0!important;padding:7px 12px;border:1px solid var(--line);border-radius:99px;background:var(--panel);cursor:pointer;font:600 13px system-ui,sans-serif!important;color:var(--text)!important}
+.seg:has(input:checked){border-color:var(--accent2);background:color-mix(in srgb,var(--accent2) 18%,var(--panel))}
+.seg:has(input:focus-visible){outline:2px solid var(--accent2);outline-offset:2px}
+.ig-bulk{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ig-bulk button,.ig-buttons button{padding:6px 11px;font-size:13px}
+.ig-items{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.ig-item{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--panel)}
+.ig-item>img{width:72px;height:72px;object-fit:contain;background:#0003;border-radius:6px}
+.ig-stage{position:relative;width:100%;max-width:340px;aspect-ratio:4/5;border-radius:6px;overflow:hidden;background:#0003;align-self:start}
+.ig-out{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+.ig-out:active{cursor:grabbing}
+.ig-out:focus-visible{outline:3px solid var(--accent2);outline-offset:-3px}
+.ig-whole{max-width:90px;max-height:90px;border-radius:4px}
+.ig-controls{display:grid;gap:8px;align-content:start;min-width:0}
+.ig-controls label{margin:0}
+.target [hidden]{display:none!important}
+.ig-row strong{font:650 14px system-ui,sans-serif}
+.ig-mode{border:0;padding:0;margin:0;display:flex;gap:6px;flex-wrap:wrap}
+.ig-row{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.ig-zoom input{width:100%}
+.ig-pool{grid-template-columns:repeat(auto-fill,minmax(76px,1fr))!important;margin:10px 0}
+.ig-add{display:grid;gap:4px;padding:4px;font-size:12px}
+.ig-add img{width:100%;aspect-ratio:1;object-fit:contain;background:#0003;border-radius:4px}
+.ig-add:disabled{opacity:.45}
+.ig-downloads a{white-space:nowrap}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media(max-width:520px){.ig-item{grid-template-columns:1fr}}
+@media(min-width:1180px){.target-ig{grid-column:span 2}}
 .house-title{font:650 14px system-ui,sans-serif;margin:16px 0 0}
 .save-bar{position:sticky;bottom:0;z-index:2;display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 16px;margin-top:6px;background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:14px}
 .save-bar button{flex:0 0 auto}
@@ -289,6 +360,7 @@ export function renderDraftEditor(v: EditorView): string {
       <h3 id="ed-platforms">Platforms</h3>
       <div class="platform-chips">
         ${chip("p_facebook", "Facebook", p.facebook_enabled)}
+        ${chip("p_instagram", "Instagram", !!ig)}
         ${chip("p_bluesky", "Bluesky", !!bs)}
         ${chip("p_tiktok", "TikTok", !!p.tiktok_enabled)}
       </div>
@@ -310,6 +382,33 @@ export function renderDraftEditor(v: EditorView): string {
           <textarea id="ed-message" name="message" maxlength="${FB_MAX}" data-max="${FB_MAX}" data-caption="facebook">${esc(p.message)}</textarea>
           <div class="field-meter"></div>
           <div class="tiles" data-media="facebook">${fbMedia || empty}</div>
+        </article>
+        <article class="target target-ig" id="target-instagram" data-platform="instagram"${hide(on.instagram)} aria-labelledby="tg-instagram">
+          <div class="target-head"><h4 id="tg-instagram">Instagram</h4><p class="format">${esc(formatLine("instagram"))}</p></div>
+          <ul class="checks target-checks" data-checks="instagram">${checkItems(states.instagram)}</ul>
+          <fieldset class="ig-frames"><legend>Frame for every photo</legend>
+            ${INSTAGRAM_FRAMES.map((f) => `<label class="seg"><input type="radio" name="ig_frame" value="${f}"${f === igFrame ? " checked" : ""}> ${f === "4:5" ? "Portrait 4:5" : f === "1:1" ? "Square 1:1" : "Landscape 1.91:1"}</label>`).join("")}
+          </fieldset>
+          <div class="ig-bulk"><span class="hint">All photos:</span>
+            <button type="button" data-ig-all="crop">Crop all</button><button type="button" data-ig-all="pad">Pad all</button></div>
+          <div class="cap-row"><label for="ed-ig" class="cap-label">Caption</label>
+            <button type="button" class="copy-cap" data-copy-to="ed-ig" data-copy-from="ed-message">Copy Facebook caption</button></div>
+          <textarea id="ed-ig" name="ig_caption" maxlength="${INSTAGRAM_CAPTION_MAX}" data-max="${INSTAGRAM_CAPTION_MAX}" data-caption="instagram" placeholder="Instagram caption; links are not clickable here">${esc(ig?.caption ?? "")}</textarea>
+          <div class="field-meter"></div>
+          <input type="hidden" name="ig_items" id="ig-items-field" value="${esc(JSON.stringify(igItems))}">
+          <ol class="ig-items" id="ig-items" data-media="instagram" data-post="${id}" data-saved="${esc(JSON.stringify(igItems))}"
+            data-pool="${esc(JSON.stringify(pool.map((url, i) => ({ url, src: `/media/${p.id}/${i}?platform=pool` }))))}"
+            data-max="${INSTAGRAM_MAX_ITEMS}" data-max-zoom="${INSTAGRAM_MAX_ZOOM}" data-bgs="${esc(JSON.stringify(INSTAGRAM_BACKGROUNDS))}">
+            ${igItems.map((it, n) => `<li class="ig-item"><img src="/media/${p.id}/${pool.indexOf(it.url)}?platform=pool" alt="Instagram photo ${n + 1}">
+              <span>${it.mode === "crop" ? "Cropped" : "Padded"} · <a href="/instagram/${p.id}/${n}.jpg" download>Download</a></span></li>`).join("")}
+          </ol>
+          ${pool.length ? `<details class="ig-picker" id="ig-picker"${igItems.length ? "" : " open"}><summary>Add photos from this post</summary>
+            <div class="tiles ig-pool" id="ig-pool">${pool.map((url, i) => `<button type="button" class="ig-add" data-url="${esc(url)}"><img loading="lazy" src="/media/${p.id}/${i}?platform=pool" alt="Add photo ${i + 1}"><span>Add</span></button>`).join("")}</div>
+            <button type="button" id="ig-add-all">Add all, in this order</button>
+          </details>` : `<p class="hint">Add photos to the post first; Instagram picks from them.</p>`}
+          <p class="hint" id="ig-unsaved" hidden>Save to download the finished photos.</p>
+          <p class="hint ig-downloads" id="ig-downloads"${igItems.length ? "" : " hidden"}>${esc(PLATFORMS.instagram.delivery)}
+            ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" · ")}</p>
         </article>
         <article class="target" id="target-bluesky" data-platform="bluesky"${hide(on.bluesky)} aria-labelledby="tg-bluesky">
           <div class="target-head"><h4 id="tg-bluesky">Bluesky</h4><p class="format">${esc(formatLine("bluesky"))}</p></div>
@@ -386,7 +485,7 @@ export function renderDraftEditor(v: EditorView): string {
 }
 
 /** Client behaviour: platform toggles, counters, dirty tracking and quick times. */
-export const DRAFT_EDITOR_JS = String.raw`
+export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
 (() => {
   const form = document.getElementById("draft-editor");
   if (!form) return;
@@ -424,6 +523,7 @@ export const DRAFT_EDITOR_JS = String.raw`
   // Per-platform live checks. Mirrors checkTarget() in src/platforms.ts; the
   // rules come from the server so both use the same numbers.
   const targetsEl = form.querySelector(".targets");
+  let igApi = null;
   let rules = {};
   try { rules = JSON.parse(targetsEl?.dataset.rules || "{}"); } catch {}
   const seg = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter() : null;
@@ -438,6 +538,11 @@ export const DRAFT_EDITOR_JS = String.raw`
   function captionLimit(r, st) { return st.video ? r.caption.video : st.photos ? r.caption.photo : r.caption.text; }
   function stateOf(id, card) {
     const r = rules[id];
+    if (id === "instagram" && igApi) {
+      const text = card.querySelector("[data-caption]")?.value || "";
+      return { photos: igApi.items.length, video: false, captionLength: text.length, missingAlt: 0, ratios: [],
+        hashtags: (text.match(/(^|[^\p{L}\p{N}_&])#[\p{L}\p{N}_]+/gu) || []).length, lowRes: igApi.lowRes() };
+    }
     const tiles = kept(mediaBox(card));
     const photos = tiles.filter(t => t.dataset.tile === "photo");
     let text = card.querySelector("[data-caption]")?.value || "";
@@ -457,8 +562,10 @@ export const DRAFT_EDITOR_JS = String.raw`
     if (!st.photos && !st.video && !r.textOnly) errors.push(r.label + " needs photos or a video.");
     if (limit && st.captionLength > limit) errors.push("Caption is " + st.captionLength + " characters; " + r.label + " allows " + limit + ".");
     if (r.altRequired && st.missingAlt) errors.push(st.missingAlt + (st.missingAlt === 1 ? " description is" : " descriptions are") + " missing.");
+    if (r.maxHashtags && (st.hashtags || 0) > r.maxHashtags) errors.push(st.hashtags + " hashtags; " + r.label + " allows " + r.maxHashtags + ".");
     if (!st.captionLength && r.id !== "tiktok") warnings.push("Caption is empty.");
-    const off = st.ratios.filter(x => x < r.aspect.min - 0.01 || x > r.aspect.max + 0.01).length;
+    if (st.lowRes) warnings.push(st.lowRes + (st.lowRes === 1 ? " photo is" : " photos are") + " enlarged to fit and may look soft.");
+    const off = r.framed ? 0 : st.ratios.filter(x => x < r.aspect.min - 0.01 || x > r.aspect.max + 0.01).length;
     if (off) warnings.push(off + (off === 1 ? " photo is" : " photos are") + " outside " + r.aspect.label + ". " + r.aspect.outside);
     return { errors, warnings, limit };
   }
@@ -512,6 +619,193 @@ export const DRAFT_EDITOR_JS = String.raw`
     to.dispatchEvent(new Event("input", { bubbles: true }));
     to.focus();
   }));
+
+  // Instagram: one frame for the carousel, each photo cropped or padded.
+  // The preview uses instagramPlan(), the same function the server renders with.
+  const igList = document.getElementById("ig-items");
+  const igField = document.getElementById("ig-items-field");
+  if (igList && igField) {
+    const SIZES = { "4:5": [1080, 1350], "1:1": [1080, 1080], "1.91:1": [1080, 566] };
+    let pool = [], BGS = {};
+    try { pool = JSON.parse(igList.dataset.pool || "[]"); BGS = JSON.parse(igList.dataset.bgs || "{}"); } catch {}
+    const MAXZ = Number(igList.dataset.maxZoom || 4), MAX = Number(igList.dataset.max || 10);
+    const savedValue = igField.value;
+    let items = [];
+    try { items = JSON.parse(igField.value || "[]"); } catch {}
+    const srcOf = url => (pool.find(x => x.url === url) || {}).src || "";
+    const frame = () => (form.querySelector('input[name="ig_frame"]:checked') || {}).value || "4:5";
+    const imgs = new Map();
+    let uid = 0;
+    function load(url) {
+      if (!imgs.has(url)) {
+        const im = new Image();
+        im.addEventListener("load", () => { igList.querySelectorAll("li").forEach(li => li.dataset.url === url && draw(li)); recheck(); });
+        im.src = srcOf(url);
+        imgs.set(url, im);
+      }
+      return imgs.get(url);
+    }
+    function sync() {
+      igField.value = JSON.stringify(items);
+      const dl = document.getElementById("ig-downloads");
+      if (dl) dl.hidden = igField.value !== savedValue || !items.length;
+      const note = document.getElementById("ig-unsaved");
+      if (note) note.hidden = igField.value === savedValue;
+      igField.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    function planFor(li) {
+      const it = items[Number(li.dataset.index)], im = load(it.url);
+      if (!im.naturalWidth) return null;
+      return instagramPlan(im.naturalWidth, im.naturalHeight, frame(), it.mode, it.cx, it.cy, it.zoom);
+    }
+    function draw(li) {
+      const it = items[Number(li.dataset.index)];
+      if (!it) return;
+      const [W, H] = SIZES[frame()] || SIZES["4:5"];
+      const cv = li.querySelector(".ig-out"), whole = li.querySelector(".ig-whole");
+      const k = 420 / W;
+      cv.width = Math.round(W * k); cv.height = Math.round(H * k);
+      const ctx = cv.getContext("2d");
+      ctx.fillStyle = BGS[it.bg] || "#000";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      const warn = li.querySelector("[data-ig-warn]");
+      const im = load(it.url), p = planFor(li);
+      li.dataset.lowres = "";
+      if (!p) { warn.textContent = "Loading photo..."; return; }
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(im, p.src.x, p.src.y, p.src.w, p.src.h, p.dst.x * k, p.dst.y * k, p.dst.w * k, p.dst.h * k);
+      const enlarge = p.dst.w / p.src.w;
+      li.dataset.lowres = enlarge > 1.05 ? "1" : "";
+      warn.textContent = enlarge > 1.05
+        ? "Enlarged " + enlarge.toFixed(1) + " times (" + p.src.w + " px of the original fill " + p.dst.w + " px). It may look soft."
+        : it.mode === "crop" ? p.src.w + " x " + p.src.h + " px of " + im.naturalWidth + " x " + im.naturalHeight + " kept." : "Whole picture kept.";
+      // The small view shows the whole original and the part that is kept.
+      const wk = Math.min(150 / im.naturalWidth, 150 / im.naturalHeight);
+      whole.width = Math.round(im.naturalWidth * wk); whole.height = Math.round(im.naturalHeight * wk);
+      const wc = whole.getContext("2d");
+      wc.drawImage(im, 0, 0, whole.width, whole.height);
+      if (it.mode === "crop") {
+        wc.fillStyle = "rgba(0,0,0,.55)";
+        const x = p.src.x * wk, y = p.src.y * wk, w = p.src.w * wk, h = p.src.h * wk;
+        wc.fillRect(0, 0, whole.width, y); wc.fillRect(0, y + h, whole.width, whole.height - y - h);
+        wc.fillRect(0, y, x, h); wc.fillRect(x + w, y, whole.width - x - w, h);
+        wc.strokeStyle = "#d8b25a"; wc.lineWidth = 2; wc.strokeRect(x + 1, y + 1, w - 2, h - 2);
+      }
+      li.querySelector(".ig-stage").style.aspectRatio = W + " / " + H;
+    }
+    function el(tag, attrs, html) { const e = document.createElement(tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (html != null) e.innerHTML = html; return e; }
+    function render() {
+      igList.replaceChildren();
+      items.forEach((it, n) => {
+        const id = "ig" + (uid++);
+        const li = el("li", { class: "ig-item", "data-tile": "photo", "data-index": String(n) });
+        li.dataset.url = it.url;
+        li.innerHTML =
+          '<div class="ig-stage"><canvas class="ig-out" tabindex="0" role="img"></canvas></div>' +
+          '<div class="ig-controls">' +
+          '<div class="ig-row"><strong>Photo ' + (n + 1) + '</strong><canvas class="ig-whole" aria-hidden="true"></canvas></div>' +
+          '<fieldset class="ig-mode"><legend class="sr-only">How to fit photo ' + (n + 1) + '</legend>' +
+          '<label class="seg"><input type="radio" form="ig-detached" name="' + id + '" value="crop"> Crop</label>' +
+          '<label class="seg"><input type="radio" form="ig-detached" name="' + id + '" value="pad"> Pad</label></fieldset>' +
+          '<label class="ig-zoom">Zoom <input type="range" form="ig-detached" min="1" max="' + MAXZ + '" step="0.05"></label>' +
+          '<label class="ig-bg">Background <select form="ig-detached"></select></label>' +
+          '<p class="hint" data-ig-warn></p>' +
+          '<div class="ig-row ig-buttons">' +
+          '<button type="button" data-act="up" aria-label="Move photo ' + (n + 1) + ' earlier">&#8593;</button>' +
+          '<button type="button" data-act="down" aria-label="Move photo ' + (n + 1) + ' later">&#8595;</button>' +
+          '<button type="button" data-act="reset">Centre</button>' +
+          '<button type="button" data-act="remove" class="danger">Remove</button></div></div>';
+        const cv = li.querySelector(".ig-out");
+        cv.setAttribute("aria-label", "Instagram photo " + (n + 1) + " as it will look. " + (it.mode === "crop" ? "Drag, or use the arrow keys, to choose the part to keep; plus and minus zoom." : "Padded: the whole picture is kept."));
+        li.querySelector('input[value="' + it.mode + '"]').checked = true;
+        const zoom = li.querySelector('input[type="range"]');
+        zoom.value = String(it.zoom);
+        const sel = li.querySelector("select");
+        for (const name in BGS) { const o = el("option", { value: name }, name.charAt(0).toUpperCase() + name.slice(1)); if (name === it.bg) o.selected = true; sel.append(o); }
+        li.querySelector(".ig-zoom").hidden = it.mode !== "crop";
+        li.querySelector(".ig-bg").hidden = it.mode !== "pad";
+        li.querySelector('[data-act="reset"]').hidden = it.mode !== "crop";
+        li.querySelector('[data-act="up"]').disabled = n === 0;
+        li.querySelector('[data-act="down"]').disabled = n === items.length - 1;
+        igList.append(li);
+        draw(li);
+      });
+      igList.parentElement.querySelectorAll(".ig-add").forEach(b => {
+        const used = items.some(x => x.url === b.dataset.url);
+        b.disabled = used || items.length >= MAX;
+        b.querySelector("span").textContent = used ? "Added" : "Add";
+      });
+      sync();
+      recheck();
+    }
+    function itemOf(target) { const li = target.closest(".ig-item"); return li ? [li, items[Number(li.dataset.index)]] : [null, null]; }
+    igList.addEventListener("change", e => {
+      const [li, it] = itemOf(e.target);
+      if (!it) return;
+      if (e.target.type === "radio") { it.mode = e.target.value; render(); return; }
+      if (e.target.tagName === "SELECT") { it.bg = e.target.value; draw(li); sync(); }
+    });
+    igList.addEventListener("input", e => {
+      const [li, it] = itemOf(e.target);
+      if (it && e.target.type === "range") { it.zoom = Number(e.target.value); draw(li); sync(); }
+    });
+    igList.addEventListener("click", e => {
+      const b = e.target.closest("button[data-act]");
+      if (!b) return;
+      const [, it] = itemOf(b), n = items.indexOf(it);
+      if (b.dataset.act === "remove") items.splice(n, 1);
+      if (b.dataset.act === "up" && n > 0) items.splice(n - 1, 0, items.splice(n, 1)[0]);
+      if (b.dataset.act === "down" && n < items.length - 1) items.splice(n + 1, 0, items.splice(n, 1)[0]);
+      if (b.dataset.act === "reset") Object.assign(it, { cx: 0.5, cy: 0.5, zoom: 1 });
+      render();
+      const again = igList.querySelector('[data-index="' + Math.min(Math.max(b.dataset.act === "up" ? n - 1 : b.dataset.act === "down" ? n + 1 : n, 0), items.length - 1) + '"] [data-act="' + b.dataset.act + '"]');
+      if (again && !again.disabled) again.focus();
+    });
+    // Drag or arrow keys move the focus point of a cropped photo.
+    function nudge(li, dx, dy, dz) {
+      const it = items[Number(li.dataset.index)], im = load(it.url), p = planFor(li);
+      if (!p || it.mode !== "crop") return;
+      it.cx = Math.min(1, Math.max(0, (p.src.x + p.src.w / 2 + dx * p.src.w) / im.naturalWidth));
+      it.cy = Math.min(1, Math.max(0, (p.src.y + p.src.h / 2 + dy * p.src.h) / im.naturalHeight));
+      if (dz) { it.zoom = Math.min(MAXZ, Math.max(1, Math.round((it.zoom + dz) * 100) / 100)); li.querySelector('input[type="range"]').value = String(it.zoom); }
+      draw(li); sync();
+    }
+    let drag = null;
+    igList.addEventListener("pointerdown", e => {
+      const cv = e.target.closest(".ig-out");
+      if (!cv) return;
+      const li = cv.closest(".ig-item");
+      if (items[Number(li.dataset.index)].mode !== "crop") return;
+      drag = { li, x: e.clientX, y: e.clientY, w: cv.clientWidth, h: cv.clientHeight };
+      cv.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    igList.addEventListener("pointermove", e => {
+      if (!drag) return;
+      // Dragging the picture right shows more of its left side.
+      nudge(drag.li, -(e.clientX - drag.x) / drag.w, -(e.clientY - drag.y) / drag.h, 0);
+      drag.x = e.clientX; drag.y = e.clientY;
+    });
+    const endDrag = () => { if (drag) { drag = null; recheck(); } };
+    igList.addEventListener("pointerup", endDrag);
+    igList.addEventListener("pointercancel", endDrag);
+    igList.addEventListener("keydown", e => {
+      const cv = e.target.closest(".ig-out");
+      if (!cv) return;
+      const li = cv.closest(".ig-item"), step = e.shiftKey ? 0.1 : 0.02;
+      const map = { ArrowLeft: [-step, 0, 0], ArrowRight: [step, 0, 0], ArrowUp: [0, -step, 0], ArrowDown: [0, step, 0], "+": [0, 0, 0.1], "=": [0, 0, 0.1], "-": [0, 0, -0.1] };
+      if (!map[e.key]) return;
+      e.preventDefault();
+      nudge(li, map[e.key][0], map[e.key][1], map[e.key][2]);
+    });
+    const add = url => { if (items.length < MAX && !items.some(x => x.url === url)) items.push({ url, mode: "crop", cx: 0.5, cy: 0.5, zoom: 1, bg: "dark" }); };
+    igList.parentElement.querySelectorAll(".ig-add").forEach(b => b.addEventListener("click", () => { add(b.dataset.url); render(); }));
+    document.getElementById("ig-add-all")?.addEventListener("click", () => { pool.forEach(x => add(x.url)); render(); });
+    form.querySelectorAll('input[name="ig_frame"]').forEach(r => r.addEventListener("change", () => igList.querySelectorAll(".ig-item").forEach(draw)));
+    form.querySelectorAll("[data-ig-all]").forEach(b => b.addEventListener("click", () => { items.forEach(it => { it.mode = b.dataset.igAll; }); render(); }));
+    igApi = { get items() { return items; }, lowRes: () => igList.querySelectorAll('.ig-item[data-lowres="1"]').length };
+    render();
+  }
   form.addEventListener("input", recheck);
   form.addEventListener("change", recheck);
   recheck();

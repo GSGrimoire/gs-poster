@@ -68,6 +68,8 @@ function view(env: Env, origin: string, p: Post) {
     facebook_enabled: p.facebook_enabled,
     tiktok_enabled: p.tiktok_enabled===true,
     bluesky: p.bluesky,
+    /** Prepared in the web editor only; nothing sends it to Instagram yet. */
+    instagram: p.instagram ? { ...p.instagram, note: "Prepared only. Not connected to Instagram; Gus downloads the rendered photos from the editor." } : null,
     link: p.link,
     publish_at: p.scheduled_at,
     publish_at_local: p.scheduled_at ? formatLocal(new Date(p.scheduled_at), env.TIMEZONE) : "on approval",
