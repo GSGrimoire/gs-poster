@@ -262,7 +262,7 @@ export function renderDraftEditor(v: EditorView): string {
     : (bs?.images ?? []).map((img, i) => tile(`/media/${p.id}/${i}?platform=bluesky`, `Bluesky photo ${i + 1}`, "remove_bs_" + i,
       `<label>Describe the image<input type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined)).join("");
   const ttMedia = ttShared
-    ? `<p class="hint shared-note">TikTok uses the Facebook ${p.video ? "video" : "photos"}, in the same order. Removing one from Facebook removes it here too.</p>`
+    ? `<p class="hint shared-note">TikTok is currently using legacy shared Facebook media. Enabling TikTok and saving makes its gallery independent.</p>`
     : tt.video
       ? video(`/video/${p.id}/tiktok`, "remove_tt_video")
       : tt.images.map((_, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined)).join("");
@@ -270,11 +270,11 @@ export function renderDraftEditor(v: EditorView): string {
   const when = p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), v.tz) : "";
   const releaseTargets = [
     p.facebook_enabled ? `<label><input type="checkbox" name="target_facebook" value="1" checked> Facebook · ${p.video ? "video" : photos(p.images.length)}</label>` : "",
-    bs ? `<label><input type="checkbox" name="target_bluesky" value="1" checked> Bluesky · ${bs.video ? "video" : photos(bs.images.length)}</label>` : "",
+    p.bluesky ? `<label><input type="checkbox" name="target_bluesky" value="1" checked> Bluesky · ${bs!.video ? "video" : photos(bs!.images.length)}</label>` : "",
   ].join("");
   const ttPlan = v.tiktokPlan;
   const ttOk = ttPlan?.ok ? ttPlan : null;
-  const fbBs = !!(p.facebook_enabled || bs);
+  const fbBs = !!(p.facebook_enabled || p.bluesky);
   const canRelease = fbBs || !!ttOk;
   const scheduledOthers = fbBs && p.scheduled_at;
   const ttPreview = ttOk ? (ttOk.type === "VIDEO"
@@ -289,14 +289,14 @@ export function renderDraftEditor(v: EditorView): string {
           <p class="hint">${ttOk.type === "VIDEO"
             ? "TikTok takes no caption for inbox videos; add it in the app."
             : `Title: <strong>${esc(ttOk.title)}</strong>. Caption: ${esc(ttOk.caption.slice(0, 140))}${ttOk.caption.length > 140 ? "..." : ""} <span class="tt-edit">(edit it in the TikTok card; it saves automatically)</span>`}</p>
-          <p class="tt-now" role="note"><strong>Sent to your TikTok inbox the moment you approve</strong>${scheduledOthers ? `, even though ${p.facebook_enabled && bs ? "Facebook and Bluesky are" : p.facebook_enabled ? "Facebook is" : "Bluesky is"} scheduled for ${esc(v.whenText)}` : ""}. Nothing is published on TikTok: you finish and post it in the TikTok app.</p>
+          <p class="tt-now" role="note"><strong>Sent to your TikTok inbox the moment you approve</strong>${scheduledOthers ? `, even though ${p.facebook_enabled && p.bluesky ? "Facebook and Bluesky are" : p.facebook_enabled ? "Facebook is" : "Bluesky is"} scheduled for ${esc(v.whenText)}` : ""}. Nothing is published on TikTok: you finish and post it in the TikTok app.</p>
           <label><input type="checkbox" name="is_aigc" value="1"> AI-generated content (declared to TikTok)</label>
           <label><input type="checkbox" name="confirm_tiktok" value="1" required data-tt-required> I have the rights to this media and want it sent to TikTok now.</label>
         </div>
       </fieldset>` : ttPlan && !ttPlan.ok && ttPlan.offered ? `<p class="hint tt-blocked">TikTok: ${esc(ttPlan.reason)}</p>` : "";
   const effects = [
     ...(ttOk ? [`<li><strong>Now:</strong> TikTok inbox</li>`] : []),
-    ...(fbBs ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", bs ? "Bluesky" : ""].filter(Boolean).join(" and ")}</li>`] : []),
+    ...(fbBs ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", p.bluesky ? "Bluesky" : ""].filter(Boolean).join(" and ")}</li>`] : []),
   ];
   const buttonText = ttOk && fbBs ? "Approve selected targets" : ttOk ? "Approve and send to TikTok inbox" : p.scheduled_at ? "Approve and schedule" : "Approve and post now";
   const release = canRelease ? `
@@ -319,7 +319,7 @@ export function renderDraftEditor(v: EditorView): string {
       <p class="hint release-dirty" id="release-dirty" hidden>Saving your changes. Approval unlocks when they are saved; it releases the saved version.</p>
       <div class="row"><button class="primary" id="release-button">${buttonText}</button></div>
       <p class="rail-note">Releases exactly the saved draft. Each platform's result is shown separately; nothing is retried automatically.</p>
-      ${ig ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
+      ${p.instagram ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
     </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok</h3>
       <p class="hint">${esc(ttPlan && !ttPlan.ok ? ttPlan.reason : "Nothing to release yet.")}</p></div>`
     : `<div class="release-card"><div class="eyebrow">Release</div><h3>Instagram only</h3>
@@ -451,11 +451,11 @@ export function renderDraftEditor(v: EditorView): string {
       <h3 id="ed-platforms">Platforms</h3>
       <div class="platform-chips">
         ${chip("p_facebook", "Facebook", p.facebook_enabled)}
-        ${chip("p_instagram", "Instagram", !!ig)}
-        ${chip("p_bluesky", "Bluesky", !!bs)}
+        ${chip("p_instagram", "Instagram", !!p.instagram)}
+        ${chip("p_bluesky", "Bluesky", !!p.bluesky)}
         ${chip("p_tiktok", "TikTok", !!p.tiktok_enabled)}
       </div>
-      <p class="hint">Only the platforms you choose get a caption and media below. Turning Bluesky off removes its caption when you save.</p>
+      <p class="hint">Unchecked platforms are hidden and excluded from approval. Their saved captions, images and settings are retained when you turn them off.</p>
     </section>
 
     <section class="ed-card targets-card" aria-labelledby="ed-targets">
@@ -523,10 +523,14 @@ export function renderDraftEditor(v: EditorView): string {
         <article class="target" id="target-tiktok" data-platform="tiktok"${hide(on.tiktok)} aria-labelledby="tg-tiktok"${ttShared ? ' data-shared="facebook"' : ""}>
           <div class="target-head"><h4 id="tg-tiktok">TikTok</h4><p class="format">${esc(formatLine("tiktok"))}</p></div>
           <ul class="checks target-checks" data-checks="tiktok">${checkItems(states.tiktok)}</ul>
+          <label for="ed-tiktok-title" class="cap-label">Public carousel title (required for TikTok photos)</label>
+          <input id="ed-tiktok-title" type="text" name="tiktok_title" maxlength="90" value="${esc(p.tiktok_title ?? "")}" placeholder="The title viewers see, not the internal draft name">
           <div class="cap-row"><label for="ed-tiktok" class="cap-label">Caption</label>
             <button type="button" class="copy-cap" data-copy-to="ed-tiktok" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-tiktok" name="tiktok_caption" data-max="${captionLimit("tiktok", { photos: 1, video: !!(ttShared ? p.video : tt.video) })}" data-caption="tiktok" placeholder="Leave empty to reuse the Facebook caption">${esc(p.tiktok_caption ?? "")}</textarea>
           <div class="field-meter"></div>
+          ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button><input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0"></div>
+          <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. Only privately uploaded images can be sent to TikTok; linked images must be reuploaded using Add photos.</p>` : ""}
           <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
           ${!ttShared && !tt.video && tt.images.length > 1 ? `<input type="hidden" name="order_tt" value="${Array.from({ length: tt.images.length }, (_, i) => i).join(",")}">` : ""}
           <p class="hint">${esc(PLATFORMS.tiktok.delivery)}</p>
