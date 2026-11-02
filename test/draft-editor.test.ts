@@ -169,6 +169,6 @@ test("Release refuses a saved time that is too close, pointing back to the edito
     scheduled_at:new Date(Date.now()+5*60e3).toISOString(),facebook_enabled:true,tiktok_enabled:false,bluesky:null});
   const res=await call("/post/"+p.id+"/approve",{expected_updated_at:p.updated_at,target_facebook:"1",pin:PIN});
   assert.equal(res.status,400);
-  assert.match(await res.text(),/Change the time in the editor and save/);
+  assert.match(await res.text(),/Change the time in the editor/);
   assert.equal((await getPost(db,p.id))!.status,"draft");
 });

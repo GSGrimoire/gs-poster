@@ -47,6 +47,7 @@ import {
 import { isSameOrigin } from "./origin.ts";
 import { formatLocal, localToUtc, toLocalInput } from "./time.ts";
 import { APPROVE_MIN_LEAD_MS, checkMessage, checkWhen, mediaLooksPending } from "./validate.ts";
+import { decideReleaseTime, earliestValidTime, EDITOR_BUFFER_MS } from "./schedule.ts";
 
 const redirect = (location: string, headers?: Headers): Response => {
   const h = headers ?? new Headers();
@@ -119,6 +120,13 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+  // Server clock and schedule rules for the editor's "Earliest valid time" button (#61). Read-only.
+  if (path === "/earliest-time" && req.method === "GET") {
+    const photos = Math.max(0, Math.min(1000, Number(url.searchParams.get("photos")) || 0));
+    const at = earliestValidTime(new Date(), { facebook: url.searchParams.get("facebook") === "1", photos }, EDITOR_BUFFER_MS);
+    return Response.json({ iso: at.toISOString(), local: toLocalInput(at, env.TIMEZONE), text: formatLocal(at, env.TIMEZONE) },
+      { headers: { "Cache-Control": "no-store" } });
+  }
   if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
   if (path === "/new" && (req.method === "GET" || req.method === "POST")) return newDraftPage(req,env,session);
 
@@ -479,12 +487,14 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   }
   // Unapproved drafts get the one-page editor; the TikTok card goes in its rail.
   if (["draft", "rejected"].includes(p.status) && !p.approved_at) {
-    const minLead = p.facebook_enabled && p.images.length > BULK_FACEBOOK_THRESHOLD ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
-    const timeProblem = p.scheduled_at ? checkWhen(new Date(p.scheduled_at), new Date(), minLead) : null;
+    const timeCheck = decideReleaseTime(p.scheduled_at ? new Date(p.scheduled_at) : null, new Date(),
+      { facebook: p.facebook_enabled, photos: p.images.length }, false);
+    const timeProblem = timeCheck.ok ? null : timeCheck.error + (timeCheck.suggestion
+      ? ` Earliest valid now: ${formatLocal(timeCheck.suggestion, env.TIMEZONE)}, or tick the automatic move when you approve.` : "");
     const releaseProblems = [
       ...(p.facebook_enabled && !p.message.trim() && !p.images.length && !p.video ? ["Facebook needs a caption or a photo."] : []),
       ...(bs ? checkBluesky(bs).map((x) => "Bluesky: " + x) : []),
-      ...(timeProblem ? [timeProblem + " Change the time and save."] : []),
+      ...(timeProblem ? [timeProblem] : []),
     ];
     const editor = renderDraftEditor({
       post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p), error: state.error, notice: state.notice,
@@ -774,18 +784,26 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   // decision, 31 Oct 2026). Session, same-origin, CSRF and the version fence
   // above and in saveEditorDraft still apply. Approving still needs the PIN.
   if (action === "save") {
+    // Autosave (#61) posts the same form with this header and gets JSON back.
+    // Same session, same-origin, CSRF and version fence; never a release.
+    const auto = req.headers.get("X-GS-Autosave") === "1";
+    const fail = (error: string, status: number, current?: string) => auto
+      ? Response.json({ ok: false, error, current_updated_at: current ?? null }, { status, headers: { "Cache-Control": "no-store" } })
+      : postPage(env, session, id, { error }, status);
     const current = await getPost(env.DB, id);
     if (!current || !["draft", "rejected"].includes(current.status) || current.approved_at)
-      return postPage(env, session, id, { error: "Only unapproved drafts can be edited here." }, 409);
+      return fail("Only unapproved drafts can be edited here.", 409);
     const version = String(form.get("expected_updated_at") ?? "");
     if (version !== current.updated_at)
-      return postPage(env, session, id, { error: "This draft changed somewhere else since you opened it. Your edits were not saved. Reload and edit again." }, 409);
+      return fail("This draft changed somewhere else since you opened it. Your edits were not saved. Reload and edit again.", 409, current.updated_at);
     const parsed = parseEditorForm(form, current, env.TIMEZONE);
     if (parsed.errors.length || !parsed.next)
-      return postPage(env, session, id, { error: "Not saved: " + parsed.errors.join(" ") }, 400);
+      return fail("Not saved: " + parsed.errors.join(" "), 400);
     const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null, parsed.instagram ?? null);
-    if (!saved) return postPage(env, session, id, { error: "This draft changed while saving. Your edits were not saved. Reload and edit again." }, 409);
-    await audit(env.DB, session.login, current.status === "rejected" ? "revised-rejected" : "edited", id, "web editor");
+    if (!saved) return fail("This draft changed while saving. Your edits were not saved. Reload and edit again.", 409);
+    await audit(env.DB, session.login, current.status === "rejected" ? "revised-rejected" : "edited", id, auto ? "web editor autosave" : "web editor")
+      .catch(() => undefined);
+    if (auto) return Response.json({ ok: true, updated_at: saved }, { headers: { "Cache-Control": "no-store" } });
     return postPage(env, session, id, { notice: "Saved. Nothing was published." });
   }
   if (action === "reject") {
@@ -985,11 +1003,18 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       if (problems.length) return postPage(env, session, id, { error: "Fix in the editor and save first: " + problems.join(" ") }, 400);
     }
     const message = current.message;
-    const when: Date | null = current.scheduled_at ? new Date(current.scheduled_at) : null;
-    const minLead = facebook && current.images.length > BULK_FACEBOOK_THRESHOLD
-      ? BULK_SCHEDULE_MIN_LEAD_MS : APPROVE_MIN_LEAD_MS;
-    const timeErr = checkWhen(when, new Date(), minLead);
-    if (timeErr) return postPage(env, session, id, { error: timeErr + " Change the time in the editor and save." }, 400);
+    // A null time is "post now" and stays null. A too-close time is moved only
+    // when the owner ticked the opt-in rollover box on THIS approval (#61); the
+    // moved time is written by the same version-fenced claim below.
+    const saved: Date | null = current.scheduled_at ? new Date(current.scheduled_at) : null;
+    const lead = { facebook, photos: current.images.length };
+    const decision = decideReleaseTime(saved, new Date(), lead, form.get("auto_rollover") === "1");
+    if (!decision.ok) return postPage(env, session, id, {
+      error: decision.error + (decision.suggestion
+        ? ` The earliest valid time now is ${formatLocal(decision.suggestion, env.TIMEZONE)}. Change the time in the editor, or tick "Automatically move to the next valid time if necessary".`
+        : " Change the time in the editor."),
+    }, 400);
+    const when = decision.when;
 
     if (facebook && current.video) {
       if (current.images.length) return postPage(env,session,id,
@@ -1023,9 +1048,13 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       message, scheduledAt: when, actor: session.login,
       facebookEnabled: facebook, bluesky, expectedUpdatedAt: current.updated_at,
     });
-    if (result.status === "failed") return postPage(env, session, id, { error: "A selected target failed. Review the target-specific error below." }, 502);
+    const moved = decision.movedFrom && when
+      ? ` Moved from ${formatLocal(decision.movedFrom, env.TIMEZONE)} because that time was too close, as you allowed.` : "";
+    if (moved) await audit(env.DB, session.login, "schedule-rolled-over", id,
+      `${decision.movedFrom!.toISOString()} -> ${when!.toISOString()}`).catch(() => undefined);
+    if (result.status === "failed") return postPage(env, session, id, { error: "A selected target failed. Review the target-specific error below." + moved }, 502);
     return postPage(env, session, id, {
-      notice: result.status === "scheduled" ? `Scheduled for ${whenText(env, result)}.` : "Approved. Review each target status below.",
+      notice: (result.status === "scheduled" ? `Scheduled for ${whenText(env, result)}.` : "Approved. Review each target status below.") + moved,
     });
   } catch (e) {
     return postPage(env, session, id, { error: e instanceof Error ? e.message : String(e) }, 409);
