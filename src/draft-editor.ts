@@ -45,6 +45,24 @@ const short = (form: FormData, key: string, fallback: string | null): string | n
 const kept = <T>(items: T[], form: FormData, prefix: string): T[] =>
   items.filter((_, i) => form.get(prefix + i) !== "1");
 
+/**
+ * Per-platform photo order (#33). The form sends the saved positions in the
+ * new order, e.g. "2,0,1". Only an exact rearrangement of the saved photos is
+ * accepted, so reordering can never add, repeat or drop a photo; removal stays
+ * the separate Remove box. Missing field: saved order.
+ */
+export function readOrder(form: FormData, key: string, n: number): number[] | null {
+  const raw = form.get(key);
+  if (raw === null || String(raw) === "") return Array.from({ length: n }, (_, i) => i);
+  const parts = String(raw).split(",");
+  if (parts.length !== n || !parts.every((x) => /^\d{1,3}$/.test(x))) return null;
+  const order = parts.map(Number);
+  return new Set(order).size === n && order.every((i) => i < n) ? order : null;
+}
+/** Apply the order, then drop photos ticked for removal (by saved position). */
+const ordered = <T>(items: T[], order: number[], form: FormData, prefix: string): T[] =>
+  order.filter((i) => form.get(prefix + i) !== "1").map((i) => items[i]);
+
 /** Read the editor form against the current post. Only hard limits block a save. */
 export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorParse {
   const errors: string[] = [];
@@ -57,9 +75,13 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   const message = text(form, "message", cur.message);
   if (message.length > FB_MAX) errors.push(`The Facebook caption is ${message.length} characters; Facebook allows ${FB_MAX}.`);
 
-  const images = kept(cur.images, form, "remove_fb_");
+  const fbOrder = readOrder(form, "order_fb", cur.images.length);
+  const ttOrder = cur.tiktok_images === null ? [] : readOrder(form, "order_tt", cur.tiktok_images.length);
+  const bsOrder = readOrder(form, "order_bs", cur.bluesky?.images.length ?? 0);
+  if (!fbOrder || !ttOrder || !bsOrder) errors.push("Could not read the photo order. Reload the page and try again.");
+  const images = ordered(cur.images, fbOrder ?? [], form, "remove_fb_");
   const video = cur.video && form.get("remove_fb_video") !== "1" ? cur.video : null;
-  const tiktokImages = cur.tiktok_images === null ? null : kept(cur.tiktok_images, form, "remove_tt_");
+  const tiktokImages = cur.tiktok_images === null ? null : ordered(cur.tiktok_images, ttOrder ?? [], form, "remove_tt_");
   const tiktokVideo = cur.tiktok_video && form.get("remove_tt_video") !== "1" ? cur.tiktok_video : null;
   const ttCaptionRaw = text(form, "tiktok_caption", cur.tiktok_caption ?? "").trim();
   const tiktokCaption = ttCaptionRaw || null;
@@ -73,9 +95,8 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     const base = cur.bluesky ?? { caption: "", images: [], video: null, patreon: null };
     const caption = text(form, "bs_caption", base.caption);
     if (textLength(caption) > BSKY_TEXT_LIMIT) errors.push(`The Bluesky caption is over ${BSKY_TEXT_LIMIT} characters.`);
-    const bsImages = base.images
-      .map((img, i) => ({ url: img.url, alt: text(form, "bs_alt_" + i, img.alt).trim() }))
-      .filter((_, i) => form.get("remove_bs_" + i) !== "1");
+    const bsAll = base.images.map((img, i) => ({ url: img.url, alt: text(form, "bs_alt_" + i, img.alt).trim() }));
+    const bsImages = ordered(bsAll, cur.bluesky ? bsOrder ?? [] : [], form, "remove_bs_");
     const bsVideo = base.video && form.get("remove_bs_video") !== "1"
       ? { url: base.video.url, alt: text(form, "bs_video_alt", base.video.alt).trim() } : null;
     for (const a of [...bsImages.map((x) => x.alt), ...(bsVideo ? [bsVideo.alt] : [])])
@@ -149,9 +170,12 @@ export interface EditorView {
   createdLine: string;
 }
 
-function tile(src: string, alt: string, removeName: string, extra = ""): string {
-  return `<figure class="tile" data-tile="photo"><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
-    <span class="tile-ratio" data-ratio-badge hidden></span></div>
+function tile(src: string, alt: string, removeName: string, extra = "", index?: number): string {
+  const moves = index === undefined ? "" : `<div class="tile-move"><span class="tile-pos" aria-hidden="true">${index + 1}</span>
+      <button type="button" data-move="-1" aria-label="Move ${esc(alt)} earlier">&#8249;</button>
+      <button type="button" data-move="1" aria-label="Move ${esc(alt)} later">&#8250;</button></div>`;
+  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
+    <span class="tile-ratio" data-ratio-badge hidden></span></div>${moves}
     <label class="tile-remove"><input type="checkbox" name="${esc(removeName)}" value="1"> Remove</label>${extra}</figure>`;
 }
 
@@ -217,17 +241,17 @@ export function renderDraftEditor(v: EditorView): string {
   const states = targetStates(p);
   const fbMedia = p.video
     ? video(`/video/${p.id}/facebook`, "remove_fb_video")
-    : p.images.map((_, i) => tile(`/media/${p.id}/${i}`, `Facebook photo ${i + 1}`, "remove_fb_" + i)).join("");
+    : p.images.map((_, i) => tile(`/media/${p.id}/${i}`, `Facebook photo ${i + 1}`, "remove_fb_" + i, "", p.images.length > 1 ? i : undefined)).join("");
   const bsMedia = bs?.video
     ? video(`/video/${p.id}/bluesky`, "remove_bs_video",
       `<label>Describe the video<input type="text" name="bs_video_alt" maxlength="${MAX_ALT}" value="${esc(bs.video.alt)}"></label>`)
     : (bs?.images ?? []).map((img, i) => tile(`/media/${p.id}/${i}?platform=bluesky`, `Bluesky photo ${i + 1}`, "remove_bs_" + i,
-      `<label>Describe the image<input type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`)).join("");
+      `<label>Describe the image<input type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined)).join("");
   const ttMedia = ttShared
     ? `<p class="hint shared-note">TikTok uses the Facebook ${p.video ? "video" : "photos"}, in the same order. Removing one from Facebook removes it here too.</p>`
     : tt.video
       ? video(`/video/${p.id}/tiktok`, "remove_tt_video")
-      : tt.images.map((_, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i)).join("");
+      : tt.images.map((_, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined)).join("");
   const empty = '<p class="hint">Nothing yet.</p>';
   const when = p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), v.tz) : "";
   const releaseTargets = [
@@ -385,6 +409,10 @@ export function renderDraftEditor(v: EditorView): string {
 .tt-now{margin:0;padding:8px 10px;border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel));font:13px system-ui,sans-serif}
 .tt-edit{color:var(--muted)}
 .effects{list-style:none;margin:8px 0 0;padding:0;font:13px system-ui,sans-serif;display:grid;gap:2px}
+.tile-move{display:flex;align-items:center;gap:4px}
+.tile-move button{padding:2px 9px;font-size:15px;line-height:1.2}
+.tile-move button:disabled{opacity:.35}
+.tile-pos{font:650 12px system-ui,sans-serif;color:var(--muted);margin-right:auto}
 .mode-line{font:13px system-ui,sans-serif;color:var(--muted);margin:-6px 0 14px}
 .rollover{font-weight:600!important;color:var(--text)!important}
 .save-state.failed{color:var(--err);font-weight:600}
@@ -430,7 +458,8 @@ export function renderDraftEditor(v: EditorView): string {
           <label for="ed-message" class="cap-label">Caption</label>
           <textarea id="ed-message" name="message" maxlength="${FB_MAX}" data-max="${FB_MAX}" data-caption="facebook">${esc(p.message)}</textarea>
           <div class="field-meter"></div>
-          <div class="tiles" data-media="facebook">${fbMedia || empty}</div>
+          <div class="tiles" data-media="facebook" data-order="order_fb">${fbMedia || empty}</div>
+          ${!p.video && p.images.length > 1 ? `<input type="hidden" name="order_fb" value="${Array.from({ length: p.images.length }, (_, i) => i).join(",")}">` : ""}
         </article>
         <article class="target target-ig" id="target-instagram" data-platform="instagram"${hide(on.instagram)} aria-labelledby="tg-instagram">
           <div class="target-head"><h4 id="tg-instagram">Instagram</h4><p class="format">${esc(formatLine("instagram"))}</p></div>
@@ -466,7 +495,8 @@ export function renderDraftEditor(v: EditorView): string {
             <button type="button" class="copy-cap" data-copy-to="ed-bs" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-bs" name="bs_caption" data-max="${BSKY_TEXT_LIMIT}" data-graphemes="1" data-caption="bluesky" placeholder="A short companion caption">${esc(bs?.caption ?? "")}</textarea>
           <div class="field-meter"></div>
-          <div class="tiles" data-media="bluesky">${bsMedia || empty}</div>
+          <div class="tiles" data-media="bluesky" data-order="order_bs">${bsMedia || empty}</div>
+          ${bs && !bs.video && bs.images.length > 1 ? `<input type="hidden" name="order_bs" value="${Array.from({ length: bs.images.length }, (_, i) => i).join(",")}">` : ""}
           <details${bs?.patreon ? " open" : ""}><summary>Patreon link card (optional)</summary>
             <label for="ed-patreon-url">Free Patreon post URL</label>
             <input id="ed-patreon-url" type="text" name="bs_patreon_url" value="${esc(bs?.patreon?.url ?? "")}" placeholder="https://www.patreon.com/posts/...">
@@ -483,7 +513,8 @@ export function renderDraftEditor(v: EditorView): string {
             <button type="button" class="copy-cap" data-copy-to="ed-tiktok" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-tiktok" name="tiktok_caption" data-max="${captionLimit("tiktok", { photos: 1, video: !!(ttShared ? p.video : tt.video) })}" data-caption="tiktok" placeholder="Leave empty to reuse the Facebook caption">${esc(p.tiktok_caption ?? "")}</textarea>
           <div class="field-meter"></div>
-          <div class="tiles" data-media="tiktok">${ttMedia || empty}</div>
+          <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
+          ${!ttShared && !tt.video && tt.images.length > 1 ? `<input type="hidden" name="order_tt" value="${Array.from({ length: tt.images.length }, (_, i) => i).join(",")}">` : ""}
           <p class="hint">${esc(PLATFORMS.tiktok.delivery)}</p>
         </article>
       </div>
@@ -905,7 +936,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   // CSRF and version-fenced save runs and returns JSON. One save at a time;
   // edits made while one is in flight are saved next. A refused save keeps
   // every edit on the page. Saving never approves or publishes.
-  const STRUCTURAL = /^(p_|remove_|when$)/;
+  const STRUCTURAL = /^(p_|remove_|order_|when$)/;
   const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
   let timer = null, inflight = false, stopped = false, needsReload = false;
   function setVersion(v) {
@@ -969,6 +1000,41 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   });
   form.addEventListener("input", refresh);
   form.addEventListener("change", refresh);
+  // Per-platform photo order (#33): move buttons reorder the tiles of one
+  // platform only and write the saved positions, in the new order, to that
+  // platform's hidden order field. Focus follows the moved photo.
+  form.addEventListener("click", e => {
+    const btn = e.target.closest("[data-move]");
+    if (!btn) return;
+    const tile = btn.closest("[data-tile]"), box = tile.parentElement;
+    const tiles = Array.from(box.querySelectorAll(":scope > [data-index]"));
+    const at = tiles.indexOf(tile), to = at + Number(btn.dataset.move);
+    if (to < 0 || to >= tiles.length) return;
+    if (to > at) tiles[to].after(tile); else tiles[to].before(tile);
+    const now = Array.from(box.querySelectorAll(":scope > [data-index]"));
+    now.forEach((t, k) => {
+      const pos = t.querySelector(".tile-pos");
+      if (pos) pos.textContent = String(k + 1);
+      t.querySelector('[data-move="-1"]').disabled = k === 0;
+      t.querySelector('[data-move="1"]').disabled = k === now.length - 1;
+    });
+    const field = form.querySelector('input[name="' + box.dataset.order + '"]');
+    if (field) {
+      field.value = now.map(t => t.dataset.index).join(",");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    const again = tile.querySelector('[data-move="' + btn.dataset.move + '"]');
+    (again && !again.disabled ? again : tile.querySelector("[data-move]:not([disabled])"))?.focus();
+  });
+  form.querySelectorAll("[data-order]").forEach(box => {
+    const tiles = box.querySelectorAll(":scope > [data-index]");
+    tiles.forEach((t, k) => {
+      t.querySelector('[data-move="-1"]').disabled = k === 0;
+      t.querySelector('[data-move="1"]').disabled = k === tiles.length - 1;
+    });
+  });
+
   // TikTok in the release form: unticking it hides its details and drops
   // the consent requirement; the server checks the same on approval.
   const ttToggle = document.querySelector("[data-tt-toggle]");
