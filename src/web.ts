@@ -1101,7 +1101,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
 /** Signed-in video preview with HTTP byte ranges for native playback. */
 async function videoProxy(req: Request, env: Env, id: string, target: string): Promise<Response> {
   const p = await getPost(env.DB,id);
-  const reference = target === "facebook" ? p?.video : target==="tiktok" ? (p?tiktokMedia(p).video:null) : p?.bluesky?.video?.url;
+  const reference = target === "facebook" ? p?.video : target==="tiktok" ? (p?tiktokMedia(p).video:null) : (p?.bluesky ?? p?.bluesky_paused)?.video?.url;
   if (!reference) return new Response("Not found",{status:404});
   try {
     const bytes = await fetchVideo(env,reference);
@@ -1150,7 +1150,7 @@ async function mediaProxy(env: Env, id: string, n: number, thumbnail = false, pl
   const url = platform==="pool"?(p?postPhotos(p)[n]:null):
     platform==="instagram"?p?.instagram?.items[n]?.url:
     platform==="tiktok"?(p?tiktokMedia(p).images[n]:null):
-    platform==="bluesky"?p?.bluesky?.images[n]?.url:
+    platform==="bluesky"?(p?.bluesky ?? p?.bluesky_paused)?.images[n]?.url:
     platform==="facebook"?p?.images[n]:
     p?.images[n] ?? p?.bluesky?.images[n]?.url ?? (p?tiktokMedia(p).images[n]:null);
   if (!url) return new Response("Not found", { status: 404 });
