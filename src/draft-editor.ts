@@ -503,6 +503,14 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     state.classList.toggle("dirty", d);
     if (releaseBtn) releaseBtn.disabled = d;
     if (releaseNote) releaseNote.hidden = !d;
+    // A frame, caption or other unsaved editor change also makes the saved
+    // Instagram JPEG links stale, not just a change to the photo list.
+    const igField = document.getElementById("ig-items-field");
+    const hasIgPhotos = !!igField && igField.value !== "[]";
+    const igDownloads = document.getElementById("ig-downloads");
+    if (igDownloads) igDownloads.hidden = d || !hasIgPhotos;
+    const igUnsaved = document.getElementById("ig-unsaved");
+    if (igUnsaved) igUnsaved.hidden = !d || !hasIgPhotos;
   }
   function togglePlatform(box) {
     const name = box.dataset.platformToggle;
