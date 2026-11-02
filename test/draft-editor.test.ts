@@ -71,6 +71,75 @@ test("the draft page is one editor: Save button, chosen platforms only, no dupli
   assert.equal((await get("/draft-editor.js")).status,200);
 });
 
+test("disabling and re-enabling a platform retains its captions and gallery without approval",async()=>{
+  const p=await draft({bluesky:true});
+  const item={url:IMG(0),mode:"crop",cx:0.5,cy:0.5,zoom:1,bg:"dark"};
+  const enabled=await call("/post/"+p.id+"/save",{...baseSave(p),p_bluesky:"1",p_instagram:"1",
+    bs_caption:"Saved Bluesky words",ig_caption:"Saved Instagram words",ig_frame:"4:5",
+    ig_items:JSON.stringify([item])});
+  assert.equal(enabled.status,200,await enabled.clone().text());
+  const active=(await getPost(db,p.id))!;
+  assert.equal(active.bluesky?.caption,"Saved Bluesky words");
+  assert.equal(active.instagram?.items.length,1);
+
+  const paused=await call("/post/"+p.id+"/save",{...baseSave(active),message:"Facebook only"});
+  assert.equal(paused.status,200,await paused.clone().text());
+  const off=(await getPost(db,p.id))!;
+  assert.equal(off.bluesky,null,"paused target must never appear as an active publishing target");
+  assert.equal(off.instagram,null);
+  assert.equal(off.bluesky_paused?.caption,"Saved Bluesky words");
+  assert.deepEqual(off.bluesky_paused?.images,active.bluesky?.images);
+  assert.equal(off.instagram_paused?.caption,"Saved Instagram words");
+  assert.deepEqual(off.instagram_paused?.items,[item]);
+  const page=await (await get("/post/"+p.id)).text();
+  assert.match(page,/id="target-bluesky" data-platform="bluesky" hidden/);
+  assert.match(page,/id="target-instagram" data-platform="instagram" hidden/);
+  assert.doesNotMatch(page,/name="target_bluesky"/,"paused Bluesky must not be offered for approval");
+  assert.equal((await call("/post/"+p.id+"/approve",
+    {expected_updated_at:off.updated_at,target_bluesky:"1",pin:PIN})).status,400);
+  assert.equal((await getPost(db,p.id))!.approved_at,null);
+
+  const resumed=await call("/post/"+p.id+"/save",
+    {...baseSave(off),p_bluesky:"1",p_instagram:"1"});
+  assert.equal(resumed.status,200,await resumed.clone().text());
+  const restored=(await getPost(db,p.id))!;
+  assert.equal(restored.bluesky?.caption,"Saved Bluesky words");
+  assert.deepEqual(restored.bluesky?.images,active.bluesky?.images);
+  assert.deepEqual(restored.instagram?.items,[item]);
+  assert.equal(restored.instagram?.caption,"Saved Instagram words");
+});
+
+test("TikTok uses a public title and gets a separate image gallery after late activation",async()=>{
+  const p=await draft({images:2});
+  const selected=await call("/post/"+p.id+"/save",
+    {...baseSave(p),p_facebook:"1",p_tiktok:"1",tiktok_title:"The Goblin Gallery"});
+  assert.equal(selected.status,200,await selected.clone().text());
+  const joined=(await getPost(db,p.id))!;
+  assert.equal(joined.tiktok_title,"The Goblin Gallery");
+  assert.equal(joined.label,"Goblins","internal label must remain separate");
+  assert.deepEqual(joined.tiktok_images,p.images,"existing Facebook photos are copied on activation");
+  assert.notEqual(joined.tiktok_images,null,"TikTok no longer shares mutations with Facebook");
+  const trim=await call("/post/"+p.id+"/save",
+    {...baseSave(joined),p_facebook:"1",p_tiktok:"1",remove_tt_0:"1"});
+  assert.equal(trim.status,200,await trim.clone().text());
+  const changed=(await getPost(db,p.id))!;
+  assert.deepEqual(changed.images,p.images,"removing a TikTok image must not change Facebook media");
+  assert.deepEqual(changed.tiktok_images,[p.images[1]]);
+
+  const copied=await call("/post/"+p.id+"/save",
+    {...baseSave(changed),p_facebook:"1",p_tiktok:"1",tt_copy_fb:"1"});
+  assert.equal(copied.status,200,await copied.clone().text());
+  assert.deepEqual((await getPost(db,p.id))!.tiktok_images,p.images);
+  const html=await (await get("/post/"+p.id)).text();
+  assert.match(html,/name="tiktok_title"/);
+  assert.match(html,/value="The Goblin Gallery"/);
+  assert.match(html,/id="tt-copy-fb"/);
+  assert.match(html,/data-index="0" draggable="true"/);
+  const js=await (await get("/draft-editor.js")).text();
+  assert.match(js,/dragstart/);
+  assert.match(js,/ig-drag/);
+});
+
 test("Save needs no PIN, changes text, name, time and platforms, and publishes nothing",async()=>{
   const p=await draft();
   const when="2031-05-04T18:30";
