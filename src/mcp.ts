@@ -191,17 +191,19 @@ export async function handleUpdateDraft(
       const nextImages = images ?? cur.images;
       const nextVideo = video === undefined ? cur.video : video;
       const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
-      const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
+      const blueskyOn = bluesky === undefined ? !!cur.bluesky : bluesky !== null;
+      const bsNext: BlueskyDraft | null = bluesky == null ? (cur.bluesky ?? cur.bluesky_paused ?? null) : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
       const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
         cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
           hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
         }):{errors:[],warnings:[]};
-      const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
-      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
+      const bsHouse = blueskyOn && bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
+      const bsErrors = blueskyOn && bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
-      const igNext = instagram === undefined ? cur.instagram : instagram;
-      if (!fbNext && !bsNext && !cur.tiktok_enabled && !igNext) errors.push("Select at least one of Facebook, Bluesky, TikTok or Instagram.");
+      const instagramOn = instagram === undefined ? !!cur.instagram : instagram !== null;
+      const igNext = instagram == null ? (cur.instagram ?? cur.instagram_paused ?? null) : instagram;
+      if (!fbNext && !blueskyOn && !cur.tiktok_enabled && !instagramOn) errors.push("Select at least one of Facebook, Bluesky, TikTok or Instagram.");
       const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
       const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
       const privateErrors=await checkOwnedDraftMedia(env,login,[
@@ -244,12 +246,13 @@ export async function handleUpdateDraft(
       let version: string | null;
       try {
         version = await saveEditorDraft(env.DB, id, baseVersion, {
-          message: nextMessage, tiktok_caption: nextTikTokCaption,
+          message: nextMessage, tiktok_caption: nextTikTokCaption, tiktok_title: cur.tiktok_title ?? null,
+          bluesky_enabled: blueskyOn, instagram_enabled: instagramOn,
           images: nextImages, tiktok_images: nextTTImages,
           video: nextVideo, tiktok_video: nextTTVideo,
           facebook_enabled: fbNext, tiktok_enabled: cur.tiktok_enabled === true,
           scheduled_at: nextScheduled, label: nextLabel, release: nextRelease, link: nextLink,
-        }, bsNext, instagram);
+        }, bsNext, igNext);
       } catch {
         // The commit may or may not have happened (lost response). Read back
         // rather than guess, and never retry blindly.
@@ -272,7 +275,7 @@ export async function handleUpdateDraft(
       // what the caller asked for; say so rather than report success.
       const mismatch: string[] = [];
       if (saved.facebook_enabled !== fbNext) mismatch.push("facebook_enabled");
-      if (!!saved.bluesky !== !!bsNext) mismatch.push("bluesky");
+      if (!!saved.bluesky !== blueskyOn) mismatch.push("bluesky");
       if (saved.message !== nextMessage) mismatch.push("message");
       if (instagram !== undefined && JSON.stringify(saved.instagram) !== JSON.stringify(instagram)) mismatch.push("instagram");
       if (mismatch.length) return fail("Saved draft does not match the request. Fetch it with get_post and check before review.", { fields: mismatch, post: view(env, origin, saved) });
