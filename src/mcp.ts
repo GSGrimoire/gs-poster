@@ -18,6 +18,8 @@ import {runNativeBatch} from "./native-batch.ts";
 import {checkOwnedDraftMedia,isCurrentEditor} from "./media-owner.ts";
 import { refreshScheduled } from "./publish.ts";
 import { captionLimit, TIKTOK_PHOTO_MAX } from "./platforms.ts";
+import { INSTAGRAM_BACKGROUNDS, INSTAGRAM_CAPTION_MAX, INSTAGRAM_FRAMES, INSTAGRAM_MAX_ITEMS, INSTAGRAM_MAX_ZOOM,
+  instagramSaveErrors, type InstagramBackground } from "./instagram.ts";
 import { formatLocal, parseWhen } from "./time.ts";
 import { checkMessage, checkWhen, DRAFT_MIN_LEAD_MS, MAX_IMAGES } from "./validate.ts";
 import { createUpload, getUploadUsage, uploadStatusForOwner } from "./upload.ts";
@@ -155,6 +157,18 @@ const updateDraftSchema = z.object({
         publish_at: z.string().nullable().optional(),
         label: z.string().max(120).optional(),
         release: z.string().max(120).optional(),
+        instagram: z.object({
+          caption: z.string().max(INSTAGRAM_CAPTION_MAX).describe("Instagram caption, up to 2,200 characters and 30 hashtags. Links are not clickable on Instagram."),
+          frame: z.enum(INSTAGRAM_FRAMES).describe("One frame for the whole carousel: 4:5 portrait (1080x1350), 1:1 square or 1.91:1 landscape."),
+          items: z.array(z.object({
+            url: z.string().min(1).describe("A photo already on this post (its Facebook, TikTok or Bluesky photos, or this update's new ones)."),
+            mode: z.enum(["crop", "pad"]).describe("crop fills the frame and cuts the edges; pad keeps the whole picture on a background colour. Pad suits maps, lettering and borders."),
+            cx: z.number().min(0).max(1).default(0.5).describe("Crop focus across, 0 left to 1 right."),
+            cy: z.number().min(0).max(1).default(0.5).describe("Crop focus down, 0 top to 1 bottom."),
+            zoom: z.number().min(1).max(INSTAGRAM_MAX_ZOOM).default(1).describe("Crop zoom, 1 to 4."),
+            bg: z.enum(Object.keys(INSTAGRAM_BACKGROUNDS) as [InstagramBackground, ...InstagramBackground[]]).default("dark").describe("Pad background: dark (brand), black, white or parchment (brand)."),
+          })).max(INSTAGRAM_MAX_ITEMS),
+        }).nullable().optional().describe("Instagram feed carousel, PREPARED ONLY: nothing is sent to Instagram. Gus reviews the crop/pad in the editor and downloads the finished photos. Omit to leave it as is; null removes it."),
         expected_updated_at: z.string().optional().describe("The updated_at you last read from get_post, list_posts or a previous save. If the draft has changed since, nothing is saved and you must fetch it again. Strongly recommended; when omitted, the version read at the start of this call is used."),
       });
 
@@ -164,7 +178,7 @@ const updateDraftSchema = z.object({
 export async function handleUpdateDraft(
   env:Env,origin:string,login:string,input:z.infer<typeof updateDraftSchema>,
 ){
-  const {id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky, expected_updated_at}=input;
+  const {id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky, instagram, expected_updated_at}=input;
       if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
@@ -186,7 +200,8 @@ export async function handleUpdateDraft(
       const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
       const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
-      if (!fbNext && !bsNext && !cur.tiktok_enabled) errors.push("Select at least one of Facebook, Bluesky or TikTok.");
+      const igNext = instagram === undefined ? cur.instagram : instagram;
+      if (!fbNext && !bsNext && !cur.tiktok_enabled && !igNext) errors.push("Select at least one of Facebook, Bluesky, TikTok or Instagram.");
       const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
       const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
       const privateErrors=await checkOwnedDraftMedia(env,login,[
@@ -212,6 +227,13 @@ export async function handleUpdateDraft(
       if(cur.tiktok_enabled && (nextTikTokCaption ?? nextMessage).length>captionLimit("tiktok",{photos:1,video:!!(nextTTImages===null?nextVideo:nextTTVideo)})) errors.push("TikTok description exceeds its format limit.");
       if (nextVideo && nextImages.length) errors.push("Facebook videos cannot be combined with photos.");
       if (nextVideo && checkVideoUrl(nextVideo)) errors.push(checkVideoUrl(nextVideo)!);
+      // Instagram may only use photos this post will have after this update.
+      if (instagram) {
+        const own = new Set([...nextImages, ...(nextTTImages ?? []), ...(bsNext?.images.map((i) => i.url) ?? []),
+          ...(cur.instagram?.items.map((i) => i.url) ?? [])]);
+        errors.push(...instagramSaveErrors(instagram, own).map((e) => "Instagram: " + e));
+        errors.push(...checkMessage(instagram.caption, { hasImages: instagram.items.length > 0 }).errors.map((e) => "Instagram caption: " + e));
+      }
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
       // One fenced D1 transaction for the post row AND its Bluesky target (#63).
       // facebook_enabled is written to posts, which is what approval reads.
@@ -227,7 +249,7 @@ export async function handleUpdateDraft(
           video: nextVideo, tiktok_video: nextTTVideo,
           facebook_enabled: fbNext, tiktok_enabled: cur.tiktok_enabled === true,
           scheduled_at: nextScheduled, label: nextLabel, release: nextRelease, link: nextLink,
-        }, bsNext);
+        }, bsNext, instagram);
       } catch {
         // The commit may or may not have happened (lost response). Read back
         // rather than guess, and never retry blindly.
@@ -252,6 +274,7 @@ export async function handleUpdateDraft(
       if (saved.facebook_enabled !== fbNext) mismatch.push("facebook_enabled");
       if (!!saved.bluesky !== !!bsNext) mismatch.push("bluesky");
       if (saved.message !== nextMessage) mismatch.push("message");
+      if (instagram !== undefined && JSON.stringify(saved.instagram) !== JSON.stringify(instagram)) mismatch.push("instagram");
       if (mismatch.length) return fail("Saved draft does not match the request. Fetch it with get_post and check before review.", { fields: mismatch, post: view(env, origin, saved) });
       const auditOk = await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id).then(() => true, () => false);
       return ok({
@@ -480,7 +503,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     {
       title: "Draft a GS Poster post",
       description:
-        "Save a Facebook, Bluesky, TikTok or combined GS Grimoire DRAFT for approval. Nothing is published until Gus approves the target(s) on the review page with his PIN. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
+        "Save a Facebook, Bluesky, TikTok or combined GS Grimoire DRAFT for approval. To prepare an Instagram carousel (crop or pad per photo), call update_draft with instagram after this. Nothing is published until Gus approves the target(s) on the review page with his PIN. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
       inputSchema: z.object({
         message: z.string().max(63206).describe("Facebook caption or shared descriptive caption. Text and hashtags are supported."),
         tiktok_caption:z.string().max(4000).optional().describe("Independent TikTok caption and hashtags. For videos use at most 2,200 characters, for photo carousels at most 4,000. Falls back to message if omitted."),
