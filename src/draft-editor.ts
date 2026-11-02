@@ -996,7 +996,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   // CSRF and version-fenced save runs and returns JSON. One save at a time;
   // edits made while one is in flight are saved next. A refused save keeps
   // every edit on the page. Saving never approves or publishes.
-  const STRUCTURAL = /^(p_|remove_|order_|tt_copy_fb$|when$)/;
+  const STRUCTURAL = /^(p_|remove_|order_|tt_copy_fb$|tiktok_title$|tiktok_caption$|when$)/;
   const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
   let timer = null, inflight = false, stopped = false, needsReload = false;
   function setVersion(v) {
@@ -1008,7 +1008,10 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     if (!needsReload || inflight || dirty()) return;
     // Platforms, removed media or the time changed: reload so the release
     // panel lists exactly what is saved. Not while the time field is in use.
-    if (document.activeElement === when) { when.addEventListener("blur", maybeReload, { once: true }); return; }
+    const focused = document.activeElement;
+    if (focused === when || focused?.name === "tiktok_title" || focused?.name === "tiktok_caption") {
+      focused.addEventListener("blur", maybeReload, { once: true }); return;
+    }
     submitting = true;
     location.reload();
   }
