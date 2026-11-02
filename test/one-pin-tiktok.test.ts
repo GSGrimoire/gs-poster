@@ -69,7 +69,7 @@ async function ttDraft(o:{facebook?:boolean;scheduledH?:number;photos?:number;vi
     await r2.put("uploads/"+video.slice(9),bytes);
   }
   const images=o.video?[]:Array.from({length:o.photos??3},(_,i)=>photo(++seq*10+i));
-  return createPost(db,{message:MSG,label:"Goblin carousel",release:"NPC",images,video,created_by:"test",
+  return createPost(db,{message:MSG,label:"Internal GS Poster title",tiktok_title:o.video?null:"Public goblin gallery",release:"NPC",images,video,created_by:"test",
     scheduled_at:o.scheduledH?new Date(Date.now()+o.scheduledH*3600e3).toISOString():null,
     facebook_enabled:o.facebook??false,tiktok_enabled:true,bluesky:null} as any);
 }
@@ -107,6 +107,19 @@ test("the editor's release form carries TikTok inline, with the send-now warning
   assert.doesNotMatch(html,/\/tiktok-options/,"no separate TikTok options step for drafts");
   assert.doesNotMatch(html,/DIRECT_POST|Direct Post/);
   assert.equal(outbound.length,0,"rendering sends nothing");
+});
+
+test("photo carousel without a public title is blocked, not named after the internal draft",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft();
+  await db.prepare("UPDATE posts SET tiktok_title=NULL WHERE id=?").bind(p.id).run();
+  const html=await page(p.id);
+  assert.doesNotMatch(html,/name="target_tiktok" value="1" checked/);
+  assert.match(html,/Enter a public TikTok carousel title/);
+  const r=await approve(p);
+  assert.equal(r.status,400);
+  assert.equal((await transfer(p.id)),null);
+  assert.equal(tiktokCalls().length,0);
 });
 
 test("autosaving a TikTok draft sends nothing",async()=>{
