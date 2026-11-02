@@ -211,7 +211,9 @@ export async function handleUpdateDraft(
       const nextTTImages = tiktok_images === undefined
          ? (tiktok_video ? [] : cur.tiktok_enabled && cur.tiktok_images === null ? [...nextImages] : cur.tiktok_images)
          : tiktok_images === null && cur.tiktok_enabled ? [...nextImages] : tiktok_images;
-      const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
+      const nextTTVideo = tiktok_video === undefined
+         ? cur.tiktok_enabled && cur.tiktok_images === null ? nextVideo : cur.tiktok_video
+         : tiktok_video;
       const privateErrors=await checkOwnedDraftMedia(env,login,[
         ...nextImages,...(nextTTImages??[]),...(nextVideo?[nextVideo]:[]),
         ...(nextTTVideo?[nextTTVideo]:[]),
@@ -572,7 +574,8 @@ export function buildServer(env: Env, origin: string): McpServer {
         tiktok_caption:tiktok_caption ?? null,
         tiktok_title:tiktok_title ?? null,
         images,
-        tiktok_images:tiktok_images??(tiktok_video?[]:tiktok_enabled?[...images]:null),tiktok_video:tiktok_video??null,
+        tiktok_images:tiktok_images??(tiktok_video?[]:tiktok_enabled?[...images]:null),
+        tiktok_video:tiktok_video??(tiktok_enabled && !tiktok_images && video ? video : null),
         video:video ?? null,
         link: link ?? null,
         scheduled_at: time.when?.toISOString() ?? null,
