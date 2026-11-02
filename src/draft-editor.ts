@@ -188,7 +188,7 @@ function tile(src: string, alt: string, removeName: string, extra = "", index?: 
   const moves = index === undefined ? "" : `<div class="tile-move"><span class="tile-pos" aria-hidden="true">${index + 1}</span>
       <button type="button" data-move="-1" aria-label="Move ${esc(alt)} earlier">&#8249;</button>
       <button type="button" data-move="1" aria-label="Move ${esc(alt)} later">&#8250;</button></div>`;
-  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
+  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}" draggable="true"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
     <span class="tile-ratio" data-ratio-badge hidden></span></div>${moves}
     <label class="tile-remove"><input type="checkbox" name="${esc(removeName)}" value="1"> Remove</label>${extra}</figure>`;
 }
@@ -357,6 +357,8 @@ export function renderDraftEditor(v: EditorView): string {
 .adder[open]>summary{border-style:solid;margin-bottom:12px}
 .targets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;align-items:start;margin-top:12px}
 .target{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg);display:grid;gap:8px;min-width:0}
+/* A hidden target must not be shown by the author display:grid/flex styles. */
+.targets > .target[hidden],.readiness > li[hidden]{display:none!important}
 .target[data-state=error]{border-color:var(--err)}
 .target-head h4{font:650 16px system-ui,sans-serif;margin:0}
 .target-head .format{font:12.5px system-ui,sans-serif;color:var(--muted);margin:2px 0 0}
@@ -424,6 +426,10 @@ export function renderDraftEditor(v: EditorView): string {
 .tt-edit{color:var(--muted)}
 .effects{list-style:none;margin:8px 0 0;padding:0;font:13px system-ui,sans-serif;display:grid;gap:2px}
 .tile-move{display:flex;align-items:center;gap:4px}
+.tile[draggable=true]{cursor:grab}
+.tile.dragging,.ig-item.dragging{opacity:.45}
+.tile.drop-target,.ig-item.drop-target{outline:2px dashed var(--accent2);outline-offset:2px}
+.ig-drag{cursor:grab;user-select:none;border:1px dashed var(--line);border-radius:6px;padding:4px 7px;font:600 12px system-ui,sans-serif}
 .tile-move button{padding:2px 9px;font-size:15px;line-height:1.2}
 .tile-move button:disabled{opacity:.35}
 .tile-pos{font:650 12px system-ui,sans-serif;color:var(--muted);margin-right:auto}
@@ -621,6 +627,12 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     form.querySelectorAll('[data-platform="' + name + '"]').forEach(el => { el.hidden = !box.checked; });
   }
   form.querySelectorAll("[data-platform-toggle]").forEach(box => box.addEventListener("change", () => togglePlatform(box)));
+  document.getElementById("tt-copy-fb")?.addEventListener("click", () => {
+    if (!confirm("Replace the TikTok gallery with a separate copy of the Facebook photos?")) return;
+    const field = document.getElementById("tt-copy-fb-flag");
+    field.value = "1";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
   function meter(area) {
     const out = area.parentElement.querySelector(".field-meter");
     if (!out) return;
@@ -815,7 +827,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         li.innerHTML =
           '<div class="ig-stage"><canvas class="ig-out" tabindex="0" role="img"></canvas></div>' +
           '<div class="ig-controls">' +
-          '<div class="ig-row"><strong>Photo ' + (n + 1) + '</strong><canvas class="ig-whole" aria-hidden="true"></canvas></div>' +
+          '<div class="ig-row"><strong>Photo ' + (n + 1) + '</strong><span class="ig-drag" draggable="true" title="Drag to reorder; up and down buttons also work">Drag to reorder</span><canvas class="ig-whole" aria-hidden="true"></canvas></div>' +
           '<fieldset class="ig-mode"><legend class="sr-only">How to fit photo ' + (n + 1) + '</legend>' +
           '<label class="seg"><input type="radio" form="ig-detached" name="' + id + '" value="crop"> Crop</label>' +
           '<label class="seg"><input type="radio" form="ig-detached" name="' + id + '" value="pad"> Pad</label></fieldset>' +
@@ -850,6 +862,36 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       sync();
       recheck();
     }
+    // Photo handles reorder the carousel; the crop canvas retains its own
+    // pointer drag behavior. Arrow buttons remain the keyboard alternative.
+    let igDrag = -1;
+    igList.addEventListener("dragstart", e => {
+      const handle = e.target.closest(".ig-drag");
+      if (!handle) { e.preventDefault(); return; }
+      igDrag = Number(handle.closest(".ig-item").dataset.index);
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", "instagram-photo");
+      handle.closest(".ig-item").classList.add("dragging");
+    });
+    igList.addEventListener("dragover", e => {
+      if (igDrag < 0) return;
+      const li = e.target.closest(".ig-item");
+      if (!li) return;
+      e.preventDefault();
+      igList.querySelectorAll(".drop-target").forEach(x => x.classList.remove("drop-target"));
+      li.classList.add("drop-target");
+    });
+    igList.addEventListener("drop", e => {
+      if (igDrag < 0) return;
+      const li = e.target.closest(".ig-item");
+      if (!li) return;
+      e.preventDefault();
+      const from = igDrag, to = Number(li.dataset.index);
+      igDrag = -1;
+      if (from !== to) { const moved = items.splice(from, 1)[0]; items.splice(to, 0, moved); render(); }
+      igList.querySelectorAll(".dragging,.drop-target").forEach(x => x.classList.remove("dragging", "drop-target"));
+    });
+    igList.addEventListener("dragend", () => { igDrag = -1; igList.querySelectorAll(".dragging,.drop-target").forEach(x => x.classList.remove("dragging", "drop-target")); });
     function itemOf(target) { const li = target.closest(".ig-item"); return li ? [li, items[Number(li.dataset.index)]] : [null, null]; }
     igList.addEventListener("change", e => {
       const [li, it] = itemOf(e.target);
@@ -954,7 +996,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   // CSRF and version-fenced save runs and returns JSON. One save at a time;
   // edits made while one is in flight are saved next. A refused save keeps
   // every edit on the page. Saving never approves or publishes.
-  const STRUCTURAL = /^(p_|remove_|order_|when$)/;
+  const STRUCTURAL = /^(p_|remove_|order_|tt_copy_fb$|when$)/;
   const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
   let timer = null, inflight = false, stopped = false, needsReload = false;
   function setVersion(v) {
