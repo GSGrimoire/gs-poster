@@ -28,7 +28,9 @@ export interface EditorParse {
 /** Every photo already on the post, in a stable order, for the Instagram picker. */
 export function postPhotos(p: Post): string[] {
   const all = [...p.images, ...(p.tiktok_images ?? []), ...(p.bluesky?.images.map((i) => i.url) ?? []),
-    ...(p.instagram?.items.map((i) => i.url) ?? [])];
+    ...(p.instagram?.items.map((i) => i.url) ?? []),
+    ...(p.instagram_paused?.items.map((i) => i.url) ?? []),
+    ...(p.bluesky_paused?.images.map((i) => i.url) ?? [])];
   return [...new Set(all)];
 }
 
@@ -75,32 +77,42 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   const message = text(form, "message", cur.message);
   if (message.length > FB_MAX) errors.push(`The Facebook caption is ${message.length} characters; Facebook allows ${FB_MAX}.`);
 
+  const savedBluesky = cur.bluesky ?? cur.bluesky_paused ?? null;
+  const savedInstagram = cur.instagram ?? cur.instagram_paused ?? null;
   const fbOrder = readOrder(form, "order_fb", cur.images.length);
   const ttOrder = cur.tiktok_images === null ? [] : readOrder(form, "order_tt", cur.tiktok_images.length);
-  const bsOrder = readOrder(form, "order_bs", cur.bluesky?.images.length ?? 0);
+  const bsOrder = readOrder(form, "order_bs", savedBluesky?.images.length ?? 0);
   if (!fbOrder || !ttOrder || !bsOrder) errors.push("Could not read the photo order. Reload the page and try again.");
   const images = ordered(cur.images, fbOrder ?? [], form, "remove_fb_");
   const video = cur.video && form.get("remove_fb_video") !== "1" ? cur.video : null;
-  const tiktokImages = cur.tiktok_images === null ? null : ordered(cur.tiktok_images, ttOrder ?? [], form, "remove_tt_");
-  const tiktokVideo = cur.tiktok_video && form.get("remove_tt_video") !== "1" ? cur.tiktok_video : null;
+  let tiktokImages = cur.tiktok_images === null ? null : ordered(cur.tiktok_images, ttOrder ?? [], form, "remove_tt_");
+  let tiktokVideo = cur.tiktok_video && form.get("remove_tt_video") !== "1" ? cur.tiktok_video : null;
+  // Stop TikTok-only uploads from mutating a shared Facebook gallery.
+  // A newly enabled/legacy TikTok target gets its own copy of the saved photos.
+  if (tiktok && (cur.tiktok_images === null || form.get("tt_copy_fb") === "1")) {
+    tiktokImages = [...images];
+    tiktokVideo = video;
+  }
   const ttCaptionRaw = text(form, "tiktok_caption", cur.tiktok_caption ?? "").trim();
   const tiktokCaption = ttCaptionRaw || null;
+  const tiktokTitle = text(form, "tiktok_title", cur.tiktok_title ?? "").trim();
+  if (tiktokTitle.length > 90) errors.push("TikTok photo title cannot exceed 90 characters.");
   const ttIsVideo = tiktokImages === null ? !!video : !!tiktokVideo;
   const ttLimit = captionLimit("tiktok", { photos: 1, video: ttIsVideo });
   if (tiktok && (tiktokCaption ?? message).length > ttLimit)
     errors.push(`The TikTok caption is too long; TikTok allows ${ttLimit} characters for this format.`);
 
   let bluesky: BlueskyDraft | null = null;
-  if (blueskyOn) {
-    const base = cur.bluesky ?? { caption: "", images: [], video: null, patreon: null };
+  if (blueskyOn || savedBluesky) {
+    const base = savedBluesky ?? { caption: "", images: [], video: null, patreon: null };
     const caption = text(form, "bs_caption", base.caption);
-    if (textLength(caption) > BSKY_TEXT_LIMIT) errors.push(`The Bluesky caption is over ${BSKY_TEXT_LIMIT} characters.`);
+    if (blueskyOn && textLength(caption) > BSKY_TEXT_LIMIT) errors.push(`The Bluesky caption is over ${BSKY_TEXT_LIMIT} characters.`);
     const bsAll = base.images.map((img, i) => ({ url: img.url, alt: text(form, "bs_alt_" + i, img.alt).trim() }));
-    const bsImages = ordered(bsAll, cur.bluesky ? bsOrder ?? [] : [], form, "remove_bs_");
+    const bsImages = ordered(bsAll, savedBluesky ? bsOrder ?? [] : [], form, "remove_bs_");
     const bsVideo = base.video && form.get("remove_bs_video") !== "1"
       ? { url: base.video.url, alt: text(form, "bs_video_alt", base.video.alt).trim() } : null;
     for (const a of [...bsImages.map((x) => x.alt), ...(bsVideo ? [bsVideo.alt] : [])])
-      if (a.length > MAX_ALT) errors.push(`Alternative text is limited to ${MAX_ALT} characters.`);
+      if (blueskyOn && a.length > MAX_ALT) errors.push(`Alternative text is limited to ${MAX_ALT} characters.`);
     const patreonUrl = text(form, "bs_patreon_url", base.patreon?.url ?? "").trim();
     bluesky = {
       caption, images: bsImages, video: bsVideo,
@@ -115,8 +127,8 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   // Instagram may only use photos already on this post; new media still comes
   // through the private upload routes.
   let instagram: InstagramDraft | null = null;
-  if (instagramOn) {
-    const base = cur.instagram ?? { caption: "", frame: "4:5" as InstagramFrame, items: [] };
+  if (instagramOn || savedInstagram) {
+    const base = savedInstagram ?? { caption: "", frame: "4:5" as InstagramFrame, items: [] };
     const rawItems = form.get("ig_items");
     const items = rawItems === null ? base.items : readInstagramItems(String(rawItems));
     if (!items) errors.push("Could not read the Instagram photo settings. Reload the page and try again.");
@@ -126,7 +138,7 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
         frame: text(form, "ig_frame", base.frame) as InstagramFrame,
         items,
       };
-      errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur))));
+      if (instagramOn) errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur))));
     }
   }
 
@@ -146,7 +158,9 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     bluesky,
     instagram,
     next: {
-      message, tiktok_caption: tiktokCaption, images, tiktok_images: tiktokImages, video,
+      message, tiktok_caption: tiktokCaption, tiktok_title: tiktokTitle || null,
+      bluesky_enabled: blueskyOn, instagram_enabled: instagramOn,
+      images, tiktok_images: tiktokImages, video,
       tiktok_video: tiktokVideo, facebook_enabled: facebook, tiktok_enabled: tiktok,
       scheduled_at: scheduledAt, label: short(form, "label", cur.label), release: short(form, "release", cur.release),
     },
@@ -186,7 +200,7 @@ function video(src: string, removeName: string, extra = ""): string {
 
 /** Saved state of each platform's target, for the first render of the checks. */
 export function targetStates(p: Post): Record<PlatformId, TargetState> {
-  const bs = p.bluesky;
+  const bs = p.bluesky ?? p.bluesky_paused ?? null;
   const tt = tiktokMedia(p);
   const ttShared = p.tiktok_images === null;
   return {
@@ -229,12 +243,12 @@ const chip = (name: string, label: string, on: boolean) =>
 export function renderDraftEditor(v: EditorView): string {
   const p = v.post;
   const id = esc(p.id);
-  const bs = p.bluesky;
+  const bs = p.bluesky ?? p.bluesky_paused ?? null;
   const tt = tiktokMedia(p);
   const ttShared = p.tiktok_images === null;
   const hide = (on: boolean) => (on ? "" : " hidden");
-  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!bs, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
-  const ig = p.instagram;
+  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!p.bluesky, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
+  const ig = p.instagram ?? p.instagram_paused ?? null;
   const pool = postPhotos(p);
   const igItems = ig?.items ?? [];
   const igFrame: InstagramFrame = ig?.frame ?? "4:5";
