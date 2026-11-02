@@ -19,7 +19,8 @@ import { serveTikTokMedia } from "./tiktok-media.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
 import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
-import { DRAFT_EDITOR_JS, parseEditorForm, renderDraftEditor } from "./draft-editor.ts";
+import { DRAFT_EDITOR_JS, parseEditorForm, postPhotos, renderDraftEditor } from "./draft-editor.ts";
+import { renderInstagram } from "./instagram.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
@@ -131,6 +132,8 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   }
   const video = /^\/video\/(p_[a-z0-9]+)\/(facebook|bluesky|tiktok)$/.exec(path);
   if (video && req.method === "GET") return videoProxy(req,env,video[1],video[2]);
+  const igPhoto = /^\/instagram\/(p_[a-z0-9]+)\/(\d+)\.jpg$/.exec(path);
+  if (igPhoto && req.method === "GET") return instagramPhoto(env, igPhoto[1], Number(igPhoto[2]));
   const media = /^\/media\/(p_[a-z0-9]+)\/(\d+)$/.exec(path);
   if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1",url.searchParams.get("platform"));
 
@@ -780,7 +783,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const parsed = parseEditorForm(form, current, env.TIMEZONE);
     if (parsed.errors.length || !parsed.next)
       return postPage(env, session, id, { error: "Not saved: " + parsed.errors.join(" ") }, 400);
-    const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null);
+    const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null, parsed.instagram ?? null);
     if (!saved) return postPage(env, session, id, { error: "This draft changed while saving. Your edits were not saved. Reload and edit again." }, 409);
     await audit(env.DB, session.login, current.status === "rejected" ? "revised-rejected" : "edited", id, "web editor");
     return postPage(env, session, id, { notice: "Saved. Nothing was published." });
@@ -1056,9 +1059,31 @@ async function videoProxy(req: Request, env: Env, id: string, target: string): P
   }
 }
 
+/** The finished Instagram JPEG for one saved photo, rendered on the server
+ * from the saved frame and crop/pad settings. Signed-in editors only (the
+ * session check above). Sends nothing to Instagram. */
+async function instagramPhoto(env: Env, id: string, n: number): Promise<Response> {
+  const p = await getPost(env.DB, id);
+  const item = p?.instagram?.items[n];
+  if (!p?.instagram || !item) return new Response("Not found", { status: 404 });
+  if (!env.IMAGES) return new Response("Image renderer unavailable", { status: 503 });
+  try {
+    const img = await fetchImage(env, item.url);
+    const jpeg = await renderInstagram(env.IMAGES, new Uint8Array(img.bytes), p.instagram.frame, item);
+    return new Response(jpeg, { headers: {
+      "Content-Type": "image/jpeg", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": `inline; filename="instagram-${id}-${n + 1}.jpg"`,
+    } });
+  } catch (e) {
+    return new Response(e instanceof Error ? e.message : "Could not render the photo", { status: 502 });
+  }
+}
+
 async function mediaProxy(env: Env, id: string, n: number, thumbnail = false, platform:string|null=null): Promise<Response> {
   const p = await getPost(env.DB, id);
-  const url = platform==="tiktok"?(p?tiktokMedia(p).images[n]:null):
+  const url = platform==="pool"?(p?postPhotos(p)[n]:null):
+    platform==="instagram"?p?.instagram?.items[n]?.url:
+    platform==="tiktok"?(p?tiktokMedia(p).images[n]:null):
     platform==="bluesky"?p?.bluesky?.images[n]?.url:
     platform==="facebook"?p?.images[n]:
     p?.images[n] ?? p?.bluesky?.images[n]?.url ?? (p?tiktokMedia(p).images[n]:null);

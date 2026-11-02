@@ -5,7 +5,7 @@ export const esc = (v: unknown): string =>
 
 const CSS = `
 :root{--bg:#141110;--panel:#1e1a17;--line:#3a322b;--text:#ece3d4;--muted:#a89b88;--accent:#b3261e;--accent2:#d8b25a;--ok:#5f8f5a;--warn:#c98b2b;--err:#d9534f}
-@media (prefers-color-scheme: light){:root{--bg:#f4eee3;--panel:#fffaf1;--line:#ddd0bb;--text:#231c16;--muted:#6f6253;--accent:#9e1f18;--accent2:#8a6416}}
+@media (prefers-color-scheme: light){:root{--bg:#f4eee3;--panel:#fffaf1;--line:#ddd0bb;--text:#231c16;--muted:#6f6253;--accent:#9e1f18;--accent2:#8a6416;--warn:#8a5a0c;--ok:#3f6e3a}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 Georgia,"Iowan Old Style","Palatino Linotype",serif}
