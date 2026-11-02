@@ -343,6 +343,8 @@ export function renderDraftEditor(v: EditorView): string {
 .adder[open]>summary{border-style:solid;margin-bottom:12px}
 .targets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;align-items:start;margin-top:12px}
 .target{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg);display:grid;gap:8px;min-width:0}
+/* Author display rules must not override the hidden state of unselected platforms. */
+.targets > .target[hidden],.readiness > li[hidden]{display:none!important}
 .target[data-state=error]{border-color:var(--err)}
 .target-head h4{font:650 16px system-ui,sans-serif;margin:0}
 .target-head .format{font:12.5px system-ui,sans-serif;color:var(--muted);margin:2px 0 0}
