@@ -68,6 +68,10 @@ test("the draft page is one editor: Save button, chosen platforms only, no dupli
   assert.doesNotMatch(html,/Edit unreleased captions/);
   assert.doesNotMatch(html,/name="bs_image_0"/,"no raw Bluesky URL fields");
   assert.match(html,/data-platform="tiktok" hidden/);
+  // The author style's display:grid/flex would otherwise override HTML hidden.
+  assert.ok(html.includes(".targets > .target[hidden],.readiness > li[hidden]{display:none!important}"));
+  assert.match(html,/<article class="target" id="target-tiktok" data-platform="tiktok" hidden/);
+  assert.match(html,/<article class="target target-ig" id="target-instagram" data-platform="instagram" hidden/);
   assert.equal((await get("/draft-editor.js")).status,200);
 });
 
