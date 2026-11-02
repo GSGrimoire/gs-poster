@@ -1060,17 +1060,9 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   });
   form.addEventListener("input", refresh);
   form.addEventListener("change", refresh);
-  // Per-platform photo order (#33): move buttons reorder the tiles of one
-  // platform only and write the saved positions, in the new order, to that
-  // platform's hidden order field. Focus follows the moved photo.
-  form.addEventListener("click", e => {
-    const btn = e.target.closest("[data-move]");
-    if (!btn) return;
-    const tile = btn.closest("[data-tile]"), box = tile.parentElement;
-    const tiles = Array.from(box.querySelectorAll(":scope > [data-index]"));
-    const at = tiles.indexOf(tile), to = at + Number(btn.dataset.move);
-    if (to < 0 || to >= tiles.length) return;
-    if (to > at) tiles[to].after(tile); else tiles[to].before(tile);
+  // Reorder one platform gallery at a time. Original data-index values
+  // determine the saved order; dragging never changes another platform.
+  function syncTileOrder(box) {
     const now = Array.from(box.querySelectorAll(":scope > [data-index]"));
     now.forEach((t, k) => {
       const pos = t.querySelector(".tile-pos");
@@ -1084,8 +1076,55 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       field.dispatchEvent(new Event("input", { bubbles: true }));
       field.dispatchEvent(new Event("change", { bubbles: true }));
     }
+  }
+  form.addEventListener("click", e => {
+    const btn = e.target.closest("[data-move]");
+    if (!btn) return;
+    const tile = btn.closest("[data-tile]"), box = tile.parentElement;
+    const tiles = Array.from(box.querySelectorAll(":scope > [data-index]"));
+    const at = tiles.indexOf(tile), to = at + Number(btn.dataset.move);
+    if (to < 0 || to >= tiles.length) return;
+    if (to > at) tiles[to].after(tile); else tiles[to].before(tile);
+    syncTileOrder(box);
     const again = tile.querySelector('[data-move="' + btn.dataset.move + '"]');
     (again && !again.disabled ? again : tile.querySelector("[data-move]:not([disabled])"))?.focus();
+  });
+  let dragTile = null;
+  form.addEventListener("dragstart", e => {
+    const tile = e.target.closest('.tiles[data-order] > [data-index][draggable="true"]');
+    if (!tile || !e.dataTransfer) return;
+    dragTile = tile;
+    tile.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", tile.dataset.index);
+  });
+  form.addEventListener("dragover", e => {
+    if (!dragTile) return;
+    const target = e.target.closest('.tiles[data-order] > [data-index]');
+    if (!target || target === dragTile || target.parentElement !== dragTile.parentElement) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    form.querySelectorAll(".tiles > .drop-target").forEach(x => x.classList.remove("drop-target"));
+    target.classList.add("drop-target");
+  });
+  form.addEventListener("drop", e => {
+    if (!dragTile) return;
+    const target = e.target.closest('.tiles[data-order] > [data-index]');
+    if (!target || target === dragTile || target.parentElement !== dragTile.parentElement) return;
+    e.preventDefault();
+    const box = dragTile.parentElement;
+    const tiles = Array.from(box.querySelectorAll(":scope > [data-index]"));
+    if (tiles.indexOf(dragTile) < tiles.indexOf(target)) target.after(dragTile);
+    else target.before(dragTile);
+    syncTileOrder(box);
+    form.querySelectorAll(".tiles > .drop-target").forEach(x => x.classList.remove("drop-target"));
+    dragTile.classList.remove("dragging");
+    dragTile = null;
+  });
+  form.addEventListener("dragend", () => {
+    if (dragTile) dragTile.classList.remove("dragging");
+    dragTile = null;
+    form.querySelectorAll(".tiles > .drop-target").forEach(x => x.classList.remove("drop-target"));
   });
   form.querySelectorAll("[data-order]").forEach(box => {
     const tiles = box.querySelectorAll(":scope > [data-index]");
