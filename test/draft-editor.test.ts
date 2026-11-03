@@ -171,8 +171,10 @@ test("TikTok copies an existing Facebook video without changing Facebook or publ
   assert.doesNotMatch(page,/id="tt-copy-fb"/,"no Facebook photos, so photo-copy option is absent");
   const js=await (await get("/draft-editor.js")).text();
   assert.match(js,/tt-copy-fb-video/);
-  assert.match(js,/confirm\\("Replace TikTok photos or video with the Facebook video\\?/,
-    "the video-copy action requires explicit confirmation before saving");
+  assert.ok(js.includes('if (!confirm(question)) return;'),
+    "the shared TikTok copy helper requires explicit confirmation");
+  assert.ok(js.includes('copyFacebookMediaToTikTok("Replace TikTok photos or video with the Facebook video?'),
+    "the video-copy action supplies its own confirmation prompt");
 
   const attemptedRemoval=await call("/post/"+p.id+"/save",{
     ...baseSave(p),p_tiktok:"1",tt_copy_fb:"1",remove_fb_video:"1",
