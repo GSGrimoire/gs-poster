@@ -36,7 +36,8 @@ export function tiktokReleasePlan(
   if (!conn.scopes.split(",").includes("video.upload"))
     return { ok: false, offered: true, reason: "The TikTok connection lacks inbox upload permission. Reconnect in TikTok settings." };
   const media = tiktokMedia(p);
-  const title = (p.label || p.release || "GS Grimoire").slice(0, 90);
+  // Never leak an internal GS Poster draft name into a public TikTok title.
+  const title = (p.tiktok_title ?? "").trim();
   const text = p.tiktok_caption ?? p.message;
   if (media.video) {
     if (!/^upload:\/\/[a-f0-9]{32}\.mp4$/.test(media.video))
@@ -45,6 +46,8 @@ export function tiktokReleasePlan(
     return { ok: true, type: "VIDEO", count: 1, title, caption: text, retry };
   }
   if (!media.images.length) return { ok: false, offered: true, reason: "Add photos or a video for TikTok first." };
+  if (!title) return { ok: false, offered: true, reason: "Enter a public TikTok carousel title in the TikTok editor." };
+  if (title.length > 90) return { ok: false, offered: true, reason: "TikTok carousel titles cannot exceed 90 characters." };
   if (media.images.length > TIKTOK_PHOTO_MAX) return { ok: false, offered: true, reason: `TikTok carousels hold at most ${TIKTOK_PHOTO_MAX} photos.` };
   if (media.images.some((u) => { const r = parseUploadRef(u); return !r || r.ext === "mp4"; }))
     return { ok: false, offered: true, reason: "TikTok needs privately uploaded photos. Reattach them through Add photos." };

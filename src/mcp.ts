@@ -63,6 +63,7 @@ function view(env: Env, origin: string, p: Post) {
     release: p.release,
     message: p.message,
     tiktok_caption: p.tiktok_caption,
+    tiktok_title: p.tiktok_title,
     images: p.images,
     tiktok_images:p.tiktok_images,
     tiktok_video:p.tiktok_video,
@@ -70,8 +71,10 @@ function view(env: Env, origin: string, p: Post) {
     facebook_enabled: p.facebook_enabled,
     tiktok_enabled: p.tiktok_enabled===true,
     bluesky: p.bluesky,
+    bluesky_saved_while_disabled: p.bluesky_paused ?? null,
     /** Prepared in the web editor only; nothing sends it to Instagram yet. */
     instagram: p.instagram ? { ...p.instagram, note: "Prepared only. Not connected to Instagram; Gus downloads the rendered photos from the editor." } : null,
+    instagram_saved_while_disabled: p.instagram_paused ?? null,
     link: p.link,
     publish_at: p.scheduled_at,
     publish_at_local: p.scheduled_at ? formatLocal(new Date(p.scheduled_at), env.TIMEZONE) : "on approval",
@@ -147,10 +150,11 @@ const updateDraftSchema = z.object({
         id: z.string(),
         message: z.string().max(63206).optional(),
         tiktok_caption:z.string().max(4000).nullable().optional().describe("Separate TikTok caption. Null removes override; otherwise can contain hashtags. TikTok video limit 2,200, photo limit 4,000 characters."),
+        tiktok_title:z.string().max(90).nullable().optional().describe("PUBLIC TikTok photo carousel title, up to 90 characters. Never use the internal GS Poster label as the public title. Missing title blocks photo transfer until the editor sets one."),
         facebook_enabled: z.boolean().optional(),
-        bluesky: blueskySchema.nullable().optional(),
+        bluesky: blueskySchema.nullable().optional().describe("Bluesky target. Null disables publication while retaining previous caption, media and settings for reactivation."),
         images: imageList.optional(),
-        tiktok_images:imageList.nullable().optional().describe("Independent TikTok carousel; null restores shared fallback."),
+        tiktok_images:imageList.nullable().optional().describe("Independent TikTok carousel; null copies Facebook photos once into a separate TikTok gallery."),
         tiktok_video:z.string().nullable().optional().describe("Independent TikTok video or null."),
         video: z.string().nullable().optional().describe("Facebook MP4 reference, or null to clear it."),
         link: z.string().url().nullable().optional(),
@@ -168,7 +172,7 @@ const updateDraftSchema = z.object({
             zoom: z.number().min(1).max(INSTAGRAM_MAX_ZOOM).default(1).describe("Crop zoom, 1 to 4."),
             bg: z.enum(Object.keys(INSTAGRAM_BACKGROUNDS) as [InstagramBackground, ...InstagramBackground[]]).default("dark").describe("Pad background: dark (brand), black, white or parchment (brand)."),
           })).max(INSTAGRAM_MAX_ITEMS),
-        }).nullable().optional().describe("Instagram feed carousel, PREPARED ONLY: nothing is sent to Instagram. Gus reviews the crop/pad in the editor and downloads the finished photos. Omit to leave it as is; null removes it."),
+        }).nullable().optional().describe("Instagram feed carousel, PREPARED ONLY: nothing is sent to Instagram. Omit to leave selection as is; null disables Instagram while retaining its saved editing content."),
         expected_updated_at: z.string().optional().describe("The updated_at you last read from get_post, list_posts or a previous save. If the draft has changed since, nothing is saved and you must fetch it again. Strongly recommended; when omitted, the version read at the start of this call is used."),
       });
 
@@ -178,7 +182,7 @@ const updateDraftSchema = z.object({
 export async function handleUpdateDraft(
   env:Env,origin:string,login:string,input:z.infer<typeof updateDraftSchema>,
 ){
-  const {id, message, tiktok_caption, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky, instagram, expected_updated_at}=input;
+  const {id, message, tiktok_caption, tiktok_title, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky, instagram, expected_updated_at}=input;
       if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
@@ -191,19 +195,25 @@ export async function handleUpdateDraft(
       const nextImages = images ?? cur.images;
       const nextVideo = video === undefined ? cur.video : video;
       const time = publish_at === undefined ? { when: cur.scheduled_at ? new Date(cur.scheduled_at) : null } : readWhen(env, publish_at);
-      const bsNext: BlueskyDraft | null = bluesky === undefined ? cur.bluesky : bluesky;
+      const blueskyOn = bluesky === undefined ? !!cur.bluesky : bluesky !== null;
+      const bsNext: BlueskyDraft | null = bluesky == null ? (cur.bluesky ?? cur.bluesky_paused ?? null) : bluesky;
       const fbNext = facebook_enabled ?? cur.facebook_enabled;
       const checks=fbNext?checkMessage(nextMessage,{hasImages:nextImages.length>0||!!nextVideo}):
         cur.tiktok_enabled?checkMessage(tiktok_caption??cur.tiktok_caption??nextMessage,{
           hasImages:(tiktok_images??cur.tiktok_images??nextImages).length>0||!!(tiktok_video??cur.tiktok_video??nextVideo)
         }):{errors:[],warnings:[]};
-      const bsHouse = bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
-      const bsErrors = bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
+      const bsHouse = blueskyOn && bsNext ? checkMessage(bsNext.caption, { hasImages: bsNext.images.length > 0 }) : null;
+      const bsErrors = blueskyOn && bsNext ? [...checkBluesky(bsNext), ...bsHouse!.errors] : [];
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
-      const igNext = instagram === undefined ? cur.instagram : instagram;
-      if (!fbNext && !bsNext && !cur.tiktok_enabled && !igNext) errors.push("Select at least one of Facebook, Bluesky, TikTok or Instagram.");
-      const nextTTImages=tiktok_images===undefined?(tiktok_video?[]:cur.tiktok_images):tiktok_images;
-      const nextTTVideo=tiktok_video===undefined?cur.tiktok_video:tiktok_video;
+      const instagramOn = instagram === undefined ? !!cur.instagram : instagram !== null;
+      const igNext = instagram == null ? (cur.instagram ?? cur.instagram_paused ?? null) : instagram;
+      if (!fbNext && !blueskyOn && !cur.tiktok_enabled && !instagramOn) errors.push("Select at least one of Facebook, Bluesky, TikTok or Instagram.");
+      const nextTTImages = tiktok_images === undefined
+         ? (tiktok_video ? [] : cur.tiktok_enabled && cur.tiktok_images === null ? [...nextImages] : cur.tiktok_images)
+         : tiktok_images === null && cur.tiktok_enabled ? [...nextImages] : tiktok_images;
+      const nextTTVideo = tiktok_video === undefined
+         ? cur.tiktok_enabled && cur.tiktok_images === null ? nextVideo : cur.tiktok_video
+         : tiktok_video;
       const privateErrors=await checkOwnedDraftMedia(env,login,[
         ...nextImages,...(nextTTImages??[]),...(nextVideo?[nextVideo]:[]),
         ...(nextTTVideo?[nextTTVideo]:[]),
@@ -244,12 +254,13 @@ export async function handleUpdateDraft(
       let version: string | null;
       try {
         version = await saveEditorDraft(env.DB, id, baseVersion, {
-          message: nextMessage, tiktok_caption: nextTikTokCaption,
+          message: nextMessage, tiktok_caption: nextTikTokCaption, tiktok_title: tiktok_title === undefined ? cur.tiktok_title ?? null : tiktok_title,
+          bluesky_enabled: blueskyOn, instagram_enabled: instagramOn,
           images: nextImages, tiktok_images: nextTTImages,
           video: nextVideo, tiktok_video: nextTTVideo,
           facebook_enabled: fbNext, tiktok_enabled: cur.tiktok_enabled === true,
           scheduled_at: nextScheduled, label: nextLabel, release: nextRelease, link: nextLink,
-        }, bsNext, instagram);
+        }, bsNext, igNext);
       } catch {
         // The commit may or may not have happened (lost response). Read back
         // rather than guess, and never retry blindly.
@@ -272,8 +283,9 @@ export async function handleUpdateDraft(
       // what the caller asked for; say so rather than report success.
       const mismatch: string[] = [];
       if (saved.facebook_enabled !== fbNext) mismatch.push("facebook_enabled");
-      if (!!saved.bluesky !== !!bsNext) mismatch.push("bluesky");
+      if (!!saved.bluesky !== blueskyOn) mismatch.push("bluesky");
       if (saved.message !== nextMessage) mismatch.push("message");
+       if (tiktok_title !== undefined && saved.tiktok_title !== tiktok_title) mismatch.push("tiktok_title");
       if (instagram !== undefined && JSON.stringify(saved.instagram) !== JSON.stringify(instagram)) mismatch.push("instagram");
       if (mismatch.length) return fail("Saved draft does not match the request. Fetch it with get_post and check before review.", { fields: mismatch, post: view(env, origin, saved) });
       const auditOk = await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id).then(() => true, () => false);
@@ -507,6 +519,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       inputSchema: z.object({
         message: z.string().max(63206).describe("Facebook caption or shared descriptive caption. Text and hashtags are supported."),
         tiktok_caption:z.string().max(4000).optional().describe("Independent TikTok caption and hashtags. For videos use at most 2,200 characters, for photo carousels at most 4,000. Falls back to message if omitted."),
+        tiktok_title:z.string().max(90).optional().describe("Public TikTok photo-carousel title, separate from the internal GS Poster draft label. Required before TikTok photo transfer."),
         facebook_enabled: z.boolean().default(true).describe("Select Facebook target. False is allowed when Bluesky or TikTok is selected."),
         tiktok_enabled: z.boolean().default(false).describe("Select TikTok as an independent draft target. Upload or direct publication on TikTok is a separate explicit PIN-approved web action. GS Poster does not automatically schedule TikTok releases."),
         bluesky: blueskySchema.optional().describe("Optional Bluesky target with its own caption, image alt descriptions and free Patreon link card."),
@@ -521,7 +534,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ message, tiktok_caption, images = [], tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
+    async ({ message, tiktok_caption, tiktok_title, images = [], tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
       const login=currentOwner(env);
       if(!login)return fail("Editor access is no longer authorized.");
       const privateErrors=await checkOwnedDraftMedia(env,login,[
@@ -559,8 +572,10 @@ export function buildServer(env: Env, origin: string): McpServer {
       const p = await createPost(env.DB, {
         message,
         tiktok_caption:tiktok_caption ?? null,
+        tiktok_title:tiktok_title ?? null,
         images,
-        tiktok_images:tiktok_images??(tiktok_video?[]:null),tiktok_video:tiktok_video??null,
+        tiktok_images:tiktok_images??(tiktok_video?[]:tiktok_enabled?[...images]:null),
+        tiktok_video:tiktok_video??(tiktok_enabled && !tiktok_images && video ? video : null),
         video:video ?? null,
         link: link ?? null,
         scheduled_at: time.when?.toISOString() ?? null,

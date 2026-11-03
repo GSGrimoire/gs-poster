@@ -42,6 +42,8 @@ export interface Post {
   message: string;
   /** Optional TikTok-specific description; falls back to the general caption. */
   tiktok_caption: string | null;
+  /** Public TikTok carousel title, distinct from the internal post name. */
+  tiktok_title: string | null;
   link: string | null;
   images: string[];
   /** Null means a legacy shared gallery; [] means explicitly independent TikTok media. */
@@ -60,14 +62,18 @@ export interface Post {
   /** TikTok inbox-only workflow; no automatic publication. */
   tiktok_enabled?: boolean;
   bluesky: BlueskyTarget | null;
+  /** Retained editing data for a disabled target. Never published. */
+  bluesky_paused?: BlueskyDraft | null;
   /** Instagram feed target, prepared only: nothing sends it yet. */
   instagram: InstagramDraft | null;
+  instagram_paused?: InstagramDraft | null;
 }
 
 interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky" | "instagram"> {
   ig_caption?: string | null;
   ig_frame?: string | null;
   ig_items?: string | null;
+  ig_status?: string | null;
   facebook_enabled: number;
   tiktok_enabled: number;
   images: string;
@@ -77,7 +83,7 @@ interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled"
   bs_video: string | null;
   bs_patreon: string | null;
   bs_facebook_enabled: number | null;
-  bs_status: BlueskyStatus | null;
+  bs_status: BlueskyStatus | "disabled" | null;
   bs_uri: string | null;
   bs_cid: string | null;
   bs_card_uri: string | null;
@@ -89,7 +95,7 @@ const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
  b.video AS bs_video, b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
  b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
  b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error,
- i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items
+ i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items, i.status AS ig_status
  FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id
  LEFT JOIN instagram_targets i ON p.id = i.post_id`;
 
@@ -107,6 +113,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       release TEXT,
       message TEXT NOT NULL,
       tiktok_caption TEXT,
+      tiktok_title TEXT,
       link TEXT,
       images TEXT NOT NULL DEFAULT '[]',
       tiktok_images TEXT,
@@ -173,7 +180,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     catch(error) { if (!/duplicate column name/i.test(String(error))) throw error; }
   }
   const platformColumns=await db.prepare("PRAGMA table_info(posts)").all<{name:string}>();
-  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"],["tiktok_caption","TEXT"],["tiktok_images","TEXT"],["tiktok_video","TEXT"]]) {
+  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"],["tiktok_caption","TEXT"],["tiktok_title","TEXT"],["tiktok_images","TEXT"],["tiktok_video","TEXT"]]) {
     if(!platformColumns.results.some(column=>column.name===name)) {
       try {await db.prepare("ALTER TABLE posts ADD COLUMN "+name+" "+definition).run();}
       catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
@@ -183,30 +190,29 @@ export async function ensureSchema(db: D1Database): Promise<void> {
 }
 
 function fromRow(r: Row): Post {
+  const bluesky: BlueskyTarget | null = r.bs_caption === null ? null : {
+    caption: r.bs_caption, images: JSON.parse(r.bs_images || "[]"),
+    video: r.bs_video ? JSON.parse(r.bs_video) : null,
+    patreon: r.bs_patreon ? JSON.parse(r.bs_patreon) : null,
+    status: r.bs_status === "disabled" ? "draft" : r.bs_status!,
+    uri: r.bs_uri, cid: r.bs_cid, card_uri: r.bs_card_uri,
+    permalink: r.bs_permalink, error: r.bs_error,
+  };
+  const instagram: InstagramDraft | null = r.ig_caption == null ? null : {
+    caption: r.ig_caption, frame: (r.ig_frame ?? "4:5") as InstagramDraft["frame"],
+    items: JSON.parse(r.ig_items || "[]"),
+  };
   return {
     ...r,
     images: JSON.parse(r.images || "[]"),
     tiktok_images: r.tiktok_images==null ? null : JSON.parse(r.tiktok_images),
     tiktok_video: r.tiktok_video ?? null,
-    facebook_enabled: r.bs_caption === null ? r.facebook_enabled !== 0 : r.bs_facebook_enabled !== 0,
+    facebook_enabled: r.bs_caption === null || r.bs_status === "disabled" ? r.facebook_enabled !== 0 : r.bs_facebook_enabled !== 0,
     tiktok_enabled: r.tiktok_enabled !== 0,
-    bluesky: r.bs_caption === null ? null : {
-      caption: r.bs_caption,
-      images: JSON.parse(r.bs_images || "[]"),
-      video: r.bs_video ? JSON.parse(r.bs_video) : null,
-      patreon: r.bs_patreon ? JSON.parse(r.bs_patreon) : null,
-      status: r.bs_status!,
-      uri: r.bs_uri,
-      cid: r.bs_cid,
-      card_uri: r.bs_card_uri,
-      permalink: r.bs_permalink,
-      error: r.bs_error,
-    },
-    instagram: r.ig_caption == null ? null : {
-      caption: r.ig_caption,
-      frame: (r.ig_frame ?? "4:5") as InstagramDraft["frame"],
-      items: JSON.parse(r.ig_items || "[]"),
-    },
+    bluesky: r.bs_status === "disabled" ? null : bluesky,
+    bluesky_paused: r.bs_status === "disabled" ? bluesky : null,
+    instagram: r.ig_status === "disabled" ? null : instagram,
+    instagram_paused: r.ig_status === "disabled" ? instagram : null,
   };
 }
 
@@ -219,6 +225,7 @@ export function newId(): string {
 export interface NewPost {
   message: string;
   tiktok_caption?: string | null;
+  tiktok_title?: string | null;
   link?: string | null;
   images: string[];
   tiktok_images?: string[] | null;
@@ -238,9 +245,9 @@ export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
   const now = new Date().toISOString();
   const id = newId();
   const inserts = [
-    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, tiktok_caption, link, images, tiktok_images, tiktok_video, video, facebook_enabled, tiktok_enabled, scheduled_at, created_by)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.tiktok_caption ?? null, p.link ?? null, JSON.stringify(p.images),p.tiktok_images===undefined || p.tiktok_images===null ? null : JSON.stringify(p.tiktok_images),p.tiktok_video??null, p.video ?? null, p.facebook_enabled===false?0:1, p.tiktok_enabled?1:0, p.scheduled_at, p.created_by),
+    db.prepare(`INSERT INTO posts (id, created_at, updated_at, status, label, release, message, tiktok_caption, tiktok_title, link, images, tiktok_images, tiktok_video, video, facebook_enabled, tiktok_enabled, scheduled_at, created_by)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, now, now, p.label ?? null, p.release ?? null, p.message, p.tiktok_caption ?? null, p.tiktok_title ?? null, p.link ?? null, JSON.stringify(p.images),p.tiktok_images===undefined || p.tiktok_images===null ? null : JSON.stringify(p.tiktok_images),p.tiktok_video??null, p.video ?? null, p.facebook_enabled===false?0:1, p.tiktok_enabled?1:0, p.scheduled_at, p.created_by),
   ];
   if (p.bluesky) inserts.push(db.prepare(`INSERT INTO bluesky_targets
       (post_id, caption, images, video, patreon, facebook_enabled) VALUES (?, ?, ?, ?, ?, ?)`)
@@ -484,6 +491,9 @@ export async function reopenFailedDraft(
 export interface EditorDraft {
   message: string;
   tiktok_caption: string | null;
+  tiktok_title: string | null;
+  bluesky_enabled: boolean;
+  instagram_enabled: boolean;
   images: string[];
   tiktok_images: string[] | null;
   video: string | null;
@@ -505,7 +515,7 @@ export interface EditorDraft {
  */
 export async function saveEditorDraft(
   db: D1Database, id: string, expectedVersion: string, next: EditorDraft, bluesky: BlueskyDraft | null,
-  /** Undefined leaves the Instagram target as it is; null removes it. */
+  /** Null only when the platform has never had saved editing data. */
   instagram?: InstagramDraft | null,
 ): Promise<string | null> {
   await ensureSchema(db);
@@ -513,30 +523,30 @@ export async function saveEditorDraft(
   const version = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
   const fenced = "EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ? AND status = 'draft' AND approved_at IS NULL)";
   const statements = [
-    db.prepare(`UPDATE posts SET status = 'draft', message = ?, tiktok_caption = ?, images = ?, tiktok_images = ?,
+    db.prepare(`UPDATE posts SET status = 'draft', message = ?, tiktok_caption = ?, tiktok_title = ?, images = ?, tiktok_images = ?,
         video = ?, tiktok_video = ?, facebook_enabled = ?, tiktok_enabled = ?, scheduled_at = ?, label = ?, release = ?,
         link = CASE WHEN ? = 1 THEN ? ELSE link END, updated_at = ?
       WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL`)
-      .bind(next.message, next.tiktok_caption, JSON.stringify(next.images),
+      .bind(next.message, next.tiktok_caption, next.tiktok_title ?? null, JSON.stringify(next.images),
         next.tiktok_images === null ? null : JSON.stringify(next.tiktok_images),
         next.video, next.tiktok_video, next.facebook_enabled ? 1 : 0, next.tiktok_enabled ? 1 : 0,
         next.scheduled_at, next.label, next.release,
         next.link === undefined ? 0 : 1, next.link ?? null, version, id, expectedVersion),
     bluesky
-      ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, video, patreon, facebook_enabled)
-          SELECT ?, ?, ?, ?, ?, ? WHERE ${fenced}
+      ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, video, patreon, facebook_enabled, status)
+          SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${fenced}
           ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, images = excluded.images,
             video = excluded.video, patreon = excluded.patreon, facebook_enabled = excluded.facebook_enabled,
-            status = 'draft', uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL, started_at = NULL`)
+            status = excluded.status, uri = NULL, cid = NULL, card_uri = NULL, permalink = NULL, error = NULL, started_at = NULL`)
         .bind(id, bluesky.caption, JSON.stringify(bluesky.images),
           bluesky.video ? JSON.stringify(bluesky.video) : null,
-          bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, id, version)
+          bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, (next.bluesky_enabled ?? !!bluesky) ? "draft" : "disabled", id, version)
       : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version),
   ];
   if (instagram) statements.push(db.prepare(`INSERT INTO instagram_targets (post_id, caption, frame, items, status)
-      SELECT ?, ?, ?, ?, 'draft' WHERE ${fenced}
-      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items, status = 'draft'`)
-    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), id, version));
+      SELECT ?, ?, ?, ?, ? WHERE ${fenced}
+      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items, status = excluded.status`)
+    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), (next.instagram_enabled ?? !!instagram) ? "draft" : "disabled", id, version));
   else if (instagram === null) statements.push(
     db.prepare(`DELETE FROM instagram_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version));
   const results = await db.batch(statements);

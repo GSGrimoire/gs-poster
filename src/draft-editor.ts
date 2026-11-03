@@ -28,7 +28,9 @@ export interface EditorParse {
 /** Every photo already on the post, in a stable order, for the Instagram picker. */
 export function postPhotos(p: Post): string[] {
   const all = [...p.images, ...(p.tiktok_images ?? []), ...(p.bluesky?.images.map((i) => i.url) ?? []),
-    ...(p.instagram?.items.map((i) => i.url) ?? [])];
+    ...(p.instagram?.items.map((i) => i.url) ?? []),
+    ...(p.instagram_paused?.items.map((i) => i.url) ?? []),
+    ...(p.bluesky_paused?.images.map((i) => i.url) ?? [])];
   return [...new Set(all)];
 }
 
@@ -75,32 +77,42 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   const message = text(form, "message", cur.message);
   if (message.length > FB_MAX) errors.push(`The Facebook caption is ${message.length} characters; Facebook allows ${FB_MAX}.`);
 
+  const savedBluesky = cur.bluesky ?? cur.bluesky_paused ?? null;
+  const savedInstagram = cur.instagram ?? cur.instagram_paused ?? null;
   const fbOrder = readOrder(form, "order_fb", cur.images.length);
   const ttOrder = cur.tiktok_images === null ? [] : readOrder(form, "order_tt", cur.tiktok_images.length);
-  const bsOrder = readOrder(form, "order_bs", cur.bluesky?.images.length ?? 0);
+  const bsOrder = readOrder(form, "order_bs", savedBluesky?.images.length ?? 0);
   if (!fbOrder || !ttOrder || !bsOrder) errors.push("Could not read the photo order. Reload the page and try again.");
   const images = ordered(cur.images, fbOrder ?? [], form, "remove_fb_");
   const video = cur.video && form.get("remove_fb_video") !== "1" ? cur.video : null;
-  const tiktokImages = cur.tiktok_images === null ? null : ordered(cur.tiktok_images, ttOrder ?? [], form, "remove_tt_");
-  const tiktokVideo = cur.tiktok_video && form.get("remove_tt_video") !== "1" ? cur.tiktok_video : null;
+  let tiktokImages = cur.tiktok_images === null ? null : ordered(cur.tiktok_images, ttOrder ?? [], form, "remove_tt_");
+  let tiktokVideo = cur.tiktok_video && form.get("remove_tt_video") !== "1" ? cur.tiktok_video : null;
+  // Stop TikTok-only uploads from mutating a shared Facebook gallery.
+  // A newly enabled/legacy TikTok target gets its own copy of the saved photos.
+  if (tiktok && (cur.tiktok_images === null || form.get("tt_copy_fb") === "1")) {
+    tiktokImages = [...images];
+    tiktokVideo = video;
+  }
   const ttCaptionRaw = text(form, "tiktok_caption", cur.tiktok_caption ?? "").trim();
   const tiktokCaption = ttCaptionRaw || null;
+  const tiktokTitle = text(form, "tiktok_title", cur.tiktok_title ?? "").trim();
+  if (tiktokTitle.length > 90) errors.push("TikTok photo title cannot exceed 90 characters.");
   const ttIsVideo = tiktokImages === null ? !!video : !!tiktokVideo;
   const ttLimit = captionLimit("tiktok", { photos: 1, video: ttIsVideo });
   if (tiktok && (tiktokCaption ?? message).length > ttLimit)
     errors.push(`The TikTok caption is too long; TikTok allows ${ttLimit} characters for this format.`);
 
   let bluesky: BlueskyDraft | null = null;
-  if (blueskyOn) {
-    const base = cur.bluesky ?? { caption: "", images: [], video: null, patreon: null };
+  if (blueskyOn || savedBluesky) {
+    const base = savedBluesky ?? { caption: "", images: [], video: null, patreon: null };
     const caption = text(form, "bs_caption", base.caption);
-    if (textLength(caption) > BSKY_TEXT_LIMIT) errors.push(`The Bluesky caption is over ${BSKY_TEXT_LIMIT} characters.`);
+    if (blueskyOn && textLength(caption) > BSKY_TEXT_LIMIT) errors.push(`The Bluesky caption is over ${BSKY_TEXT_LIMIT} characters.`);
     const bsAll = base.images.map((img, i) => ({ url: img.url, alt: text(form, "bs_alt_" + i, img.alt).trim() }));
-    const bsImages = ordered(bsAll, cur.bluesky ? bsOrder ?? [] : [], form, "remove_bs_");
+    const bsImages = ordered(bsAll, savedBluesky ? bsOrder ?? [] : [], form, "remove_bs_");
     const bsVideo = base.video && form.get("remove_bs_video") !== "1"
       ? { url: base.video.url, alt: text(form, "bs_video_alt", base.video.alt).trim() } : null;
     for (const a of [...bsImages.map((x) => x.alt), ...(bsVideo ? [bsVideo.alt] : [])])
-      if (a.length > MAX_ALT) errors.push(`Alternative text is limited to ${MAX_ALT} characters.`);
+      if (blueskyOn && a.length > MAX_ALT) errors.push(`Alternative text is limited to ${MAX_ALT} characters.`);
     const patreonUrl = text(form, "bs_patreon_url", base.patreon?.url ?? "").trim();
     bluesky = {
       caption, images: bsImages, video: bsVideo,
@@ -115,8 +127,8 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   // Instagram may only use photos already on this post; new media still comes
   // through the private upload routes.
   let instagram: InstagramDraft | null = null;
-  if (instagramOn) {
-    const base = cur.instagram ?? { caption: "", frame: "4:5" as InstagramFrame, items: [] };
+  if (instagramOn || savedInstagram) {
+    const base = savedInstagram ?? { caption: "", frame: "4:5" as InstagramFrame, items: [] };
     const rawItems = form.get("ig_items");
     const items = rawItems === null ? base.items : readInstagramItems(String(rawItems));
     if (!items) errors.push("Could not read the Instagram photo settings. Reload the page and try again.");
@@ -126,7 +138,7 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
         frame: text(form, "ig_frame", base.frame) as InstagramFrame,
         items,
       };
-      errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur))));
+      if (instagramOn) errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur))));
     }
   }
 
@@ -146,7 +158,9 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     bluesky,
     instagram,
     next: {
-      message, tiktok_caption: tiktokCaption, images, tiktok_images: tiktokImages, video,
+      message, tiktok_caption: tiktokCaption, tiktok_title: tiktokTitle || null,
+      bluesky_enabled: blueskyOn, instagram_enabled: instagramOn,
+      images, tiktok_images: tiktokImages, video,
       tiktok_video: tiktokVideo, facebook_enabled: facebook, tiktok_enabled: tiktok,
       scheduled_at: scheduledAt, label: short(form, "label", cur.label), release: short(form, "release", cur.release),
     },
@@ -174,7 +188,7 @@ function tile(src: string, alt: string, removeName: string, extra = "", index?: 
   const moves = index === undefined ? "" : `<div class="tile-move"><span class="tile-pos" aria-hidden="true">${index + 1}</span>
       <button type="button" data-move="-1" aria-label="Move ${esc(alt)} earlier">&#8249;</button>
       <button type="button" data-move="1" aria-label="Move ${esc(alt)} later">&#8250;</button></div>`;
-  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
+  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}" draggable="true"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
     <span class="tile-ratio" data-ratio-badge hidden></span></div>${moves}
     <label class="tile-remove"><input type="checkbox" name="${esc(removeName)}" value="1"> Remove</label>${extra}</figure>`;
 }
@@ -186,7 +200,7 @@ function video(src: string, removeName: string, extra = ""): string {
 
 /** Saved state of each platform's target, for the first render of the checks. */
 export function targetStates(p: Post): Record<PlatformId, TargetState> {
-  const bs = p.bluesky;
+  const bs = p.bluesky ?? p.bluesky_paused ?? null;
   const tt = tiktokMedia(p);
   const ttShared = p.tiktok_images === null;
   return {
@@ -229,12 +243,12 @@ const chip = (name: string, label: string, on: boolean) =>
 export function renderDraftEditor(v: EditorView): string {
   const p = v.post;
   const id = esc(p.id);
-  const bs = p.bluesky;
+  const bs = p.bluesky ?? p.bluesky_paused ?? null;
   const tt = tiktokMedia(p);
   const ttShared = p.tiktok_images === null;
   const hide = (on: boolean) => (on ? "" : " hidden");
-  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!bs, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
-  const ig = p.instagram;
+  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!p.bluesky, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
+  const ig = p.instagram ?? p.instagram_paused ?? null;
   const pool = postPhotos(p);
   const igItems = ig?.items ?? [];
   const igFrame: InstagramFrame = ig?.frame ?? "4:5";
@@ -248,7 +262,7 @@ export function renderDraftEditor(v: EditorView): string {
     : (bs?.images ?? []).map((img, i) => tile(`/media/${p.id}/${i}?platform=bluesky`, `Bluesky photo ${i + 1}`, "remove_bs_" + i,
       `<label>Describe the image<input type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined)).join("");
   const ttMedia = ttShared
-    ? `<p class="hint shared-note">TikTok uses the Facebook ${p.video ? "video" : "photos"}, in the same order. Removing one from Facebook removes it here too.</p>`
+    ? `<p class="hint shared-note">TikTok is currently using legacy shared Facebook media. Enabling TikTok and saving makes its gallery independent.</p>`
     : tt.video
       ? video(`/video/${p.id}/tiktok`, "remove_tt_video")
       : tt.images.map((_, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined)).join("");
@@ -256,11 +270,11 @@ export function renderDraftEditor(v: EditorView): string {
   const when = p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), v.tz) : "";
   const releaseTargets = [
     p.facebook_enabled ? `<label><input type="checkbox" name="target_facebook" value="1" checked> Facebook · ${p.video ? "video" : photos(p.images.length)}</label>` : "",
-    bs ? `<label><input type="checkbox" name="target_bluesky" value="1" checked> Bluesky · ${bs.video ? "video" : photos(bs.images.length)}</label>` : "",
+    p.bluesky ? `<label><input type="checkbox" name="target_bluesky" value="1" checked> Bluesky · ${bs!.video ? "video" : photos(bs!.images.length)}</label>` : "",
   ].join("");
   const ttPlan = v.tiktokPlan;
   const ttOk = ttPlan?.ok ? ttPlan : null;
-  const fbBs = !!(p.facebook_enabled || bs);
+  const fbBs = !!(p.facebook_enabled || p.bluesky);
   const canRelease = fbBs || !!ttOk;
   const scheduledOthers = fbBs && p.scheduled_at;
   const ttPreview = ttOk ? (ttOk.type === "VIDEO"
@@ -275,14 +289,14 @@ export function renderDraftEditor(v: EditorView): string {
           <p class="hint">${ttOk.type === "VIDEO"
             ? "TikTok takes no caption for inbox videos; add it in the app."
             : `Title: <strong>${esc(ttOk.title)}</strong>. Caption: ${esc(ttOk.caption.slice(0, 140))}${ttOk.caption.length > 140 ? "..." : ""} <span class="tt-edit">(edit it in the TikTok card; it saves automatically)</span>`}</p>
-          <p class="tt-now" role="note"><strong>Sent to your TikTok inbox the moment you approve</strong>${scheduledOthers ? `, even though ${p.facebook_enabled && bs ? "Facebook and Bluesky are" : p.facebook_enabled ? "Facebook is" : "Bluesky is"} scheduled for ${esc(v.whenText)}` : ""}. Nothing is published on TikTok: you finish and post it in the TikTok app.</p>
+          <p class="tt-now" role="note"><strong>Sent to your TikTok inbox the moment you approve</strong>${scheduledOthers ? `, even though ${p.facebook_enabled && p.bluesky ? "Facebook and Bluesky are" : p.facebook_enabled ? "Facebook is" : "Bluesky is"} scheduled for ${esc(v.whenText)}` : ""}. Nothing is published on TikTok: you finish and post it in the TikTok app.</p>
           <label><input type="checkbox" name="is_aigc" value="1"> AI-generated content (declared to TikTok)</label>
           <label><input type="checkbox" name="confirm_tiktok" value="1" required data-tt-required> I have the rights to this media and want it sent to TikTok now.</label>
         </div>
       </fieldset>` : ttPlan && !ttPlan.ok && ttPlan.offered ? `<p class="hint tt-blocked">TikTok: ${esc(ttPlan.reason)}</p>` : "";
   const effects = [
     ...(ttOk ? [`<li><strong>Now:</strong> TikTok inbox</li>`] : []),
-    ...(fbBs ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", bs ? "Bluesky" : ""].filter(Boolean).join(" and ")}</li>`] : []),
+    ...(fbBs ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", p.bluesky ? "Bluesky" : ""].filter(Boolean).join(" and ")}</li>`] : []),
   ];
   const buttonText = ttOk && fbBs ? "Approve selected targets" : ttOk ? "Approve and send to TikTok inbox" : p.scheduled_at ? "Approve and schedule" : "Approve and post now";
   const release = canRelease ? `
@@ -305,7 +319,7 @@ export function renderDraftEditor(v: EditorView): string {
       <p class="hint release-dirty" id="release-dirty" hidden>Saving your changes. Approval unlocks when they are saved; it releases the saved version.</p>
       <div class="row"><button class="primary" id="release-button">${buttonText}</button></div>
       <p class="rail-note">Releases exactly the saved draft. Each platform's result is shown separately; nothing is retried automatically.</p>
-      ${ig ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
+      ${p.instagram ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
     </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok</h3>
       <p class="hint">${esc(ttPlan && !ttPlan.ok ? ttPlan.reason : "Nothing to release yet.")}</p></div>`
     : `<div class="release-card"><div class="eyebrow">Release</div><h3>Instagram only</h3>
@@ -343,6 +357,8 @@ export function renderDraftEditor(v: EditorView): string {
 .adder[open]>summary{border-style:solid;margin-bottom:12px}
 .targets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;align-items:start;margin-top:12px}
 .target{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg);display:grid;gap:8px;min-width:0}
+/* A hidden target must not be shown by the author display:grid/flex styles. */
+.targets > .target[hidden],.readiness > li[hidden]{display:none!important}
 .target[data-state=error]{border-color:var(--err)}
 .target-head h4{font:650 16px system-ui,sans-serif;margin:0}
 .target-head .format{font:12.5px system-ui,sans-serif;color:var(--muted);margin:2px 0 0}
@@ -410,6 +426,10 @@ export function renderDraftEditor(v: EditorView): string {
 .tt-edit{color:var(--muted)}
 .effects{list-style:none;margin:8px 0 0;padding:0;font:13px system-ui,sans-serif;display:grid;gap:2px}
 .tile-move{display:flex;align-items:center;gap:4px}
+.tile[draggable=true]{cursor:grab}
+.tile.dragging,.ig-item.dragging{opacity:.45}
+.tile.drop-target,.ig-item.drop-target{outline:2px dashed var(--accent2);outline-offset:2px}
+.ig-drag{cursor:grab;user-select:none;border:1px dashed var(--line);border-radius:6px;padding:4px 7px;font:600 12px system-ui,sans-serif}
 .tile-move button{padding:2px 9px;font-size:15px;line-height:1.2}
 .tile-move button:disabled{opacity:.35}
 .tile-pos{font:650 12px system-ui,sans-serif;color:var(--muted);margin-right:auto}
@@ -437,11 +457,11 @@ export function renderDraftEditor(v: EditorView): string {
       <h3 id="ed-platforms">Platforms</h3>
       <div class="platform-chips">
         ${chip("p_facebook", "Facebook", p.facebook_enabled)}
-        ${chip("p_instagram", "Instagram", !!ig)}
-        ${chip("p_bluesky", "Bluesky", !!bs)}
+        ${chip("p_instagram", "Instagram", !!p.instagram)}
+        ${chip("p_bluesky", "Bluesky", !!p.bluesky)}
         ${chip("p_tiktok", "TikTok", !!p.tiktok_enabled)}
       </div>
-      <p class="hint">Only the platforms you choose get a caption and media below. Turning Bluesky off removes its caption when you save.</p>
+      <p class="hint">Unchecked platforms are hidden and excluded from approval. Their saved captions, images and settings are retained when you turn them off.</p>
     </section>
 
     <section class="ed-card targets-card" aria-labelledby="ed-targets">
@@ -509,10 +529,14 @@ export function renderDraftEditor(v: EditorView): string {
         <article class="target" id="target-tiktok" data-platform="tiktok"${hide(on.tiktok)} aria-labelledby="tg-tiktok"${ttShared ? ' data-shared="facebook"' : ""}>
           <div class="target-head"><h4 id="tg-tiktok">TikTok</h4><p class="format">${esc(formatLine("tiktok"))}</p></div>
           <ul class="checks target-checks" data-checks="tiktok">${checkItems(states.tiktok)}</ul>
+          <label for="ed-tiktok-title" class="cap-label">Public carousel title (required for TikTok photos)</label>
+          <input id="ed-tiktok-title" type="text" name="tiktok_title" maxlength="90" value="${esc(p.tiktok_title ?? "")}" placeholder="The title viewers see, not the internal draft name">
           <div class="cap-row"><label for="ed-tiktok" class="cap-label">Caption</label>
             <button type="button" class="copy-cap" data-copy-to="ed-tiktok" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-tiktok" name="tiktok_caption" data-max="${captionLimit("tiktok", { photos: 1, video: !!(ttShared ? p.video : tt.video) })}" data-caption="tiktok" placeholder="Leave empty to reuse the Facebook caption">${esc(p.tiktok_caption ?? "")}</textarea>
           <div class="field-meter"></div>
+          ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button><input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0"></div>
+          <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. Only privately uploaded images can be sent to TikTok; linked images must be reuploaded using Add photos.</p>` : ""}
           <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
           ${!ttShared && !tt.video && tt.images.length > 1 ? `<input type="hidden" name="order_tt" value="${Array.from({ length: tt.images.length }, (_, i) => i).join(",")}">` : ""}
           <p class="hint">${esc(PLATFORMS.tiktok.delivery)}</p>
@@ -603,6 +627,12 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     form.querySelectorAll('[data-platform="' + name + '"]').forEach(el => { el.hidden = !box.checked; });
   }
   form.querySelectorAll("[data-platform-toggle]").forEach(box => box.addEventListener("change", () => togglePlatform(box)));
+  document.getElementById("tt-copy-fb")?.addEventListener("click", () => {
+    if (!confirm("Replace the TikTok gallery with a separate copy of the Facebook photos?")) return;
+    const field = document.getElementById("tt-copy-fb-flag");
+    field.value = "1";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
   function meter(area) {
     const out = area.parentElement.querySelector(".field-meter");
     if (!out) return;
@@ -797,7 +827,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         li.innerHTML =
           '<div class="ig-stage"><canvas class="ig-out" tabindex="0" role="img"></canvas></div>' +
           '<div class="ig-controls">' +
-          '<div class="ig-row"><strong>Photo ' + (n + 1) + '</strong><canvas class="ig-whole" aria-hidden="true"></canvas></div>' +
+          '<div class="ig-row"><strong>Photo ' + (n + 1) + '</strong><span class="ig-drag" draggable="true" title="Drag to reorder; up and down buttons also work">Drag to reorder</span><canvas class="ig-whole" aria-hidden="true"></canvas></div>' +
           '<fieldset class="ig-mode"><legend class="sr-only">How to fit photo ' + (n + 1) + '</legend>' +
           '<label class="seg"><input type="radio" form="ig-detached" name="' + id + '" value="crop"> Crop</label>' +
           '<label class="seg"><input type="radio" form="ig-detached" name="' + id + '" value="pad"> Pad</label></fieldset>' +
@@ -832,6 +862,36 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       sync();
       recheck();
     }
+    // Photo handles reorder the carousel; the crop canvas retains its own
+    // pointer drag behavior. Arrow buttons remain the keyboard alternative.
+    let igDrag = -1;
+    igList.addEventListener("dragstart", e => {
+      const handle = e.target.closest(".ig-drag");
+      if (!handle) { e.preventDefault(); return; }
+      igDrag = Number(handle.closest(".ig-item").dataset.index);
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", "instagram-photo");
+      handle.closest(".ig-item").classList.add("dragging");
+    });
+    igList.addEventListener("dragover", e => {
+      if (igDrag < 0) return;
+      const li = e.target.closest(".ig-item");
+      if (!li) return;
+      e.preventDefault();
+      igList.querySelectorAll(".drop-target").forEach(x => x.classList.remove("drop-target"));
+      li.classList.add("drop-target");
+    });
+    igList.addEventListener("drop", e => {
+      if (igDrag < 0) return;
+      const li = e.target.closest(".ig-item");
+      if (!li) return;
+      e.preventDefault();
+      const from = igDrag, to = Number(li.dataset.index);
+      igDrag = -1;
+      if (from !== to) { const moved = items.splice(from, 1)[0]; items.splice(to, 0, moved); render(); }
+      igList.querySelectorAll(".dragging,.drop-target").forEach(x => x.classList.remove("dragging", "drop-target"));
+    });
+    igList.addEventListener("dragend", () => { igDrag = -1; igList.querySelectorAll(".dragging,.drop-target").forEach(x => x.classList.remove("dragging", "drop-target")); });
     function itemOf(target) { const li = target.closest(".ig-item"); return li ? [li, items[Number(li.dataset.index)]] : [null, null]; }
     igList.addEventListener("change", e => {
       const [li, it] = itemOf(e.target);
@@ -936,7 +996,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   // CSRF and version-fenced save runs and returns JSON. One save at a time;
   // edits made while one is in flight are saved next. A refused save keeps
   // every edit on the page. Saving never approves or publishes.
-  const STRUCTURAL = /^(p_|remove_|order_|when$)/;
+  const STRUCTURAL = /^(p_|remove_|order_|tt_copy_fb$|tiktok_title$|tiktok_caption$|when$)/;
   const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
   let timer = null, inflight = false, stopped = false, needsReload = false;
   function setVersion(v) {
@@ -948,7 +1008,10 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     if (!needsReload || inflight || dirty()) return;
     // Platforms, removed media or the time changed: reload so the release
     // panel lists exactly what is saved. Not while the time field is in use.
-    if (document.activeElement === when) { when.addEventListener("blur", maybeReload, { once: true }); return; }
+    const focused = document.activeElement;
+    if (focused === when || focused?.name === "tiktok_title" || focused?.name === "tiktok_caption") {
+      focused.addEventListener("blur", maybeReload, { once: true }); return;
+    }
     submitting = true;
     location.reload();
   }
@@ -1000,17 +1063,9 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   });
   form.addEventListener("input", refresh);
   form.addEventListener("change", refresh);
-  // Per-platform photo order (#33): move buttons reorder the tiles of one
-  // platform only and write the saved positions, in the new order, to that
-  // platform's hidden order field. Focus follows the moved photo.
-  form.addEventListener("click", e => {
-    const btn = e.target.closest("[data-move]");
-    if (!btn) return;
-    const tile = btn.closest("[data-tile]"), box = tile.parentElement;
-    const tiles = Array.from(box.querySelectorAll(":scope > [data-index]"));
-    const at = tiles.indexOf(tile), to = at + Number(btn.dataset.move);
-    if (to < 0 || to >= tiles.length) return;
-    if (to > at) tiles[to].after(tile); else tiles[to].before(tile);
+  // Reorder one platform gallery at a time. Original data-index values
+  // determine the saved order; dragging never changes another platform.
+  function syncTileOrder(box) {
     const now = Array.from(box.querySelectorAll(":scope > [data-index]"));
     now.forEach((t, k) => {
       const pos = t.querySelector(".tile-pos");
@@ -1024,8 +1079,55 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       field.dispatchEvent(new Event("input", { bubbles: true }));
       field.dispatchEvent(new Event("change", { bubbles: true }));
     }
+  }
+  form.addEventListener("click", e => {
+    const btn = e.target.closest("[data-move]");
+    if (!btn) return;
+    const tile = btn.closest("[data-tile]"), box = tile.parentElement;
+    const tiles = Array.from(box.querySelectorAll(":scope > [data-index]"));
+    const at = tiles.indexOf(tile), to = at + Number(btn.dataset.move);
+    if (to < 0 || to >= tiles.length) return;
+    if (to > at) tiles[to].after(tile); else tiles[to].before(tile);
+    syncTileOrder(box);
     const again = tile.querySelector('[data-move="' + btn.dataset.move + '"]');
     (again && !again.disabled ? again : tile.querySelector("[data-move]:not([disabled])"))?.focus();
+  });
+  let dragTile = null;
+  form.addEventListener("dragstart", e => {
+    const tile = e.target.closest('.tiles[data-order] > [data-index][draggable="true"]');
+    if (!tile || !e.dataTransfer) return;
+    dragTile = tile;
+    tile.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", tile.dataset.index);
+  });
+  form.addEventListener("dragover", e => {
+    if (!dragTile) return;
+    const target = e.target.closest('.tiles[data-order] > [data-index]');
+    if (!target || target === dragTile || target.parentElement !== dragTile.parentElement) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    form.querySelectorAll(".tiles > .drop-target").forEach(x => x.classList.remove("drop-target"));
+    target.classList.add("drop-target");
+  });
+  form.addEventListener("drop", e => {
+    if (!dragTile) return;
+    const target = e.target.closest('.tiles[data-order] > [data-index]');
+    if (!target || target === dragTile || target.parentElement !== dragTile.parentElement) return;
+    e.preventDefault();
+    const box = dragTile.parentElement;
+    const tiles = Array.from(box.querySelectorAll(":scope > [data-index]"));
+    if (tiles.indexOf(dragTile) < tiles.indexOf(target)) target.after(dragTile);
+    else target.before(dragTile);
+    syncTileOrder(box);
+    form.querySelectorAll(".tiles > .drop-target").forEach(x => x.classList.remove("drop-target"));
+    dragTile.classList.remove("dragging");
+    dragTile = null;
+  });
+  form.addEventListener("dragend", () => {
+    if (dragTile) dragTile.classList.remove("dragging");
+    dragTile = null;
+    form.querySelectorAll(".tiles > .drop-target").forEach(x => x.classList.remove("drop-target"));
   });
   form.querySelectorAll("[data-order]").forEach(box => {
     const tiles = box.querySelectorAll(":scope > [data-index]");

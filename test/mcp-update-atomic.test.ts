@@ -145,18 +145,20 @@ test("removing Bluesky keeps Facebook; the last platform cannot be switched off"
   assert.equal(r.isError,undefined);
   const saved=(await getPost(db,p.id))!;
   assert.equal(saved.bluesky,null);
+  assert.equal(saved.bluesky_paused?.caption,p.bluesky?.caption,"deselection retains draft content");
+  assert.equal((await bsRow(p.id))?.status,"disabled","inactive target is not eligible for scheduled publication");
   assert.equal(saved.facebook_enabled,true);
   const none=await update({id:p.id,facebook_enabled:false,expected_updated_at:saved.updated_at});
   assert.equal(none.isError,true);
   assert.equal((await getPost(db,p.id))!.facebook_enabled,true);
 });
 
-test("a TikTok shared-gallery fallback (null) is not collapsed to an empty list",async()=>{
+test("a legacy TikTok shared gallery is copied into independent media on draft update",async()=>{
   const p=await draft({tiktokNull:true});
   assert.equal(p.tiktok_images,null);
   const r=await update({id:p.id,message:MSG+" Edited.",expected_updated_at:p.updated_at});
   assert.equal(r.isError,undefined,JSON.stringify(body(r)));
-  assert.equal((await getPost(db,p.id))!.tiktok_images,null);
+  assert.deepEqual((await getPost(db,p.id))!.tiktok_images,[]);
 });
 
 test("omitting expected_updated_at still fences on the version read in this call",async()=>{
