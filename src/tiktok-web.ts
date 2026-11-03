@@ -2,9 +2,9 @@
  * No automatic content publishing or token exposure in HTML.
  */
 import type {Env} from "./env.ts";
-import {audit} from "./db.ts";
+import {audit,pinLocked,recordPinFailure} from "./db.ts";
 import {esc,html,page} from "./html.ts";
-import {checkCsrf,csrfToken,readSession,type Session} from "./session.ts";
+import {checkCsrf,csrfToken,readSession,safeEqual,type Session} from "./session.ts";
 import {isSameOrigin} from "./origin.ts";
 import {
   beginTikTokConnection,clearTikTokStateCookie,disconnectTikTok,
@@ -79,7 +79,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   const body=`<div class="hero">
     <div class="hero-kicker">GS Grimoire · Social connections</div>
     <h2>Connect once. Create freely.</h2>
-    <p>Control which TikTok account receives your videos and carousels. Connecting grants permissions only; publishing still requires your explicit approval PIN.</p>
+    <p>Control which TikTok account receives your videos and carousels. Connecting, disconnecting and hosting verification files require your approval PIN. Posting still requires a separate PIN approval.</p>
     </div>
     ${readiness}
   ${notice==="connected"?'<div class="notice ok">TikTok account connected. Choose a posting method on a draft when you are ready.</div>':""}
@@ -103,6 +103,8 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <input type="text" name="filename" id="tt-verify-filename" placeholder="tiktok_...txt" required>
       <label for="tt-verify-content">Contents of TikTok verification file</label>
       <textarea name="contents" id="tt-verify-content" maxlength="8192" style="min-height:100px" required></textarea>
+      <label for="tt-verify-pin">Approval PIN</label>
+      <input type="password" name="pin" id="tt-verify-pin" inputmode="numeric" autocomplete="off" required>
       <button type="submit">Host verification file</button>
     </form>
     <p class="hint">Once hosted, complete ownership verification in TikTok. This is required for photo carousels and URL-based video publishing.</p>
@@ -119,6 +121,8 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <form method="post" action="/tiktok/disconnect">
         <input name="csrf" type="hidden" value="${esc(csrf)}">
         <label><input type="checkbox" name="confirm" value="yes" required> Disconnect this TikTok account and revoke its access</label>
+        <label for="tt-disconnect-pin">Approval PIN</label>
+        <input type="password" name="pin" id="tt-disconnect-pin" inputmode="numeric" autocomplete="off" required>
         <button type="submit">Disconnect TikTok</button>
       </form>
     </div>` :
@@ -130,6 +134,8 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <p><label><input type="checkbox" checked disabled> Read basic account profile (required)</label></p>
       <p><label><input type="checkbox" name="video.upload" value="1" checked> Upload videos and photo carousels to your TikTok inbox for manual publication</label></p>
       ${TIKTOK_DIRECT_POST_VISIBLE?'<p><label><input type="checkbox" name="video.publish" value="1"> Request direct publishing access (private testing; separate explicit consent required)</label></p>':""}
+      <label for="tt-connect-pin">Approval PIN</label>
+      <input type="password" name="pin" id="tt-connect-pin" inputmode="numeric" autocomplete="off" required>
       <button class="primary" type="submit" ${enabled?"":"disabled"}>Connect TikTok</button>
       <p class="hint">Connecting only grants access. No content is posted until a separate explicit publishing action is implemented and approved.</p>
     </form>`}
@@ -153,6 +159,18 @@ export async function tiktokSettingsAction(
   const form=await req.formData().catch(()=>null);
   if(!form||!await checkCsrf(env,session,String(form.get("csrf")||"")))
     return fail("Form expired. Reload and try again.",403,session.login);
+  // An account change grants or revokes TikTok access, so it requires the
+  // same owner PIN and shared lockout as post approval. Check BEFORE creating
+  // OAuth state, storing verification content or revoking an account.
+  if(!env.APPROVE_PIN)
+    return fail("Approval PIN is not configured. TikTok account administration is locked.",503,session.login);
+  if(await pinLocked(env.DB))
+    return fail("Too many wrong PINs. Approvals and TikTok settings are locked for up to an hour.",429,session.login);
+  if(!safeEqual(String(form.get("pin")||""),env.APPROVE_PIN)){
+    await recordPinFailure(env.DB);
+    await audit(env.DB,session.login,"wrong-pin",null,"tiktok-account-admin").catch(()=>undefined);
+    return fail("Wrong PIN.",403,session.login);
+  }
   try {
     if(action==="connect") {
       if(await tiktokConnection(env.DB))throw new Error("Disconnect the current TikTok account before reconnecting.");
