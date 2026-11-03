@@ -553,6 +553,32 @@ export async function saveEditorDraft(
   return (results[0].meta.changes ?? 0) === 1 ? version : null;
 }
 
+/**
+ * Replace exactly one TikTok photo after verified private import.
+ * Does not modify Facebook, Bluesky, Instagram, approval, or the post status.
+ * Both the draft version and the original image at this index must match.
+ */
+export async function replaceTikTokDraftImage(
+  db: D1Database, id: string, index: number, source: string, reference: string,
+  expectedVersion: string,
+): Promise<string | null> {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= 35 ||
+      !/^upload:\/\/[a-f0-9]{32}\.(jpg|jpeg|png|gif)$/.test(reference) ||
+      !Number.isFinite(Date.parse(expectedVersion))) return null;
+  await ensureSchema(db);
+  const now = new Date(Math.max(Date.now(), Date.parse(expectedVersion) + 1)).toISOString();
+  const path = "$[" + index + "]";
+  const result = await db.prepare(`UPDATE posts
+    SET tiktok_images = json_set(tiktok_images, ?, ?), updated_at = ?
+    WHERE id = ? AND updated_at = ? AND approved_at IS NULL
+      AND status IN ('draft','rejected') AND tiktok_enabled = 1
+      AND tiktok_images IS NOT NULL AND tiktok_video IS NULL
+      AND json_type(tiktok_images, ?) = 'text'
+      AND json_extract(tiktok_images, ?) = ?`)
+    .bind(path, reference, now, id, expectedVersion, path, path, source).run();
+  return (result.meta.changes ?? 0) === 1 ? now : null;
+}
+
 /** Draft-only Bluesky edits. Non-Bluesky drafts always publish to Facebook. */
 export async function saveBlueskyDraft(
   db: D1Database, id: string, draft: BlueskyDraft | null, facebookEnabled: boolean,
