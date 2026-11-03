@@ -5,6 +5,7 @@
  * can only remove media or change Bluesky alternative text.
  */
 import { esc } from "./html.ts";
+import { renderEditorialReview } from "./preflight.ts";
 import { tiktokMedia, type BlueskyDraft, type EditorDraft, type Post } from "./db.ts";
 import { BSKY_TEXT_LIMIT, textLength } from "./bluesky.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
@@ -369,6 +370,15 @@ export function renderDraftEditor(v: EditorView): string {
 .editor-shell{max-width:1440px;margin:0 auto}
 .editor-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,340px);gap:20px;align-items:start}
 .editor-rail{position:sticky;top:16px;display:grid;gap:14px}
+.preflight-panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+.preflight-panel h3{margin-top:0}
+.preflight-target{border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
+.preflight-target h4{font:650 14px system-ui,sans-serif;margin:0 0 6px}
+.preflight-excerpt{margin:5px 0 8px;padding:10px;border-left:3px solid var(--accent2);
+  background:var(--bg);font:13px/1.45 system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}
+.preflight-target .checks{font-size:12px;padding-left:18px;margin:5px 0}
+.preflight-target .checks .note{color:var(--muted)}
+#preflight-stale:not([hidden]){border:1px solid var(--warn);padding:8px;border-radius:8px}
 .editor-head{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:0 0 14px;font:14px system-ui,sans-serif;color:var(--muted)}
 .editor-head strong{font:650 20px/1.25 system-ui,sans-serif;color:var(--text)}
 .ed-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px}
@@ -632,6 +642,7 @@ export function renderDraftEditor(v: EditorView): string {
     <p class="hint">${esc(v.createdLine)}</p>
   </form>
   <aside class="editor-rail" aria-label="Release">
+    ${renderEditorialReview(p)}
     ${release}
     ${v.tiktokCard}
     <details class="ed-card"><summary>Reject and send back to the assistant</summary>
@@ -661,12 +672,15 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     .filter(([k]) => k !== "expected_updated_at" && k !== "csrf").map(([k, v]) => [k, String(v)]);
   const snapshot = () => JSON.stringify(entries());
   let baseline = snapshot();
+  let preflightStale = false;
   let submitting = false;
   let saveState = "";
   const dirty = () => snapshot() !== baseline;
   window.gsEditorDirty = dirty;
   function refresh() {
     const d = dirty();
+    const stale = document.getElementById("preflight-stale");
+    if (stale) stale.hidden = !d && !preflightStale;
     state.textContent = saveState || (d ? "Unsaved changes" : "All changes saved");
     state.classList.toggle("dirty", d && !saveState.startsWith("Save failed"));
     state.classList.toggle("failed", saveState.startsWith("Save failed"));
@@ -1150,6 +1164,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         setVersion(body.updated_at);
         baseline = sent;
         saveState = "";
+        preflightStale = true;
         if (structural(before) !== structural(sent)) needsReload = true;
         document.dispatchEvent(new CustomEvent("gs-saved"));
       } else {
