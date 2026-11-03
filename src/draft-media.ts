@@ -32,7 +32,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
   </details>
-  <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video || post.instagram?.video ? "+ Add or replace video" : "+ Add video"}</summary>
+  <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video || post.instagram?.video ? "+ Replace video" : "+ Add video"}</summary>
   <p class="hint">One MP4, up to 20 MB. A platform can have photos or a video, not both. Nothing is published.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
@@ -43,8 +43,8 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div class="media-targets">
     <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.images.length ? "checked" : "disabled"}>Facebook</label>
     <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
-    <label><input type="checkbox" id="video-tiktok" ${post.tiktok_enabled && !tt.images.length && !tt.video ? "checked" : "disabled"}>TikTok inbox</label>
-    <label><input type="checkbox" id="video-instagram" ${post.instagram && !post.instagram.items.length && !post.instagram.video ? "checked" : "disabled"}>Instagram Reel download</label>
+    <label><input type="checkbox" id="video-tiktok" ${post.tiktok_enabled && !tt.images.length ? "checked" : "disabled"}>TikTok inbox</label>
+    <label><input type="checkbox" id="video-instagram" ${post.instagram && !post.instagram.items.length ? "checked" : "disabled"}>Instagram Reel download</label>
   </div>
   <label for="video-alt">Bluesky video alternative text</label>
   <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
