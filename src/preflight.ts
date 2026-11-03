@@ -6,7 +6,6 @@
 import {esc} from "./html.ts";
 import type {Post} from "./db.ts";
 import {tiktokMedia} from "./db.ts";
-import {countHashtags} from "./instagram.ts";
 /** Instagram app guidance since December 2025; the developer API still lists 30. */
 export const INSTAGRAM_EDITORIAL_HASHTAGS=5;
 import {mediaLooksPending} from "./validate.ts";
