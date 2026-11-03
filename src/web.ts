@@ -22,6 +22,7 @@ import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { DRAFT_EDITOR_JS, parseEditorForm, postPhotos, renderDraftEditor } from "./draft-editor.ts";
 import { renderInstagram } from "./instagram.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
+import { importTikTokLinkedImage, TikTokImportError } from "./tiktok-import.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
 import {
@@ -118,7 +119,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (path === "/new-draft.js" && req.method === "GET") return new Response(NEW_DRAFT_JS, {headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
   if (path === "/draft-editor.js" && req.method === "GET") return new Response(DRAFT_EDITOR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
-  const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video)$/.exec(path);
+  const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video|import-tiktok-image)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   // Server clock and schedule rules for the editor's "Earliest valid time" button (#61). Read-only.
@@ -712,6 +713,17 @@ async function draftImageAction(
   if (!["draft","rejected"].includes(current.status) || current.approved_at)
     return fail("Media cannot be changed after approval.",409);
   try {
+    if (action === "import-tiktok-image") {
+      if (typeof input.index !== "number" || !Number.isSafeInteger(input.index))
+        return fail("Select a valid TikTok photo position.");
+      const expected = typeof input.expected_updated_at === "string" ? input.expected_updated_at : "";
+      const result = await importTikTokLinkedImage(env, id, input.index, expected,
+        session.login, new URL(req.url).origin);
+      await audit(env.DB, session.login, "tiktok-private-image-imported", id,
+        "TikTok photo position " + String(input.index + 1)).catch(() => undefined);
+      return Response.json({ ok: true, ...result },
+        { headers: { "Cache-Control": "no-store" } });
+    }
     if (action === "upload-link") {
       const filename = String(input.filename || "");
       if (filename.length < 3 || filename.length > 200 ||
@@ -774,6 +786,7 @@ async function draftImageAction(
     }
     return fail("Unknown media action.",404);
   } catch(error) {
+    if (error instanceof TikTokImportError) return fail(error.message, error.status);
     return fail(error instanceof Error ? error.message : "Upload failed.",400);
   }
 }
