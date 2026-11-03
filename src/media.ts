@@ -88,11 +88,13 @@ export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
   const name = ref.path.split("/").pop() || "image";
   const encPath = ref.path.split("/").map(encodeURIComponent).join("/");
 
-  // Public files: plain raw URL, no token involved.
+  // Public files: fixed GitHub raw host, without a token or redirects.
   let res = await fetch(`https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${encodeURIComponent(ref.ref)}/${encPath}`, {
     headers: { "User-Agent": "gs-poster" },
+    redirect: "manual",
   });
-  // Private files: GitHub API with the read-only token.
+  // Private files: only the fixed GitHub API host receives the read token.
+  // A redirect is rejected, never followed with Authorization headers.
   if (!res.ok && env.GITHUB_READ_TOKEN) {
     res = await fetch(
       `https://api.github.com/repos/${ref.owner}/${ref.repo}/contents/${encPath}?ref=${encodeURIComponent(ref.ref)}`,
@@ -103,6 +105,7 @@ export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
           "User-Agent": "gs-poster",
           "X-GitHub-Api-Version": "2022-11-28",
         },
+        redirect: "manual",
       },
     );
   }

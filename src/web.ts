@@ -239,6 +239,7 @@ async function authorize(req: Request, env: Env): Promise<Response> {
       const areq = await oauth.parseAuthRequest(req);
       const details = await oauth.describeConsent(areq);
       const consent = await oauth.beginConsent(areq);
+      const formCsrf = await csrfToken(env, session);
       const origin = details.clientDomain
         ? `Published by <strong>${esc(details.clientDomain)}</strong>.`
         : "This app registered itself, so its name is not verified.";
@@ -254,6 +255,7 @@ async function authorize(req: Request, env: Env): Promise<Response> {
           ${loop}
           <form method="post">
             <input type="hidden" name="handle" value="${esc(consent.handle)}">
+            <input type="hidden" name="csrf" value="${esc(formCsrf)}">
             ${details.scope.map((s) => `<input type="hidden" name="scope" value="${esc(s)}">`).join("")}
             <div class="row"><button class="primary" name="decision" value="approve">Allow</button><button name="decision" value="deny">Deny</button></div>
           </form>
@@ -265,7 +267,14 @@ async function authorize(req: Request, env: Env): Promise<Response> {
     }
 
     if (req.method === "POST") {
+      // The OAuth provider independently requires a single-use, browser-bound
+      // consent handle. These editor-session checks add defense in depth to
+      // both Approve and Deny without weakening provider validation.
+      if (!sameOrigin(req))
+        return new Response("Cross-site consent requests are not allowed.", { status: 403 });
       const form = await req.formData();
+      if (!await checkCsrf(env, session, String(form.get("csrf") || "")))
+        return new Response("This consent form expired. Reload and review the requested access.", { status: 403 });
       const handle = String(form.get("handle") || "");
       if (form.get("decision") !== "approve") {
         const denied = await oauth.denyConsent(req, handle);
