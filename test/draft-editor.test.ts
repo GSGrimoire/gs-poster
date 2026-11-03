@@ -174,6 +174,12 @@ test("TikTok copies an existing Facebook video without changing Facebook or publ
   assert.match(js,/confirm\\("Replace TikTok photos or video with the Facebook video\\?/,
     "the video-copy action requires explicit confirmation before saving");
 
+  const attemptedRemoval=await call("/post/"+p.id+"/save",{
+    ...baseSave(p),p_tiktok:"1",tt_copy_fb:"1",remove_fb_video:"1",
+  });
+  assert.equal(attemptedRemoval.status,400,"copy must not silently use a removed Facebook video");
+  assert.equal((await getPost(db,p.id))!.video,facebookVideo,"failed copy leaves Facebook unchanged");
+  assert.deepEqual((await getPost(db,p.id))!.tiktok_images,[IMG(5),IMG(6)]);
   const response=await call("/post/"+p.id+"/save",{
     ...baseSave(p),p_tiktok:"1",tt_copy_fb:"1",
   });
@@ -201,6 +207,25 @@ test("TikTok copies an existing Facebook video without changing Facebook or publ
   assert.equal(inactive.tiktok_video,facebookVideo,"disabled TikTok retains video without being published");
   assert.equal(inactive.video,facebookVideo);
   assert.equal(inactive.approved_at,null);
+});
+
+test("copying Facebook video replaces an independently saved TikTok video only",async()=>{
+  const fb="https://raw.githubusercontent.com/GSGrimoire/GSImageLibrary/main/videos/facebook.mp4";
+  const oldTikTok="https://raw.githubusercontent.com/GSGrimoire/GSImageLibrary/main/videos/tiktok.mp4";
+  const p=await createPost(db,{
+    message:"Two independent videos",images:[],video:fb,tiktok_images:[],tiktok_video:oldTikTok,
+    facebook_enabled:true,tiktok_enabled:true,created_by:"test",scheduled_at:null,bluesky:null,
+  });
+  const updated=await call("/post/"+p.id+"/save",{
+    ...baseSave(p),p_facebook:"1",p_tiktok:"1",tt_copy_fb:"1",
+  });
+  assert.equal(updated.status,200,await updated.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.tiktok_video,fb,"TikTok video is replaced by saved Facebook source");
+  assert.deepEqual(saved.tiktok_images,[],"independent TikTok gallery stays video only");
+  assert.equal(saved.video,fb,"Facebook video is unchanged");
+  assert.equal(saved.approved_at,null);
+  assert.equal(saved.status,"draft");
 });
 
 test("Save needs no PIN, changes text, name, time and platforms, and publishes nothing",async()=>{
