@@ -569,8 +569,11 @@ export function renderDraftEditor(v: EditorView): string {
             <button type="button" class="copy-cap" data-copy-to="ed-tiktok" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-tiktok" name="tiktok_caption" data-max="${captionLimit("tiktok", { photos: 1, video: !!(ttShared ? p.video : tt.video) })}" data-caption="tiktok" placeholder="Leave empty to reuse the Facebook caption">${esc(p.tiktok_caption ?? "")}</textarea>
           <div class="field-meter"></div>
-          ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button><input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0"></div>
+          <input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0">
+          ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button></div>
           <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. After saving, prepare any linked GitHub photos for TikTok using the action below.</p>` : ""}
+          ${p.video ? `<div class="row"><button type="button" id="tt-copy-fb-video">Use Facebook video for TikTok</button></div>
+          <p class="hint">Replaces the TikTok gallery with a separate reference to the existing Facebook video. Facebook remains unchanged. Save first, then prepare linked GitHub video privately for TikTok.</p>` : ""}
           <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
           ${on.tiktok && !ttShared && tt.video && parseGitHubUrl(tt.video) ? `<div class="row"><button type="button" data-prepare-video="tiktok">Prepare TikTok video privately</button></div>` : ""}
           ${p.tiktok_enabled && ttImportIndices.length ? `<div class="row"><button type="button" id="tt-import" data-indices="${esc(JSON.stringify(ttImportIndices))}">Prepare ${ttImportIndices.length} linked photo${ttImportIndices.length === 1 ? "" : "s"} for TikTok</button></div>
@@ -674,12 +677,18 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     const field=document.getElementById("bs-copy-fb-video-flag");
     field.value="1";field.dispatchEvent(new Event("input",{bubbles:true}));
   });
-  document.getElementById("tt-copy-fb")?.addEventListener("click", () => {
-    if (!confirm("Replace the TikTok gallery with a separate copy of the Facebook photos?")) return;
+  function copyFacebookMediaToTikTok(question) {
+    if (!confirm(question)) return;
+    // The existing server-side copy action copies the saved Facebook gallery
+    // and video into independent TikTok media without changing Facebook.
     const field = document.getElementById("tt-copy-fb-flag");
     field.value = "1";
     field.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  }
+  document.getElementById("tt-copy-fb")?.addEventListener("click", () =>
+    copyFacebookMediaToTikTok("Replace the TikTok gallery with a separate copy of the Facebook photos?"));
+  document.getElementById("tt-copy-fb-video")?.addEventListener("click", () =>
+    copyFacebookMediaToTikTok("Replace TikTok photos or video with the Facebook video? Facebook will remain unchanged."));
   function meter(area) {
     const out = area.parentElement.querySelector(".field-meter");
     if (!out) return;
