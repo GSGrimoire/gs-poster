@@ -16,7 +16,7 @@ const SECRET="test-only-tiktok-admin-session-secret";
 const PIN="246810"; // test-only; never a production PIN
 const TEST_KEY="test-only-tiktok-client-key";
 const TEST_ENCRYPTION_KEY="test-only-not-a-real-key-12345678901234567890";
-let mf:Miniflare,db:D1Database;
+let mf:Miniflare,db:D1Database,workerScript:string;
 const signer={COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire"} as Env;
 const filename="tiktok_verify_file.txt";
 
@@ -24,8 +24,9 @@ before(async()=>{
   const output=await build({entryPoints:["test/fixtures/web-entry.ts"],bundle:true,format:"esm",
     platform:"neutral",target:"es2022",write:false,external:["cloudflare:*","node:*"],
     conditions:["workerd","worker","browser"],mainFields:["module","main"],logLevel:"silent"});
+  workerScript=output.outputFiles[0].text;
   mf=new Miniflare(convertV4MiniflareOptions({modules:true,cf:false,
-    script:output.outputFiles[0].text,compatibilityDate:"2026-09-01",
+    script:workerScript,compatibilityDate:"2026-09-01",
     compatibilityFlags:["nodejs_compat"],d1Databases:["DB"],
     bindings:{COOKIE_SECRET:SECRET,APPROVE_PIN:PIN,ALLOWED_GITHUB_LOGINS:"gsgrimoire",
       TIKTOK_CLIENT_KEY:TEST_KEY,TIKTOK_CLIENT_SECRET:"test-only-client-secret",
@@ -198,9 +199,38 @@ test("shared five-failure approval PIN lockout also blocks TikTok settings befor
     const response=await submit(action,PIN);
     assert.equal(response.status,429,action+": "+await response.clone().text());
   }
+  const lockedCallback=await get("/tiktok/callback?state=untrusted&code=unused");
+  assert.equal(lockedCallback.status,429,"PIN lockout also blocks callback completion");
   assert.equal(await states(),beforeState);
   assert.equal(await verification(),"verification-string-for-tests",
     "lockout cannot alter a previous verification file");
   await resetFailures();
   assert.equal(await pinLocked(db),false);
+});
+
+test("missing configured approval PIN fails closed for administration and callback",async()=>{
+  const noPin=new Miniflare(convertV4MiniflareOptions({modules:true,cf:false,
+    script:workerScript,compatibilityDate:"2026-09-01",
+    compatibilityFlags:["nodejs_compat"],d1Databases:["DB"],
+    bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",
+      TIKTOK_CLIENT_KEY:TEST_KEY,TIKTOK_CLIENT_SECRET:"test-only-client-secret",
+      TIKTOK_TOKEN_ENCRYPTION_KEY:TEST_ENCRYPTION_KEY,TIMEZONE:"Europe/Copenhagen"}}));
+  try {
+    const a=await auth();
+    for(const action of ["connect","disconnect","verify"] as const){
+      const fields=new URLSearchParams({csrf:a.csrf,pin:PIN,
+        confirm:"yes",filename:"tiktok_example_file.txt",contents:"tests"});
+      const response=await noPin.dispatchFetch(ORIGIN+"/tiktok/"+action,{
+        method:"POST",redirect:"manual",
+        headers:{Origin:ORIGIN,"Sec-Fetch-Site":"same-origin",
+          "Content-Type":"application/x-www-form-urlencoded",Cookie:SESSION_COOKIE+"="+a.raw},
+        body:fields.toString(),
+      });
+      assert.equal(response.status,503,action+": "+await response.clone().text());
+    }
+    const callback=await noPin.dispatchFetch(ORIGIN+"/tiktok/callback?state=bogus&code=bogus",{
+      headers:{Cookie:SESSION_COOKIE+"="+a.raw},redirect:"manual",
+    });
+    assert.equal(callback.status,503);
+  }finally{await noPin.dispose();}
 });
