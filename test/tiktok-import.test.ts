@@ -216,6 +216,27 @@ test("concurrent draft changes during external fetch prevent private attachment"
   } finally { globalThis.fetch=previous; }
 });
 
+test("an audit write failure reports a warning but does not pretend the import failed",async()=>{
+  reset();
+  const p=await draft();
+  await db.prepare("CREATE TRIGGER deny_tiktok_import_audit BEFORE INSERT ON audit "+
+    "WHEN NEW.action='tiktok-private-image-imported' "+
+    "BEGIN SELECT RAISE(FAIL,'audit sink unavailable'); END").run();
+  try {
+    const response=await send(p.id,{index:0,expected_updated_at:p.updated_at});
+    assert.equal(response.status,200,await response.clone().text());
+    const body=await response.json() as {ok:boolean;audit_warning?:string;reference:string};
+    assert.equal(body.ok,true);
+    assert.match(body.audit_warning??"",/activity log could not be recorded/);
+    const saved=(await getPost(db,p.id))!;
+    assert.deepEqual(saved.images,[GITHUB]);
+    assert.equal(saved.tiktok_images?.[0],body.reference);
+    assert.equal(saved.approved_at,null);
+  } finally {
+    await db.prepare("DROP TRIGGER IF EXISTS deny_tiktok_import_audit").run();
+  }
+});
+
 test("a completed private upload cannot be re-imported and does not duplicate TikTok media",async()=>{
   reset();
   const p=await draft();
