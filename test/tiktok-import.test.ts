@@ -20,7 +20,7 @@ const OTHER="https://raw.githubusercontent.com/GSGrimoire/GSImageLibrary/main/ca
 const PNG=Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lX8AAAAASUVORK5CYII=","base64"));
 let mf:Miniflare, db:D1Database, r2:R2Bucket;
 let fetched:string[]=[];
-let corrupt=false,oversize=false;
+let corrupt=false,corruptSecond=false,oversize=false;
 before(async()=>{
   const out=await build({entryPoints:["test/fixtures/web-entry.ts"],bundle:true,format:"esm",
     platform:"neutral",target:"es2022",write:false,external:["cloudflare:*","node:*"],
@@ -32,7 +32,7 @@ before(async()=>{
       if (![GITHUB,OTHER].includes(req.url)) return new Response("blocked",{status:599});
       if (oversize) return new Response(new Uint8Array([9,9]),{status:200,
         headers:{"Content-Length":String(11*1024*1024)}});
-      return new Response(corrupt?new Uint8Array([0,1,2,3,4]):PNG,{status:200,
+      return new Response(corrupt || (corruptSecond && req.url===OTHER)?new Uint8Array([0,1,2,3,4]):PNG,{status:200,
         headers:{"Content-Type":"image/png"}});
     },
     bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",APPROVE_PIN:PIN,TIMEZONE:"Europe/Copenhagen"}}));
@@ -60,7 +60,7 @@ async function send(id:string,payload:Record<string,unknown>,o:{
   return mf.dispatchFetch(ORIGIN+"/post/"+id+"/import-tiktok-image",{
     method:"POST",headers,body:JSON.stringify({csrf:csrf??"",...payload}),redirect:"manual"});
 }
-function reset(){fetched=[];corrupt=false;oversize=false;}
+function reset(){fetched=[];corrupt=false;corruptSecond=false;oversize=false;}
 
 test("import prepares TikTok only, with source order and owner-bound verified R2 bytes",async()=>{
   reset();
@@ -114,6 +114,22 @@ test("import rejects forged index, stale version, arbitrary URLs, unselected Tik
     .bind(new Date().toISOString(),p.id).run();
   assert.equal((await send(p.id,{index:0,expected_updated_at:p.updated_at})).status,409);
   assert.equal(fetched.length,0);
+});
+
+test("partial batches preserve verified TikTok copies without touching other platforms",async()=>{
+  reset();corruptSecond=true;
+  const p=await draft([GITHUB,OTHER]);
+  const one=await send(p.id,{index:0,expected_updated_at:p.updated_at});
+  assert.equal(one.status,200,await one.clone().text());
+  const current=(await getPost(db,p.id))!;
+  const failed=await send(p.id,{index:1,expected_updated_at:current.updated_at});
+  assert.equal(failed.status,400);
+  const after=(await getPost(db,p.id))!;
+  assert.match(after.tiktok_images![0],/^upload:\/\/[a-f0-9]{32}\.png$/);
+  assert.equal(after.tiktok_images![1],OTHER);
+  assert.deepEqual(after.images,[GITHUB,OTHER]);
+  assert.equal(after.approved_at,null);
+  assert.deepEqual(fetched,[GITHUB,OTHER]);
 });
 
 test("invalid image header or oversized GitHub response never attaches or publishes",async()=>{
