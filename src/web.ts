@@ -784,9 +784,12 @@ async function draftImageAction(
         return fail("This private video is not stored or does not belong to your account.");
       const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version,tiktok,instagram);
       if (!updated) return fail("A target already has media or the draft changed. Reload.",409);
-      await audit(env.DB,session.login,"draft-video-attached",id,
-        (facebook?"facebook ":"")+(bluesky?"bluesky":""));
-      return Response.json({ok:true,updated_at:updated},{headers:{"Cache-Control":"no-store"}});
+      const logged=await audit(env.DB,session.login,"draft-video-attached",id,
+        [facebook?"facebook":"",bluesky?"bluesky":"",tiktok?"tiktok":"",instagram?"instagram":""]
+          .filter(Boolean).join(" ")).then(()=>true,()=>false);
+      return Response.json({ok:true,updated_at:updated,
+        ...(logged?{}:{audit_warning:"Video attached, but the activity log could not be recorded."}),
+      },{headers:{"Cache-Control":"no-store"}});
     }
     if (action === "attach-image") {
       const reference = String(input.reference || "");
@@ -1164,9 +1167,6 @@ async function videoProxy(req: Request, env: Env, id: string, target: string): P
   }
 }
 
-/** The finished Instagram JPEG for one saved photo, rendered on the server
- * from the saved frame and crop/pad settings. Signed-in editors only (the
- * session check above). Sends nothing to Instagram. */
 /** Private download of the original MP4 for manual Instagram Reels.
  * No transcoding or posting. The user must verify actual codec, dimensions and duration.
  */
@@ -1185,6 +1185,9 @@ async function instagramVideo(env: Env,id:string):Promise<Response> {
   }
 }
 
+/** The finished Instagram JPEG for one saved photo, rendered on the server
+ * from the saved frame and crop/pad settings. Signed-in editors only.
+ * Sends nothing to Instagram. */
 async function instagramPhoto(env: Env, id: string, n: number): Promise<Response> {
   const p = await getPost(env.DB, id);
   const item = p?.instagram?.items[n];
