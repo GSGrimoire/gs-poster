@@ -49,6 +49,13 @@ export async function tiktokCallback(req:Request,env:Env):Promise<Response> {
     return tiktokCallbackPlaceholder(req);
   const session=await readSession(env,req);
   if(!session)return fail("Your GitHub session expired. Start connecting TikTok again.",401);
+  // TikTok redirects with a GET, so there is no interactive PIN field here.
+  // Only the PIN-gated Connect POST can issue the one-use state; the callback
+  // additionally requires that approval is configured and not locked out.
+  if(!env.APPROVE_PIN)
+    return fail("Approval PIN is not configured. TikTok account administration is locked.",503,session.login);
+  if(await pinLocked(env.DB))
+    return fail("Too many wrong PINs. Approvals and TikTok settings are locked for up to an hour.",429,session.login);
   try {
     const result=await finishTikTokConnection(env,session,req);
     await audit(env.DB,session.login,"tiktok-account-connected",null,
