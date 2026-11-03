@@ -77,9 +77,18 @@ export async function importTikTokLinkedImage(
 
   // A stale version, changed source index or publication prevents attachment.
   // A stored-but-unattached object may remain until its 45-day lifecycle ends.
-  const updated = await replaceTikTokDraftImage(
-    env.DB, postId, index, source, grant.reference, expectedVersion,
-  );
+  let updated: string | null;
+  try {
+    updated = await replaceTikTokDraftImage(
+      env.DB, postId, index, source, grant.reference, expectedVersion,
+    );
+  } catch {
+    // A lost database acknowledgment may follow a committed replacement.
+    // Never retry the write here and never delete a verified private object.
+    throw new TikTokImportError(
+      "The import's final save could not be confirmed. Reload the draft and inspect the TikTok gallery before retrying.", 502,
+    );
+  }
   if (!updated) throw new TikTokImportError(
     "The draft changed while importing. Reload to check which images were saved; nothing was published.", 409,
   );
