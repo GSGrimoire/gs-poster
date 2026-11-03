@@ -202,7 +202,7 @@ test("paused Instagram rejects an untrusted Reel reference and cannot bootstrap 
     const off=parseEditorForm(form(source,false),paused,"Europe/Copenhagen");
     assert.match(off.errors.join(" "),/Instagram video must already belong to this post/,
       "a paused target must not accept an arbitrary MP4 or foreign private upload");
-    assert.equal(off.instagram?.video,source,"reject the attempted save rather than silently substituting a different video");
+    assert.equal(off.instagram,undefined,"invalid form has no savable Instagram draft");
 
     const on=parseEditorForm(form(source,true),paused,"Europe/Copenhagen");
     assert.match(on.errors.join(" "),/Instagram video must already belong to this post/,
@@ -237,16 +237,16 @@ test("signed-in save cannot persist a forged video into a paused Instagram targe
   const raw=await makeSession(signer,"GSGrimoire");
   const csrf=await csrfToken(signer,{login:"GSGrimoire",raw} as Session);
   const malicious="upload://"+"e".repeat(32)+".mp4";
-  const f=new FormData();
-  for(const [key,value] of Object.entries({
+  const body=new URLSearchParams({
     csrf,expected_updated_at:version!,p_facebook:"1",
     ig_caption:"Paused",ig_frame:"4:5",ig_items:"[]",ig_video_source:malicious,
-  }))f.set(key,value);
+  });
   const response=await mf.dispatchFetch(ORIGIN+"/post/"+p.id+"/save",{
     method:"POST",
     headers:{Origin:ORIGIN,"Sec-Fetch-Site":"same-origin",
-      Cookie:SESSION_COOKIE+"="+raw,"X-GS-Autosave":"1",Accept:"application/json"},
-    body:f,redirect:"manual",
+      Cookie:SESSION_COOKIE+"="+raw,"X-GS-Autosave":"1",Accept:"application/json",
+      "Content-Type":"application/x-www-form-urlencoded"},
+    body:body.toString(),redirect:"manual",
   });
   assert.equal(response.status,400,await response.clone().text());
   const saved=(await getPost(db,p.id))!;
