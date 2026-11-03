@@ -4,6 +4,7 @@
  */
 import {before,after,test} from "node:test";
 import assert from "node:assert/strict";
+import {createHmac} from "node:crypto";
 import {build} from "esbuild";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {ensureSchema,pinLocked} from "../src/db.ts";
@@ -135,6 +136,25 @@ test("a forged cross-site request, bad CSRF or signed-in but nonallowlisted user
   assert.equal(await account(),null);
   const attemptsRecorded=await db.prepare("SELECT COUNT(*) AS n FROM pin_failures").first<{n:number}>();
   assert.equal(attemptsRecorded?.n,0,"CSRF, session and origin checks must precede PIN checks");
+});
+
+test("an expired but authentically signed session cannot administer or complete TikTok OAuth",async()=>{
+  const payload=Buffer.from(JSON.stringify({
+    login:"GSGrimoire",exp:Date.now()-60_000,
+  })).toString("base64url");
+  const signature=createHmac("sha256",SECRET)
+    .update("session:"+payload).digest("base64url");
+  const raw=payload+"."+signature;
+  const csrf=await csrfToken(signer,{login:"GSGrimoire",raw} as Session);
+  const beforeState=await states();
+  const response=await submit("connect",PIN,{session:{raw,csrf}});
+  assert.equal(response.status,302,"expired GitHub sessions must be redirected to login");
+  assert.match(response.headers.get("Location")??"",/^\/login\?/);
+  assert.equal(await states(),beforeState);
+  const callback=await get("/tiktok/callback?state=forged&code=forged",
+    "GSGrimoire","__Host-gsp_tiktok_state=forged",raw);
+  assert.equal(callback.status,401);
+  assert.equal(await account(),null);
 });
 
 test("correct PIN may host verification and disconnect an absent account without publishing",async()=>{
