@@ -40,20 +40,20 @@ export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
   let response = await fetch(
     "https://raw.githubusercontent.com/" + ref.owner + "/" + ref.repo + "/" +
       encodeURIComponent(ref.ref) + "/" + path,
-    { headers: { "User-Agent": "gs-poster" } },
+    { headers: { "User-Agent": "gs-poster" }, redirect:"manual" },
   );
   if (!response.ok && env.GITHUB_READ_TOKEN) {
     response = await fetch("https://api.github.com/repos/" + ref.owner + "/" + ref.repo +
       "/contents/" + path + "?ref=" + encodeURIComponent(ref.ref), {
       headers: { Authorization: "Bearer " + env.GITHUB_READ_TOKEN,
-        Accept: "application/vnd.github.raw+json", "User-Agent": "gs-poster" },
+        Accept: "application/vnd.github.raw+json", "User-Agent": "gs-poster" }, redirect:"manual",
     });
   }
-  if (!response.ok || !response.body) throw new Error("Could not fetch Bluesky MP4 video from the GitHub library.");
+  if (!response.ok || !response.body) throw new Error("Could not fetch MP4 video from the GitHub library.");
   const length = Number(response.headers.get("content-length") ?? 0);
   if (length > INITIAL_VIDEO_MAX_BYTES) {
     await response.body.cancel();
-    throw new Error("MP4 exceeds the initial 20 MB Bluesky video upload limit.");
+    throw new Error("MP4 exceeds the 20 MB video storage limit.");
   }
   const parts: Uint8Array[] = [];
   const reader = response.body.getReader();
@@ -65,7 +65,7 @@ export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
       received += next.value.byteLength;
       if (received > INITIAL_VIDEO_MAX_BYTES) {
         await reader.cancel();
-        throw new Error("MP4 exceeds the initial 20 MB Bluesky video upload limit.");
+        throw new Error("MP4 exceeds the 20 MB video storage limit.");
       }
       parts.push(next.value);
     }
