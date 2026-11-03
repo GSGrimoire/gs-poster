@@ -122,6 +122,27 @@ test("photo carousel without a public title is blocked, not named after the inte
   assert.equal(tiktokCalls().length,0);
 });
 
+test("legacy TikTok send page never defaults to internal label, and rejects blank carousel titles",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft();
+  await db.prepare("UPDATE posts SET tiktok_title=NULL WHERE id=?").bind(p.id).run();
+  const raw=await makeSession(signer,"GSGrimoire");
+  const options=await mf.dispatchFetch(ORIGIN+"/post/"+p.id+"/tiktok-options",
+    {headers:{Cookie:SESSION_COOKIE+"="+raw}});
+  assert.equal(options.status,200);
+  const html=await options.text();
+  assert.match(html,/name="tiktok_title" maxlength="90" value="" required/);
+  assert.doesNotMatch(html,/name="tiktok_title"[^>]+value="Internal GS Poster title"/);
+  const refused=await send("/post/"+p.id+"/tiktok-send",{
+    expected_updated_at:p.updated_at,post_mode:"MEDIA_UPLOAD",media_type:"PHOTO",
+    tiktok_caption:MSG,tiktok_title:"",confirm_tiktok:"1",pin:PIN,
+  });
+  assert.notEqual(refused.status,200);
+  assert.match(await refused.text(),/Enter a public TikTok carousel title/);
+  assert.equal(await transfer(p.id),null);
+  assert.equal(tiktokCalls().length,0);
+});
+
 test("autosaving a TikTok draft sends nothing",async()=>{
   await reset();await connectTikTok();
   const p=await ttDraft();
