@@ -289,8 +289,12 @@ export const DRAFT_MEDIA_JS = `
         reference:body.reference,alt,facebook,bluesky,tiktok,instagram,expected_updated_at:panel.dataset.version
       });
       panel.dataset.version=saved.updated_at;
-      videoStatus.textContent="Video attached. Refreshing...";
-      location.reload();
+      if(saved.audit_warning){
+        videoStatus.textContent=saved.audit_warning+" The video is attached. Reload the page to inspect it.";
+      }else{
+        videoStatus.textContent="Video attached. Refreshing...";
+        location.reload();
+      }
     } catch(error) {
       videoStatus.textContent="Could not attach: "+(error instanceof Error?error.message:String(error));
       videoSubmit.disabled=false;
