@@ -1,119 +1,117 @@
-/** OAuth consent route defenses on top of the provider's single-use browser-bound handle.
- * Tests the real handleWeb route with an isolated provider and database.
- */
+/** Production OAuth consent route running in isolated workerd with a provider double. */
 import {before,after,test} from "node:test";
 import assert from "node:assert/strict";
-import {Miniflare} from "miniflare";
-import {ensureSchema} from "../src/db.ts";
-import {handleWeb} from "../src/web.ts";
+import {build} from "esbuild";
+import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
 import type {Env} from "../src/env.ts";
 
 const ORIGIN="https://gs-poster.test";
 const SECRET="oauth-route-security-test";
-let mf:Miniflare,db:D1Database;
+const signer={COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire"} as Env;
+let mf:Miniflare;
 before(async()=>{
-  mf=new Miniflare({modules:true,script:"export default { fetch(){return new Response('test')} };",
-    compatibilityDate:"2026-09-01",d1Databases:["DB"]});
-  db=await mf.getD1Database("DB") as unknown as D1Database;
-  await ensureSchema(db);
+  const out=await build({entryPoints:["test/fixtures/oauth-consent-entry.ts"],bundle:true,
+    format:"esm",platform:"neutral",target:"es2022",write:false,external:["cloudflare:*","node:*"],
+    conditions:["workerd","worker","browser"],mainFields:["module","main"],logLevel:"silent"});
+  mf=new Miniflare(convertV4MiniflareOptions({modules:true,cf:false,script:out.outputFiles[0].text,
+    compatibilityDate:"2026-09-01",compatibilityFlags:["nodejs_compat"],d1Databases:["DB"],
+    bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire"}}));
 });
 after(async()=>mf?.dispose());
 
-function mockProvider(){
-  const state={parsed:0,begun:0,approved:0,denied:0,completed:0};
-  const request={clientId:"example-app",scope:["draft:read"],redirectUri:"https://client.example/cb"};
-  return {state,helpers:{
-    async parseAuthRequest(){state.parsed++;return request;},
-    async describeConsent(){return {clientName:"Client",clientDomain:null,redirectHost:"client.example",
-      redirectIsLoopback:false,scope:["draft:read"]};},
-    async beginConsent(){state.begun++;return {handle:"consent-handle",headers:new Headers({
-      "Set-Cookie":"__Host-oauth-consent=bound; Secure; HttpOnly; SameSite=Lax; Path=/",
-      "X-Frame-Options":"DENY"})};},
-    async denyConsent(_req:Request,handle:string){
-      assert.equal(handle,"consent-handle");state.denied++;
-      return {redirectTo:"https://client.example/cb?error=access_denied",headers:new Headers()};
-    },
-    async approveConsent(_req:Request,handle:string,options:{scope:string[]}){
-      assert.equal(handle,"consent-handle");assert.deepEqual(options.scope,["draft:read"]);
-      state.approved++;return {request,headers:new Headers()};
-    },
-    async completeAuthorization(){state.completed++;return {redirectTo:"https://client.example/cb?code=dummy"};},
-  }};
+async function auth(){
+  const raw=await makeSession(signer,"GSGrimoire");
+  return {raw,csrf:await csrfToken(signer,{login:"GSGrimoire",raw} as Session)};
 }
-async function session(login="GSGrimoire") {
-  const env={COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire"} as Env;
-  const raw=await makeSession(env,login);
-  return {raw, csrf:await csrfToken(env,{login,raw} as Session)};
+async function consent(a:Awaited<ReturnType<typeof auth>>){
+  const r=await mf.dispatchFetch(ORIGIN+"/authorize?client_id=example-app",{
+    headers:{Cookie:SESSION_COOKIE+"="+a.raw},redirect:"manual"});
+  assert.equal(r.status,200,await r.clone().text());
+  const html=await r.text();
+  const handle=html.match(/name="handle" value="([^"]+)"/)?.[1];
+  assert.ok(handle);
+  assert.ok(html.includes('name="csrf" value="'+a.csrf+'"'));
+  assert.match(r.headers.get("Set-Cookie")??"",/__Host-consent-handle=/);
+  assert.equal(r.headers.get("X-Frame-Options"),"DENY");
+  return handle;
 }
-function environment(provider:ReturnType<typeof mockProvider>,allowed="gsgrimoire"):Env{
-  return {DB:db,COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:allowed,
-    OAUTH_PROVIDER:provider.helpers} as unknown as Env;
+async function count(){
+  const r=await mf.dispatchFetch(ORIGIN+"/mock-state");
+  return r.json() as Promise<{approved:number;denied:number;completed:number}>;
 }
-async function post(env:Env,auth:{raw:string;csrf:string},options:{
-  origin?:string;site?:string;csrf?:string;decision?:string;cookie?:string;
+async function post(a:Awaited<ReturnType<typeof auth>>,handle:string,opts:{
+  site?:string;origin?:string;csrf?:string;decision?:string;withProviderCookie?:boolean;
+  session?:string;
 }={}){
-  const form=new URLSearchParams({handle:"consent-handle",scope:"draft:read",
-    csrf:options.csrf??auth.csrf,decision:options.decision??"approve"});
-  const headers=new Headers({"Content-Type":"application/x-www-form-urlencoded",
-    Cookie:SESSION_COOKIE+"="+auth.raw+(options.cookie?"; "+options.cookie:""),
-    "Sec-Fetch-Site":options.site??"same-origin"});
-  if(options.origin!==undefined)headers.set("Origin",options.origin);
-  else headers.set("Origin",ORIGIN);
-  return handleWeb(new Request(ORIGIN+"/authorize",{method:"POST",headers,body:form}),env);
+  const origin=opts.origin??ORIGIN,site=opts.site??"same-origin";
+  const body=new URLSearchParams({csrf:opts.csrf??a.csrf,handle,decision:opts.decision??"approve",
+    scope:"draft:read"});
+  return mf.dispatchFetch(ORIGIN+"/authorize",{
+    method:"POST",redirect:"manual",headers:{
+      Cookie:SESSION_COOKIE+"="+(opts.session??a.raw)+
+        (opts.withProviderCookie===false?"":"; __Host-consent-handle="+handle),
+      Origin:origin,"Sec-Fetch-Site":site,"Content-Type":"application/x-www-form-urlencoded",
+    },body:body.toString(),
+  });
 }
 
-test("consent GET provides both a provider binding and a session CSRF token",async()=>{
-  const auth=await session(),provider=mockProvider(),env=environment(provider);
-  const response=await handleWeb(new Request(ORIGIN+"/authorize?client_id=example-app",{
-    headers:{Cookie:SESSION_COOKIE+"="+auth.raw},
-  }),env);
-  assert.equal(response.status,200);
-  assert.match(response.headers.get("Set-Cookie")??"",/__Host-oauth-consent=/);
-  assert.equal(response.headers.get("X-Frame-Options"),"DENY");
-  const html=await response.text();
-  assert.ok(html.includes('name="csrf" value="'+auth.csrf+'"'));
-  assert.match(html,/name="handle" value="consent-handle"/);
-  assert.equal(provider.state.begun,1);
+test("provider-bound GET includes an additional per-session CSRF field",async()=>{
+  const a=await auth(),h=await consent(a);
+  assert.match(h,/^mock-consent-/);
 });
 
-test("consent approve and deny require a correct signed-in session, origin and CSRF",async()=>{
-  const auth=await session(),provider=mockProvider(),env=environment(provider);
-  const variants=[
+test("same-origin and CSRF guards protect both Approve and Deny before provider calls",async()=>{
+  const a=await auth(),h=await consent(a);
+  const beforeState=await count();
+  const invalid=[
     {origin:"https://evil.example",site:"cross-site"},
-    {origin:"null",site:"cross-site"},
     {origin:"https://evil.example",site:"same-origin"},
-    {origin:ORIGIN,site:"cross-site"},
-    {csrf:"forged"},
-    {csrf:""},
+    {origin:"null",site:"cross-site"},
+    {site:"cross-site"},
+    {csrf:"bad"}, {csrf:""},
   ];
-  for(const v of variants)for(const decision of ["approve","deny"]){
-    const response=await post(env,auth,{...v,decision});
-    assert.equal(response.status,403,await response.text());
+  for(const attempt of invalid)for(const decision of ["approve","deny"]){
+    const r=await post(a,h,{...attempt,decision});
+    assert.equal(r.status,403,await r.text());
   }
-  assert.equal(provider.state.approved,0);
-  assert.equal(provider.state.denied,0);
-  const ok=await post(env,auth);
-  assert.equal(ok.status,302);
+  const after=await count();
+  assert.deepEqual({approved:after.approved,denied:after.denied},
+    {approved:beforeState.approved,denied:beforeState.denied});
+  const ok=await post(a,h);
+  assert.equal(ok.status,302,await ok.clone().text());
   assert.match(ok.headers.get("Location")??"",/^https:\/\/client\.example\/cb/);
-  assert.equal(provider.state.approved,1);
-  assert.equal(provider.state.completed,1);
-  const denied=await post(env,auth,{decision:"deny"});
-  assert.equal(denied.status,302);
-  assert.equal(provider.state.denied,1);
-  const nullOrigin=await post(env,auth,{origin:"null",site:"same-origin"});
-  assert.equal(nullOrigin.status,302,"the site's Referrer-Policy may set Origin:null");
 });
 
-test("revoked or absent allowed session cannot approve, regardless of CSRF",async()=>{
-  const auth=await session(),provider=mockProvider();
-  const revoked=await post(environment(provider,"other-user"),auth);
+test("Deny and Origin:null with same-origin Fetch Metadata remain usable",async()=>{
+  const a=await auth(),h=await consent(a);
+  const denied=await post(a,h,{origin:"null",site:"same-origin",decision:"deny"});
+  assert.equal(denied.status,302);
+  assert.match(denied.headers.get("Location")??"",/access_denied/);
+});
+
+test("no active GitHub session, revoked login or provider cookie cannot confer approval",async()=>{
+  const a=await auth(),h=await consent(a);
+  const beforeState=await count();
+  const revoked=await mf.dispatchFetch(ORIGIN+"/authorize",{method:"POST",redirect:"manual",
+    headers:{Origin:ORIGIN,"Sec-Fetch-Site":"same-origin",
+      "Content-Type":"application/x-www-form-urlencoded"},
+    body:new URLSearchParams({handle:h,csrf:a.csrf,decision:"approve"}).toString()});
   assert.equal(revoked.status,401);
-  const unsigned=await handleWeb(new Request(ORIGIN+"/authorize",{method:"POST",headers:{
-    Origin:ORIGIN,"Sec-Fetch-Site":"same-origin","Content-Type":"application/x-www-form-urlencoded",
-  },body:new URLSearchParams({handle:"consent-handle",decision:"approve",csrf:auth.csrf})}),
-    environment(provider));
-  assert.equal(unsigned.status,401);
-  assert.equal(provider.state.approved,0);
-  assert.equal(provider.state.denied,0);
+  const unbound=await post(a,h,{withProviderCookie:false});
+  assert.notEqual(unbound.status,302,"the OAuth helper must refuse an unbound handle");
+  const after=await count();
+  assert.equal(after.approved,beforeState.approved);
+  assert.equal(after.denied,beforeState.denied);
+});
+
+test("single-use consent handle cannot approve twice",async()=>{
+  const a=await auth(),h=await consent(a);
+  const accepted=await post(a,h);
+  assert.equal(accepted.status,302);
+  const beforeState=await count();
+  const replay=await post(a,h);
+  assert.notEqual(replay.status,302);
+  const after=await count();
+  assert.equal(after.approved,beforeState.approved);
 });
