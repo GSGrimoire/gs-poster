@@ -5,7 +5,8 @@ import {before,after,test} from "node:test";
 import assert from "node:assert/strict";
 import {build} from "esbuild";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
-import {createPost,ensureSchema,getPost} from "../src/db.ts";
+import {createPost,ensureSchema,getPost,replaceTikTokDraftImage} from "../src/db.ts";
+import {importTikTokLinkedImage,TikTokImportError} from "../src/tiktok-import.ts";
 import {uploadStatusForOwner,parseUploadRef,readUpload} from "../src/upload.ts";
 import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
 import type {Env} from "../src/env.ts";
@@ -137,6 +138,66 @@ test("a concurrent edit makes the original import request stale without changing
   assert.equal(r.status,409);
   assert.deepEqual((await getPost(db,p.id))!.tiktok_images,[GITHUB]);
   assert.equal(fetched.length,0);
+});
+
+test("forged URL fields cannot influence GitHub source selection",async()=>{
+  reset();
+  const p=await draft();
+  const res=await send(p.id,{index:0,expected_updated_at:p.updated_at,
+    source_url:"https://evil.example/secret.png",url:"https://evil.example/other.png"});
+  assert.equal(res.status,200,await res.clone().text());
+  assert.deepEqual(fetched,[GITHUB]);
+});
+
+test("database replacement fences on original source even when the draft version matches",async()=>{
+  reset();
+  const p=await draft();
+  const fake="upload://"+"b".repeat(32)+".png";
+  const no=await replaceTikTokDraftImage(db,p.id,0,OTHER,fake,p.updated_at);
+  assert.equal(no,null);
+  assert.deepEqual((await getPost(db,p.id))!.tiktok_images,[GITHUB]);
+});
+
+test("corrupted R2 readback is never marked ready or attached",async()=>{
+  reset();
+  const p=await draft();
+  const previous=globalThis.fetch;
+  const proxy=new Proxy(r2,{get(target,key){
+    if(key==="get")return async (...args:unknown[])=>{
+      const object=await (target.get as (...args:unknown[])=>Promise<unknown>).apply(target,args);
+      return object ? {arrayBuffer:async()=>new Uint8Array([1,2,3]).buffer} : null;
+    };
+    const v=(target as unknown as Record<PropertyKey,unknown>)[key];
+    return typeof v==="function"?(v as Function).bind(target):v;
+  }});
+  globalThis.fetch=async()=>new Response(PNG,{status:200});
+  try {
+    await assert.rejects(importTikTokLinkedImage({DB:db,UPLOADS:proxy} as Env,
+      p.id,0,p.updated_at,"GSGrimoire",ORIGIN),/private image copy was not confirmed/i);
+    assert.deepEqual((await getPost(db,p.id))!.tiktok_images,[GITHUB]);
+    const status=await db.prepare("SELECT status FROM uploads WHERE created_by='GSGrimoire' ORDER BY created_at DESC LIMIT 1")
+      .first<{status:string}>();
+    assert.equal(status?.status,"uploading","incomplete integrity checks cannot become ready");
+  } finally { globalThis.fetch=previous; }
+});
+
+test("concurrent draft changes during external fetch prevent private attachment",async()=>{
+  reset();
+  const p=await draft();
+  const previous=globalThis.fetch;
+  globalThis.fetch=async()=>{
+    await db.prepare("UPDATE posts SET updated_at=? WHERE id=?")
+      .bind(new Date(Date.now()+60000).toISOString(),p.id).run();
+    return new Response(PNG,{status:200});
+  };
+  try {
+    await assert.rejects(importTikTokLinkedImage({DB:db,UPLOADS:r2} as Env,
+      p.id,0,p.updated_at,"GSGrimoire",ORIGIN),/draft changed while importing/i);
+    const saved=(await getPost(db,p.id))!;
+    assert.deepEqual(saved.images,[GITHUB]);
+    assert.deepEqual(saved.tiktok_images,[GITHUB]);
+    assert.equal(saved.approved_at,null);
+  } finally { globalThis.fetch=previous; }
 });
 
 test("a completed private upload cannot be re-imported and does not duplicate TikTok media",async()=>{
