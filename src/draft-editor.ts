@@ -654,14 +654,24 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     const hasIgPhotos = !!igField && igField.value !== "[]";
     const igDownloads = document.getElementById("ig-downloads");
     if (igDownloads) igDownloads.hidden = d || !hasIgPhotos;
+    const igHasVideo = !!document.getElementById("ig-video-source")?.value;
+    const igReelDownload = document.getElementById("ig-reel-download");
+    if(igReelDownload)igReelDownload.hidden=d||!igHasVideo;
+    const igPreview=document.getElementById("ig-reel-preview");
+    if(igPreview)igPreview.hidden=d||!igHasVideo;
     const igUnsaved = document.getElementById("ig-unsaved");
-    if (igUnsaved) igUnsaved.hidden = !d || !hasIgPhotos;
+    if (igUnsaved) igUnsaved.hidden = !d || (!hasIgPhotos && !igHasVideo);
   }
   function togglePlatform(box) {
     const name = box.dataset.platformToggle;
     form.querySelectorAll('[data-platform="' + name + '"]').forEach(el => { el.hidden = !box.checked; });
   }
   form.querySelectorAll("[data-platform-toggle]").forEach(box => box.addEventListener("change", () => togglePlatform(box)));
+  document.getElementById("bs-copy-fb-video")?.addEventListener("click",()=>{
+    if(!confirm("Replace Bluesky photos or video with the existing Facebook video?"))return;
+    const field=document.getElementById("bs-copy-fb-video-flag");
+    field.value="1";field.dispatchEvent(new Event("input",{bubbles:true}));
+  });
   document.getElementById("tt-copy-fb")?.addEventListener("click", () => {
     if (!confirm("Replace the TikTok gallery with a separate copy of the Facebook photos?")) return;
     const field = document.getElementById("tt-copy-fb-flag");
@@ -699,7 +709,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     const r = rules[id];
     if (id === "instagram" && igApi) {
       const text = card.querySelector("[data-caption]")?.value || "";
-      return { photos: igApi.items.length, video: false, captionLength: text.length, missingAlt: 0, ratios: [],
+      return { photos: igApi.items.length, video: !!document.getElementById("ig-video-source")?.value, captionLength: text.length, missingAlt: 0, ratios: [],
         hashtags: (text.match(/(^|[^\p{L}\p{N}_&])#[\p{L}\p{N}_]+/gu) || []).length, lowRes: igApi.lowRes() };
     }
     const tiles = kept(mediaBox(card));
@@ -987,13 +997,52 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       e.preventDefault();
       nudge(li, map[e.key][0], map[e.key][1], map[e.key][2]);
     });
-    const add = url => { if (items.length < MAX && !items.some(x => x.url === url)) items.push({ url, mode: "crop", cx: 0.5, cy: 0.5, zoom: 1, bg: "dark" }); };
+    const videoSelector=document.getElementById("ig-video-source");
+    videoSelector?.addEventListener("change",()=>{
+      if(videoSelector.value && items.length){
+        if(!confirm("Switch Instagram to a Reel? This clears its selected photos and crop settings.")){
+          videoSelector.value="";
+          return;
+        }
+        items.splice(0);
+        render();
+      }
+      recheck();
+    });
+    const add = url => {
+      if(videoSelector?.value){
+        alert("Switch Instagram to the photo carousel first, then add photos.");
+        return;
+      }
+      if (items.length < MAX && !items.some(x => x.url === url)) items.push({ url, mode: "crop", cx: 0.5, cy: 0.5, zoom: 1, bg: "dark" });
+    };
     igList.parentElement.querySelectorAll(".ig-add").forEach(b => b.addEventListener("click", () => { add(b.dataset.url); render(); }));
     document.getElementById("ig-add-all")?.addEventListener("click", () => { pool.forEach(x => add(x.url)); render(); });
     form.querySelectorAll('input[name="ig_frame"]').forEach(r => r.addEventListener("change", () => igList.querySelectorAll(".ig-item").forEach(draw)));
     form.querySelectorAll("[data-ig-all]").forEach(b => b.addEventListener("click", () => { items.forEach(it => { it.mode = b.dataset.igAll; }); render(); }));
+    const igPreview=document.getElementById("ig-reel-preview");
+    const igSpecs=document.getElementById("ig-reel-specs");
+    igPreview?.addEventListener("loadedmetadata",()=>{
+      const ratio=igPreview.videoWidth && igPreview.videoHeight ?
+        igPreview.videoWidth/igPreview.videoHeight : 0;
+      const duration=igPreview.duration;
+      const notes=[];
+      if(ratio && Math.abs(ratio-9/16)>0.04)
+        notes.push("This source is not 9:16; Instagram may crop or letterbox it.");
+      if(Number.isFinite(duration) && (duration<3 || duration>900))
+        notes.push("Duration is outside the recommended 3 seconds to 15 minutes.");
+      igSpecs.textContent=(notes.length?notes.join(" "):"Frame and duration appear suitable. ")+
+        "GS Poster does not transcode. Verify H.264 video and Advanced Audio Coding before posting.";
+    });
     // After an autosave, the download links must name exactly the saved photos.
     document.addEventListener("gs-saved", () => {
+      const hasVideo=!!videoSelector?.value;
+      const reelDownload=document.getElementById("ig-reel-download");
+      if(reelDownload)reelDownload.hidden=!hasVideo;
+      if(igPreview){
+        igPreview.hidden=!hasVideo;
+        if(hasVideo){igPreview.load();}
+      }
       savedValue = igField.value;
       const dl = document.getElementById("ig-downloads"), post = igList.dataset.post;
       if (!dl) return;
