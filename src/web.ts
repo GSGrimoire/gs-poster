@@ -719,10 +719,12 @@ async function draftImageAction(
       const expected = typeof input.expected_updated_at === "string" ? input.expected_updated_at : "";
       const result = await importTikTokLinkedImage(env, id, input.index, expected,
         session.login, new URL(req.url).origin);
-      await audit(env.DB, session.login, "tiktok-private-image-imported", id,
-        "TikTok photo position " + String(input.index + 1)).catch(() => undefined);
-      return Response.json({ ok: true, ...result },
-        { headers: { "Cache-Control": "no-store" } });
+      const logged = await audit(env.DB, session.login, "tiktok-private-image-imported", id,
+        "TikTok photo position " + String(input.index + 1)).then(() => true, () => false);
+      return Response.json({
+        ok: true, ...result,
+        ...(logged ? {} : { audit_warning: "Image imported, but the activity log could not be recorded." }),
+      }, { headers: { "Cache-Control": "no-store" } });
     }
     if (action === "upload-link") {
       const filename = String(input.filename || "");
