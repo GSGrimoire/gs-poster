@@ -30,7 +30,9 @@ export function parseGitHubUrl(input: string): GitHubRef | null {
     return null;
   }
   if (u.protocol !== "https:") return null;
-  const seg = u.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  let seg: string[];
+  try { seg = u.pathname.split("/").filter(Boolean).map(decodeURIComponent); }
+  catch { return null; }
   if (u.hostname === "raw.githubusercontent.com") {
     if (seg.length < 4) return null;
     const [owner, repo] = seg;
@@ -110,7 +112,26 @@ export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
   }
   const len = Number(res.headers.get("content-length") || 0);
   if (len > MAX_IMAGE_BYTES) throw new Error(`${name} is ${(len / 1048576).toFixed(1)} MB; the limit is 10 MB.`);
-  const bytes = await res.arrayBuffer();
-  if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error(`${name} is over 10 MB.`);
-  return { bytes, type, name };
+  // A remote server may omit or lie about Content-Length. Bound the stream
+  // before allocating, rather than buffering an unlimited remote response.
+  if (!res.body) throw new Error(`No image body returned for ${name}.`);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > MAX_IMAGE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`${name} is over 10 MB.`);
+      }
+      chunks.push(part.value);
+    }
+  } finally { reader.releaseLock(); }
+  const combined = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.byteLength; }
+  return { bytes: combined.buffer, type, name };
 }

@@ -11,6 +11,7 @@ import { localToUtc, toLocalInput } from "./time.ts";
 import { captionLimit, checkTarget, PLATFORM_ORDER, PLATFORMS, platformRulesJson, FACEBOOK_CAPTION_MAX,
   type PlatformId, type TargetState } from "./platforms.ts";
 import type { TikTokReleasePlan } from "./tiktok-release.ts";
+import { parseGitHubUrl } from "./media.ts";
 import { countHashtags, defaultItem, INSTAGRAM_BACKGROUNDS, INSTAGRAM_CAPTION_MAX, INSTAGRAM_FRAMES, INSTAGRAM_MAX_ITEMS,
   INSTAGRAM_MAX_ZOOM, INSTAGRAM_PLAN_JS, instagramSaveErrors, readInstagramItems,
   type InstagramDraft, type InstagramFrame } from "./instagram.ts";
@@ -246,6 +247,7 @@ export function renderDraftEditor(v: EditorView): string {
   const bs = p.bluesky ?? p.bluesky_paused ?? null;
   const tt = tiktokMedia(p);
   const ttShared = p.tiktok_images === null;
+  const ttImportIndices = !ttShared && !tt.video ? tt.images.flatMap((url, i) => parseGitHubUrl(url) ? [i] : []) : [];
   const hide = (on: boolean) => (on ? "" : " hidden");
   const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!p.bluesky, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
   const ig = p.instagram ?? p.instagram_paused ?? null;
@@ -536,8 +538,10 @@ export function renderDraftEditor(v: EditorView): string {
           <textarea id="ed-tiktok" name="tiktok_caption" data-max="${captionLimit("tiktok", { photos: 1, video: !!(ttShared ? p.video : tt.video) })}" data-caption="tiktok" placeholder="Leave empty to reuse the Facebook caption">${esc(p.tiktok_caption ?? "")}</textarea>
           <div class="field-meter"></div>
           ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button><input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0"></div>
-          <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. Only privately uploaded images can be sent to TikTok; linked images must be reuploaded using Add photos.</p>` : ""}
+          <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. After saving, prepare any linked GitHub photos for TikTok using the action below.</p>` : ""}
           <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
+          ${p.tiktok_enabled && ttImportIndices.length ? `<div class="row"><button type="button" id="tt-import" data-indices="${esc(JSON.stringify(ttImportIndices))}">Prepare ${ttImportIndices.length} linked photo${ttImportIndices.length === 1 ? "" : "s"} for TikTok</button></div>
+          <p class="hint" id="tt-import-status" role="status" aria-live="polite">Copies only the linked TikTok photos into private storage. Facebook originals stay unchanged. Prepare them close to publication; private copies expire after 45 days.</p>` : ""}
           ${!ttShared && !tt.video && tt.images.length > 1 ? `<input type="hidden" name="order_tt" value="${Array.from({ length: tt.images.length }, (_, i) => i).join(",")}">` : ""}
           <p class="hint">${esc(PLATFORMS.tiktok.delivery)}</p>
         </article>
