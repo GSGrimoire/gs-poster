@@ -206,6 +206,7 @@ export const DRAFT_MEDIA_JS = `
     running = window.gsMediaBusy = true;
     importButton.disabled = true;
     let completed = 0;
+    const auditWarnings = [];
     try {
       for (const index of indices) {
         importStatus.textContent = "Preparing TikTok image " + (completed + 1) + " of " + indices.length + "...";
@@ -213,11 +214,17 @@ export const DRAFT_MEDIA_JS = `
           index, expected_updated_at: panel.dataset.version
         });
         panel.dataset.version = result.updated_at;
+        if (result.audit_warning) auditWarnings.push(result.audit_warning);
         // Keep the owner's approval form and the editor's version fences current.
         document.querySelectorAll('input[name="expected_updated_at"]').forEach(field => {
           field.value = result.updated_at;
         });
         completed++;
+      }
+      if (auditWarnings.length) {
+        importStatus.textContent = "Prepared " + completed +
+          " images, but the activity log was not confirmed. Reload the editor to inspect them.";
+        return;
       }
       importStatus.textContent = "Prepared " + completed + " images. Refreshing the editor...";
       location.reload();
