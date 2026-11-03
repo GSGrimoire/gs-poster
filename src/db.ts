@@ -73,6 +73,7 @@ interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled"
   ig_caption?: string | null;
   ig_frame?: string | null;
   ig_items?: string | null;
+  ig_video?: string | null;
   ig_status?: string | null;
   facebook_enabled: number;
   tiktok_enabled: number;
@@ -95,7 +96,7 @@ const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
  b.video AS bs_video, b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
  b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
  b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error,
- i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items, i.status AS ig_status
+ i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items, i.video AS ig_video, i.status AS ig_status
  FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id
  LEFT JOIN instagram_targets i ON p.id = i.post_id`;
 
@@ -161,6 +162,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       caption TEXT NOT NULL,
       frame TEXT NOT NULL,
       items TEXT NOT NULL DEFAULT '[]',
+      video TEXT,
       status TEXT NOT NULL DEFAULT 'draft'
     )`),
   ]);
@@ -186,6 +188,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
     }
   }
+  const igColumns = await db.prepare("PRAGMA table_info(instagram_targets)").all<{name:string}>();
+  if (!igColumns.results.some(column => column.name === "video")) {
+    try { await db.prepare("ALTER TABLE instagram_targets ADD COLUMN video TEXT").run(); }
+    catch (error) { if (!/duplicate column name/i.test(String(error))) throw error; }
+  }
   schemaReady = true;
 }
 
@@ -201,6 +208,7 @@ function fromRow(r: Row): Post {
   const instagram: InstagramDraft | null = r.ig_caption == null ? null : {
     caption: r.ig_caption, frame: (r.ig_frame ?? "4:5") as InstagramDraft["frame"],
     items: JSON.parse(r.ig_items || "[]"),
+    ...(r.ig_video ? { video: r.ig_video } : {}),
   };
   return {
     ...r,
@@ -543,10 +551,12 @@ export async function saveEditorDraft(
           bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, (next.bluesky_enabled ?? !!bluesky) ? "draft" : "disabled", id, version)
       : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version),
   ];
-  if (instagram) statements.push(db.prepare(`INSERT INTO instagram_targets (post_id, caption, frame, items, status)
-      SELECT ?, ?, ?, ?, ? WHERE ${fenced}
-      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items, status = excluded.status`)
-    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), (next.instagram_enabled ?? !!instagram) ? "draft" : "disabled", id, version));
+  if (instagram) statements.push(db.prepare(`INSERT INTO instagram_targets (post_id, caption, frame, items, video, status)
+      SELECT ?, ?, ?, ?, ?, ? WHERE ${fenced}
+      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items,
+        video = excluded.video, status = excluded.status`)
+    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), instagram.video ?? null,
+      (next.instagram_enabled ?? !!instagram) ? "draft" : "disabled", id, version));
   else if (instagram === null) statements.push(
     db.prepare(`DELETE FROM instagram_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version));
   const results = await db.batch(statements);
