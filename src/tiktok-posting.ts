@@ -22,6 +22,8 @@ export function validateTikTokPostOptions(options:TikTokPostOptions) {
   if(!["MEDIA_UPLOAD","DIRECT_POST"].includes(options.mode))throw Error("Invalid TikTok posting mode.");
   if(!["PHOTO","VIDEO"].includes(options.mediaType))throw Error("Invalid TikTok media type.");
   if(options.title.length>90)throw Error("TikTok photo title exceeds 90 characters.");
+  if(options.mediaType==="PHOTO"&&!options.title.trim())
+    throw Error("Enter a public TikTok carousel title; the internal draft name is not a publishing title.");
   if(options.caption.length>(options.mediaType==="PHOTO"?4000:2200))
     throw Error("TikTok caption is too long.");
   if(options.brandOrganic&&options.brandContent)
