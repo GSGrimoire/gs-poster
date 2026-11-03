@@ -158,8 +158,23 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
         items,
         ...(videoSource?{video:videoSource}:{}),
       };
-      if(instagramOn)errors.push(...instagramSaveErrors(instagram,
-        new Set(postPhotos(cur)),new Set(postVideos(cur))));
+      // The form is still saved while Instagram is paused. Validate its
+      // video reference in both states, and do not let the Instagram slot
+      // vouch for a newly supplied URL. Only the unchanged saved source or
+      // a video in a separate post target is eligible for selection.
+      const otherVideoSources = [
+        cur.video, tiktokMedia(cur).video,
+        savedBluesky?.video?.url,
+      ].filter((url): url is string => !!url);
+      const allowedVideos = new Set([
+        ...otherVideoSources,
+        ...(base.video ? [base.video] : []),
+      ]);
+      if (instagramOn) {
+        errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur)), allowedVideos));
+      } else if (videoSource && !allowedVideos.has(videoSource)) {
+        errors.push("The Instagram video must already belong to this post.");
+      }
     }
   }
 
