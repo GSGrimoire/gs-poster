@@ -188,6 +188,7 @@ test("Bluesky copy from Facebook needs a description and does not change Faceboo
   form.set("p_facebook","1");form.set("p_bluesky","1");
   form.set("bs_caption","Bluesky copy");
   form.set("bs_copy_fb_video","1");
+  form.set("bs_copy_video_alt","");
   const invalid=parseEditorForm(form,p,"Europe/Copenhagen");
   assert.match(invalid.errors.join(" "),/Describe the Facebook video/);
   form.set("bs_copy_video_alt","A creature on camera");
