@@ -41,7 +41,8 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
     catch(e){creatorError=e instanceof Error?e.message:"TikTok creator information unavailable.";}
   }
   const csrf=await csrfToken(env,session);
-  const title=(p.label||p.release||"GS Grimoire").slice(0,90);
+  // Public-facing title must never default to the internal GS Poster draft name.
+  const title=(p.tiktok_title??"").trim();
   const caption=(p.tiktok_caption ?? p.message).slice(0,type==="PHOTO"?4000:2200);
   const preview=type==="PHOTO"?
     '<div class="tiktok-carousel-preview">'+media.images.slice(0,35).map((_,i)=>
@@ -54,7 +55,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
       <input type="hidden" name="post_mode" value="${mode}">
       <input type="hidden" name="media_type" value="${type}">
       <label for="title-${mode}">TikTok title (up to 90 characters)</label>
-      <input type="text" id="title-${mode}" name="tiktok_title" maxlength="90" value="${esc(title)}">
+      <input type="text" id="title-${mode}" name="tiktok_title" maxlength="90" value="${esc(title)}"${type==="PHOTO"?' required placeholder="Title shown to TikTok viewers"':""}>
       <label for="caption-${mode}">TikTok ${type==="PHOTO"?"description (up to 4,000 characters)":"caption (up to 2,200 characters)"}</label>
       <textarea id="caption-${mode}" name="tiktok_caption" maxlength="${type==="PHOTO"?4000:2200}" style="min-height:120px">${esc(caption)}</textarea>
       <label><input type="checkbox" name="is_aigc" value="1"> AI-generated content (declare to TikTok)</label>
