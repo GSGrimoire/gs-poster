@@ -95,8 +95,12 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   let tiktokImages = cur.tiktok_images === null ? null : ordered(cur.tiktok_images, ttOrder ?? [], form, "remove_tt_");
   let tiktokVideo = cur.tiktok_video && form.get("remove_tt_video") !== "1" ? cur.tiktok_video : null;
   // Stop TikTok-only uploads from mutating a shared Facebook gallery.
-  // A newly enabled/legacy TikTok target gets its own copy of the saved photos.
-  if (tiktok && (cur.tiktok_images === null || form.get("tt_copy_fb") === "1")) {
+  // A newly enabled/legacy TikTok target gets its own copy of Facebook media.
+  // Refuse an explicit copy if the same save removes the Facebook source.
+  const copyFacebook = form.get("tt_copy_fb") === "1";
+  if (tiktok && copyFacebook && cur.video && !video)
+    errors.push("Cannot copy the Facebook video while also removing it.");
+  if (tiktok && (cur.tiktok_images === null || copyFacebook)) {
     tiktokImages = [...images];
     tiktokVideo = video;
   }
