@@ -191,6 +191,48 @@ export const DRAFT_MEDIA_JS = `
   }
 
   const unsaved = () => typeof window.gsEditorDirty === "function" && window.gsEditorDirty();
+  const importButton = document.getElementById("tt-import");
+  const importStatus = document.getElementById("tt-import-status");
+  importButton?.addEventListener("click", async () => {
+    if (running) return;
+    if (unsaved()) {
+      importStatus.textContent = "Save your draft changes before preparing TikTok photos.";
+      return;
+    }
+    let indices;
+    try { indices = JSON.parse(importButton.dataset.indices || "[]"); }
+    catch { importStatus.textContent = "Invalid image list. Reload the draft."; return; }
+    if (!Array.isArray(indices) || !indices.every(Number.isSafeInteger)) return;
+    running = window.gsMediaBusy = true;
+    importButton.disabled = true;
+    let completed = 0;
+    try {
+      for (const index of indices) {
+        importStatus.textContent = "Preparing TikTok image " + (completed + 1) + " of " + indices.length + "...";
+        const result = await api("import-tiktok-image", {
+          index, expected_updated_at: panel.dataset.version
+        });
+        panel.dataset.version = result.updated_at;
+        // Keep the owner's approval form and the editor's version fences current.
+        document.querySelectorAll('input[name="expected_updated_at"]').forEach(field => {
+          field.value = result.updated_at;
+        });
+        completed++;
+      }
+      importStatus.textContent = "Prepared " + completed + " images. Refreshing the editor...";
+      location.reload();
+    } catch(error) {
+      importStatus.textContent = "Stopped after " + completed + " of " + indices.length + " images: " +
+        (error instanceof Error ? error.message : String(error)) +
+        (completed ? " Reload to see the completed images and prepare the remainder." : "");
+      // A successful earlier import changed the database without changing the
+      // currently displayed photo tiles. Reload before any further operation.
+      importButton.disabled = completed > 0;
+    } finally {
+      running = window.gsMediaBusy = false;
+      if (completed === 0) importButton.disabled = false;
+    }
+  });
   videoSubmit.addEventListener("click",async()=>{
     if(running || !selectedVideo)return;
     if(unsaved()){videoStatus.textContent="Save your text changes first, then add the video.";return;}
