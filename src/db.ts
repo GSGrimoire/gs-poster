@@ -388,26 +388,26 @@ export async function attachDraftVideo(
   if(!facebook&&!bluesky&&!tiktok&&!instagram)throw Error("Select at least one platform.");
   if(bluesky&&!alt.trim())throw Error("Bluesky video requires alternative text.");
   const version=new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
-  const blueGuard=bluesky?" AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0 AND b.video IS NULL)":"";
-  const instagramGuard=instagram?" AND EXISTS(SELECT 1 FROM instagram_targets i WHERE i.post_id=posts.id AND i.status='draft' AND json_array_length(i.items)=0 AND i.video IS NULL)":"";
+  const blueGuard=bluesky?" AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0)":"";
+  const instagramGuard=instagram?" AND EXISTS(SELECT 1 FROM instagram_targets i WHERE i.post_id=posts.id AND i.status='draft' AND json_array_length(i.items)=0)":"";
   const update=db.prepare(
     "UPDATE posts SET video=CASE WHEN ? OR (? AND tiktok_images IS NULL) THEN ? ELSE video END, "+
     "tiktok_video=CASE WHEN ? AND tiktok_images IS NOT NULL THEN ? ELSE tiktok_video END, updated_at=? "+
     "WHERE id=? AND updated_at=? AND approved_at IS NULL AND status IN ('draft','rejected') "+
-    (facebook?" AND facebook_enabled=1 AND json_array_length(images)=0 AND video IS NULL":"")+
-    (tiktok?" AND tiktok_enabled=1 AND ((tiktok_images IS NULL AND json_array_length(images)=0 AND video IS NULL) OR "+
-      "(tiktok_images IS NOT NULL AND json_array_length(tiktok_images)=0 AND tiktok_video IS NULL))":"")+
+    (facebook?" AND facebook_enabled=1 AND json_array_length(images)=0":"")+
+    (tiktok?" AND tiktok_enabled=1 AND ((tiktok_images IS NULL AND json_array_length(images)=0) OR "+
+      "(tiktok_images IS NOT NULL AND json_array_length(tiktok_images)=0))":"")+
     blueGuard+instagramGuard
   ).bind(facebook?1:0,tiktok?1:0,reference,tiktok?1:0,reference,version,id,expectedVersion);
   const mutations=[update];
   if(bluesky)mutations.push(db.prepare(
     "UPDATE bluesky_targets SET video=json_object('url',?,'alt',?) WHERE post_id=? "+
-    "AND status='draft' AND json_array_length(images)=0 AND video IS NULL "+
+    "AND status='draft' AND json_array_length(images)=0 "+
     "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
   ).bind(reference,alt.trim(),id,id,version));
   if(instagram)mutations.push(db.prepare(
     "UPDATE instagram_targets SET video=? WHERE post_id=? "+
-    "AND status='draft' AND json_array_length(items)=0 AND video IS NULL "+
+    "AND status='draft' AND json_array_length(items)=0 "+
     "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
   ).bind(reference,id,id,version));
   const result=await db.batch(mutations);
