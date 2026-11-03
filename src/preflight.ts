@@ -6,7 +6,9 @@
 import {esc} from "./html.ts";
 import type {Post} from "./db.ts";
 import {tiktokMedia} from "./db.ts";
-import {countHashtags,INSTAGRAM_HASHTAG_MAX} from "./instagram.ts";
+import {countHashtags} from "./instagram.ts";
+/** Instagram app guidance since December 2025; the developer API still lists 30. */
+export const INSTAGRAM_EDITORIAL_HASHTAGS=5;
 import {mediaLooksPending} from "./validate.ts";
 
 export type ReviewPlatform="facebook"|"bluesky"|"tiktok"|"instagram";
@@ -58,8 +60,9 @@ function scan(platform:ReviewPlatform,label:string,caption:string,opts:{
       note("No search phrase is recorded for this draft. Confirm the opening line contains your intended search terms.");
     }
   }
-  if(platform==="instagram"&&hashtags.length>INSTAGRAM_HASHTAG_MAX)
-    warn("Instagram allows at most "+INSTAGRAM_HASHTAG_MAX+" hashtags; found "+hashtags.length+".");
+  if(platform==="instagram"&&hashtags.length>INSTAGRAM_EDITORIAL_HASHTAGS)
+    warn("Instagram app guidance is at most "+INSTAGRAM_EDITORIAL_HASHTAGS+
+      " hashtags; found "+hashtags.length+". The publishing API has a separate documented limit.");
   if(!caption.trim())note("No caption is saved for this platform.");
   return {platform,label,opening,previewCharacters:n,captionLength:caption.length,
     hashtagCount:hashtags.length,findings};
