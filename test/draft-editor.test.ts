@@ -157,6 +157,52 @@ test("TikTok uses a public title and gets a separate image gallery after late ac
   assert.deepEqual(restored.tiktok_images,p.images);
 });
 
+test("TikTok copies an existing Facebook video without changing Facebook or publishing",async()=>{
+  const facebookVideo="https://raw.githubusercontent.com/GSGrimoire/GSImageLibrary/main/videos/creature.mp4";
+  const p=await createPost(db,{
+    message:"Video of a creature",label:"Internal only",images:[],video:facebookVideo,
+    tiktok_images:[IMG(5),IMG(6)],tiktok_video:null,tiktok_enabled:true,facebook_enabled:true,
+    created_by:"test",scheduled_at:null,bluesky:null,
+  });
+  const page=await (await get("/post/"+p.id)).text();
+  assert.match(page,/id="tt-copy-fb-video"/,"independent TikTok drafts offer copying a Facebook video");
+  assert.match(page,/name="tt_copy_fb" id="tt-copy-fb-flag" value="0"/,
+    "the copy action exists even when Facebook has no photos");
+  assert.doesNotMatch(page,/id="tt-copy-fb"/,"no Facebook photos, so photo-copy option is absent");
+  const js=await (await get("/draft-editor.js")).text();
+  assert.match(js,/tt-copy-fb-video/);
+  assert.match(js,/confirm\\("Replace TikTok photos or video with the Facebook video\\?/,
+    "the video-copy action requires explicit confirmation before saving");
+
+  const response=await call("/post/"+p.id+"/save",{
+    ...baseSave(p),p_tiktok:"1",tt_copy_fb:"1",
+  });
+  assert.equal(response.status,200,await response.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.video,facebookVideo,"Facebook video must remain unchanged");
+  assert.deepEqual(saved.images,[],"Facebook gallery must remain unchanged");
+  assert.deepEqual(saved.tiktok_images,[],"video replaces TikTok-only photos");
+  assert.equal(saved.tiktok_video,facebookVideo,"TikTok gets its own video reference");
+  assert.equal(saved.status,"draft");
+  assert.equal(saved.approved_at,null,"saving/copying video must never approve or publish");
+  assert.equal(saved.label,"Internal only");
+
+  const stale=await call("/post/"+p.id+"/save",{
+    ...baseSave(p),p_tiktok:"1",tt_copy_fb:"1",
+  });
+  assert.equal(stale.status,409,"version fence still applies to media copy");
+  const now=(await getPost(db,p.id))!;
+  assert.equal(now.updated_at,saved.updated_at);
+
+  const paused=await call("/post/"+p.id+"/save",{...baseSave(now),p_facebook:"1"});
+  assert.equal(paused.status,200,await paused.clone().text());
+  const inactive=(await getPost(db,p.id))!;
+  assert.equal(inactive.tiktok_enabled,false);
+  assert.equal(inactive.tiktok_video,facebookVideo,"disabled TikTok retains video without being published");
+  assert.equal(inactive.video,facebookVideo);
+  assert.equal(inactive.approved_at,null);
+});
+
 test("Save needs no PIN, changes text, name, time and platforms, and publishes nothing",async()=>{
   const p=await draft();
   const when="2031-05-04T18:30";
