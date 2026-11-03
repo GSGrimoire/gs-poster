@@ -68,6 +68,8 @@ test("the draft page is one editor: Save button, chosen platforms only, no dupli
   assert.doesNotMatch(html,/Edit unreleased captions/);
   assert.doesNotMatch(html,/name="bs_image_0"/,"no raw Bluesky URL fields");
   assert.match(html,/data-platform="tiktok" hidden/);
+  assert.ok(html.includes(".targets > .target[hidden],.readiness > li[hidden]{display:none!important}"),
+    "inactive cards and readiness entries must stay hidden despite display:grid/flex rules");
   assert.equal((await get("/draft-editor.js")).status,200);
 });
 
@@ -138,6 +140,21 @@ test("TikTok uses a public title and gets a separate image gallery after late ac
   const js=await (await get("/draft-editor.js")).text();
   assert.match(js,/dragstart/);
   assert.match(js,/ig-drag/);
+  const saved=(await getPost(db,p.id))!;
+  const disabled=await call("/post/"+p.id+"/save",{...baseSave(saved)});
+  assert.equal(disabled.status,200,await disabled.clone().text());
+  const off=(await getPost(db,p.id))!;
+  assert.equal(off.tiktok_enabled,false);
+  assert.equal(off.tiktok_title,"The Goblin Gallery");
+  assert.deepEqual(off.tiktok_images,p.images,"deselection must keep TikTok photos");
+  assert.doesNotMatch(await (await get("/post/"+p.id)).text(),/name="target_tiktok"/,
+    "deselected TikTok must not be offered for approval");
+  const enabled=await call("/post/"+p.id+"/save",{...baseSave(off),p_tiktok:"1"});
+  assert.equal(enabled.status,200,await enabled.clone().text());
+  const restored=(await getPost(db,p.id))!;
+  assert.equal(restored.tiktok_enabled,true);
+  assert.equal(restored.tiktok_title,"The Goblin Gallery");
+  assert.deepEqual(restored.tiktok_images,p.images);
 });
 
 test("Save needs no PIN, changes text, name, time and platforms, and publishes nothing",async()=>{
