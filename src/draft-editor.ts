@@ -118,8 +118,10 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     let bsImages = ordered(bsAll, savedBluesky ? bsOrder ?? [] : [], form, "remove_bs_");
     const copyFbVideo=form.get("bs_copy_fb_video")==="1";
     if(copyFbVideo && !cur.video)errors.push("Facebook has no video to copy to Bluesky.");
+    const copiedAlt=text(form,"bs_copy_video_alt",base.video?.alt??"").trim();
+    if(copyFbVideo && !copiedAlt)errors.push("Describe the Facebook video before copying it to Bluesky.");
     const bsVideo=copyFbVideo && cur.video
-      ? {url:cur.video,alt:text(form,"bs_video_alt",base.video?.alt??"").trim()}
+      ? {url:cur.video,alt:copiedAlt}
       : base.video && form.get("remove_bs_video")!=="1"
         ? {url:base.video.url,alt:text(form,"bs_video_alt",base.video.alt).trim()} : null;
     if(copyFbVideo && cur.video)bsImages=[];
@@ -545,7 +547,7 @@ export function renderDraftEditor(v: EditorView): string {
             <button type="button" class="copy-cap" data-copy-to="ed-bs" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-bs" name="bs_caption" data-max="${BSKY_TEXT_LIMIT}" data-graphemes="1" data-caption="bluesky" placeholder="A short companion caption">${esc(bs?.caption ?? "")}</textarea>
           <div class="field-meter"></div>
-          ${p.video ? `<div class="row"><button type="button" id="bs-copy-fb-video">Use Facebook video for Bluesky</button><input type="hidden" name="bs_copy_fb_video" id="bs-copy-fb-video-flag" value="0"></div>` : ""}
+          ${p.video ? `<div class="row"><button type="button" id="bs-copy-fb-video">Use Facebook video for Bluesky</button><input type="hidden" name="bs_copy_fb_video" id="bs-copy-fb-video-flag" value="0"></div><label for="bs-copy-video-alt">Video description for Bluesky when copying<input id="bs-copy-video-alt" type="text" name="bs_copy_video_alt" maxlength="1000" value="${esc(bs?.video?.alt??"")}" placeholder="Describe the action in the video"></label>` : ""}
           <div class="tiles" data-media="bluesky" data-order="order_bs">${bsMedia || empty}</div>
           ${on.bluesky && bs?.video?.url && parseGitHubUrl(bs.video.url) ? `<div class="row"><button type="button" data-prepare-video="bluesky">Prepare Bluesky video privately</button></div>` : ""}
           ${bs && !bs.video && bs.images.length > 1 ? `<input type="hidden" name="order_bs" value="${Array.from({ length: bs.images.length }, (_, i) => i).join(",")}">` : ""}
