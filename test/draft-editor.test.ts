@@ -62,6 +62,8 @@ test("the draft page is one editor: Save button, chosen platforms only, no dupli
   const html=await res.text();
   assert.match(html,/id="draft-editor"/);
   assert.match(html,/Save changes/);
+  assert.match(html,/id="preflight-panel"/);
+  assert.match(html,/id="preflight-stale"/);
   assert.match(html,/\+ Add photos/);
   assert.match(html,/\+ Add video/);
   assert.match(html,/Approve and post now/);
