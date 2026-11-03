@@ -22,7 +22,7 @@ const MP4=Uint8Array.from([0,0,0,20,102,116,121,112,105,115,111,109,0,0,0,0,0,0,
 const BODY=Uint8Array.from(MP4);
 let mf:Miniflare, db:D1Database, bucket:R2Bucket;
 let requests:string[]=[];
-let malicious=false,oversize=false;
+let malicious=false,oversize=false,redirectVideo=false;
 before(async()=>{
   const output=await build({entryPoints:["test/fixtures/web-entry.ts"],bundle:true,format:"esm",
     platform:"neutral",target:"es2022",write:false,external:["cloudflare:*","node:*"],
@@ -32,6 +32,8 @@ before(async()=>{
     outboundService:async(req:Request)=>{
       requests.push(req.url);
       if(![FB,TT,BS,IG].includes(req.url))return new Response("Blocked",{status:599});
+      if(redirectVideo && req.url===TT)
+        return new Response(null,{status:302,headers:{Location:"https://evil.example/redirect.mp4"}});
       if(oversize)return new Response(MP4,{status:200,headers:{"Content-Length":String(20_000_001)}});
       return new Response(malicious?new Uint8Array([1,2,3,4]):MP4,{status:200});
     },bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",TIMEZONE:"Europe/Copenhagen"}}));
@@ -40,7 +42,7 @@ before(async()=>{
   await ensureSchema(db);
 });
 after(async()=>{await mf?.dispose();});
-function clear(){requests=[];malicious=false;oversize=false;}
+function clear(){requests=[];malicious=false;oversize=false;redirectVideo=false;}
 async function auth(){
   const raw=await makeSession(signer,"GSGrimoire");
   const csrf=await csrfToken(signer,{login:"GSGrimoire",raw} as Session);
@@ -247,4 +249,41 @@ test("audit failures are visible without retrying an already saved video",async(
     assert.match(body.audit_warning??"",/activity log could not be recorded/);
     assert.equal((await getPost(db,p.id))!.tiktok_video,body.reference);
   }finally{await db.prepare("DROP TRIGGER IF EXISTS block_prepared_video_audit").run();}
+});
+
+test("video fetch rejects redirects without forwarding data to a different host",async()=>{
+  clear();redirectVideo=true;
+  const p=await makeDraft();
+  const response=await request(p.id,"import-video",{target:"tiktok",expected_updated_at:p.updated_at});
+  assert.notEqual(response.status,200);
+  assert.deepEqual(requests,[TT],"only the originally saved GitHub URL was requested");
+  assert.equal((await getPost(db,p.id))!.tiktok_video,TT);
+});
+
+test("Instagram-only attachment survives an activity log failure with a visible warning",async()=>{
+  clear();
+  const p=await createPost(db,{message:"Single reel",images:[],facebook_enabled:false,tiktok_enabled:false,
+    scheduled_at:null,created_by:"test",bluesky:null});
+  const version=(await saveEditorDraft(db,p.id,p.updated_at,next(p),null,
+    {caption:"Reel",frame:"4:5",items:[]}))!;
+  const env={DB:db,UPLOADS:bucket} as Env;
+  const grant=await createUpload(env,ORIGIN,{filename:"video.mp4",actor:"GSGrimoire"});
+  const put=await handleUploadPut(new Request(grant.upload_url,{
+    method:"PUT",headers:{"Content-Length":String(MP4.length)},body:MP4,
+  }),env);
+  assert.equal(put.status,200);
+  await db.prepare("CREATE TRIGGER block_video_attach_audit BEFORE INSERT ON audit "+
+    "WHEN NEW.action='draft-video-attached' "+
+    "BEGIN SELECT RAISE(FAIL,'audit unavailable'); END").run();
+  try {
+    const attached=await request(p.id,"attach-video",{
+      reference:grant.reference,expected_updated_at:version,instagram:true,
+    });
+    assert.equal(attached.status,200,await attached.clone().text());
+    const body=await attached.json() as {updated_at:string;audit_warning?:string};
+    assert.match(body.audit_warning??"",/activity log could not be recorded/);
+    const saved=(await getPost(db,p.id))!;
+    assert.equal(saved.instagram?.video,grant.reference);
+    assert.equal(saved.approved_at,null);
+  }finally{await db.prepare("DROP TRIGGER IF EXISTS block_video_attach_audit").run();}
 });
