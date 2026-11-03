@@ -73,6 +73,7 @@ interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled"
   ig_caption?: string | null;
   ig_frame?: string | null;
   ig_items?: string | null;
+  ig_video?: string | null;
   ig_status?: string | null;
   facebook_enabled: number;
   tiktok_enabled: number;
@@ -95,7 +96,7 @@ const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
  b.video AS bs_video, b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
  b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
  b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error,
- i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items, i.status AS ig_status
+ i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items, i.video AS ig_video, i.status AS ig_status
  FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id
  LEFT JOIN instagram_targets i ON p.id = i.post_id`;
 
@@ -161,6 +162,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       caption TEXT NOT NULL,
       frame TEXT NOT NULL,
       items TEXT NOT NULL DEFAULT '[]',
+      video TEXT,
       status TEXT NOT NULL DEFAULT 'draft'
     )`),
   ]);
@@ -186,6 +188,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
     }
   }
+  const igColumns = await db.prepare("PRAGMA table_info(instagram_targets)").all<{name:string}>();
+  if (!igColumns.results.some(column => column.name === "video")) {
+    try { await db.prepare("ALTER TABLE instagram_targets ADD COLUMN video TEXT").run(); }
+    catch (error) { if (!/duplicate column name/i.test(String(error))) throw error; }
+  }
   schemaReady = true;
 }
 
@@ -201,6 +208,7 @@ function fromRow(r: Row): Post {
   const instagram: InstagramDraft | null = r.ig_caption == null ? null : {
     caption: r.ig_caption, frame: (r.ig_frame ?? "4:5") as InstagramDraft["frame"],
     items: JSON.parse(r.ig_items || "[]"),
+    ...(r.ig_video ? { video: r.ig_video } : {}),
   };
   return {
     ...r,
@@ -374,13 +382,14 @@ export function tiktokMedia(post:Post):{images:string[];video:string|null} {
 /** Attach video only to explicitly selected targets, without modifying other platforms. */
 export async function attachDraftVideo(
   db:D1Database,id:string,reference:string,alt:string,
-  facebook:boolean,bluesky:boolean,expectedVersion:string,tiktok=false,
+  facebook:boolean,bluesky:boolean,expectedVersion:string,tiktok=false,instagram=false,
 ):Promise<string|null> {
   await ensureSchema(db);
-  if(!facebook&&!bluesky&&!tiktok)throw Error("Select at least one platform.");
+  if(!facebook&&!bluesky&&!tiktok&&!instagram)throw Error("Select at least one platform.");
   if(bluesky&&!alt.trim())throw Error("Bluesky video requires alternative text.");
   const version=new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
   const blueGuard=bluesky?" AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND json_array_length(b.images)=0)":"";
+  const instagramGuard=instagram?" AND EXISTS(SELECT 1 FROM instagram_targets i WHERE i.post_id=posts.id AND i.status='draft' AND json_array_length(i.items)=0)":"";
   const update=db.prepare(
     "UPDATE posts SET video=CASE WHEN ? OR (? AND tiktok_images IS NULL) THEN ? ELSE video END, "+
     "tiktok_video=CASE WHEN ? AND tiktok_images IS NOT NULL THEN ? ELSE tiktok_video END, updated_at=? "+
@@ -388,7 +397,7 @@ export async function attachDraftVideo(
     (facebook?" AND facebook_enabled=1 AND json_array_length(images)=0":"")+
     (tiktok?" AND tiktok_enabled=1 AND ((tiktok_images IS NULL AND json_array_length(images)=0) OR "+
       "(tiktok_images IS NOT NULL AND json_array_length(tiktok_images)=0))":"")+
-    blueGuard
+    blueGuard+instagramGuard
   ).bind(facebook?1:0,tiktok?1:0,reference,tiktok?1:0,reference,version,id,expectedVersion);
   const mutations=[update];
   if(bluesky)mutations.push(db.prepare(
@@ -396,8 +405,53 @@ export async function attachDraftVideo(
     "AND status='draft' AND json_array_length(images)=0 "+
     "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
   ).bind(reference,alt.trim(),id,id,version));
+  if(instagram)mutations.push(db.prepare(
+    "UPDATE instagram_targets SET video=? WHERE post_id=? "+
+    "AND status='draft' AND json_array_length(items)=0 "+
+    "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
+  ).bind(reference,id,id,version));
   const result=await db.batch(mutations);
-  return result[0].meta.changes===1&&(!bluesky||result[1].meta.changes===1)?version:null;
+  return result.every((r)=>r.meta.changes===1)?version:null;
+}
+
+/**
+ * Replace a saved GitHub-linked MP4 with a verified private upload, only
+ * for the indicated target. Keep all captions, original media and approvals.
+ * The original URL and post version fence each replacement.
+ */
+export async function replacePreparedVideoReference(
+  db:D1Database,id:string,target:"tiktok"|"bluesky"|"instagram",
+  source:string,reference:string,expectedVersion:string,
+):Promise<string|null> {
+  if(!/^upload:\/\/[a-f0-9]{32}\.mp4$/.test(reference) || !Number.isFinite(Date.parse(expectedVersion)))
+    return null;
+  await ensureSchema(db);
+  const next=new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
+  const common="id=? AND updated_at=? AND approved_at IS NULL AND status IN ('draft','rejected')";
+  if(target==="tiktok"){
+    const result=await db.prepare("UPDATE posts SET tiktok_video=?,updated_at=? WHERE "+common+
+      " AND tiktok_enabled=1 AND tiktok_images IS NOT NULL AND json_array_length(tiktok_images)=0 AND tiktok_video=?")
+      .bind(reference,next,id,expectedVersion,source).run();
+    return result.meta.changes===1?next:null;
+  }
+  const table=target==="bluesky"?"bluesky_targets":"instagram_targets";
+  const sourceGuard=target==="bluesky"?"json_extract(t.video,'$.url')=?":"t.video=?";
+  const targetGuard=target==="bluesky"?" AND json_array_length(t.images)=0":" AND json_array_length(t.items)=0";
+  const post= db.prepare("UPDATE posts SET updated_at=? WHERE "+common+
+    " AND EXISTS(SELECT 1 FROM "+table+" t WHERE t.post_id=posts.id AND t.status='draft'"+
+    targetGuard+" AND "+sourceGuard+")")
+    .bind(next,id,expectedVersion,source);
+  const update=target==="bluesky"
+    ? db.prepare("UPDATE bluesky_targets SET video=json_set(video,'$.url',?) "+
+      "WHERE post_id=? AND status='draft' AND json_array_length(images)=0 "+
+      "AND json_extract(video,'$.url')=? AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)")
+      .bind(reference,id,source,id,next)
+    : db.prepare("UPDATE instagram_targets SET video=? "+
+      "WHERE post_id=? AND status='draft' AND json_array_length(items)=0 "+
+      "AND video=? AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)")
+      .bind(reference,id,source,id,next);
+  const result=await db.batch([post,update]);
+  return result[0].meta.changes===1 && result[1].meta.changes===1?next:null;
 }
 
 /** Append a photo only to each selected platform's gallery, preserving order. */
@@ -543,10 +597,12 @@ export async function saveEditorDraft(
           bluesky.patreon ? JSON.stringify(bluesky.patreon) : null, next.facebook_enabled ? 1 : 0, (next.bluesky_enabled ?? !!bluesky) ? "draft" : "disabled", id, version)
       : db.prepare(`DELETE FROM bluesky_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version),
   ];
-  if (instagram) statements.push(db.prepare(`INSERT INTO instagram_targets (post_id, caption, frame, items, status)
-      SELECT ?, ?, ?, ?, ? WHERE ${fenced}
-      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items, status = excluded.status`)
-    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), (next.instagram_enabled ?? !!instagram) ? "draft" : "disabled", id, version));
+  if (instagram) statements.push(db.prepare(`INSERT INTO instagram_targets (post_id, caption, frame, items, video, status)
+      SELECT ?, ?, ?, ?, ?, ? WHERE ${fenced}
+      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, frame = excluded.frame, items = excluded.items,
+        video = excluded.video, status = excluded.status`)
+    .bind(id, instagram.caption, instagram.frame, JSON.stringify(instagram.items), instagram.video ?? null,
+      (next.instagram_enabled ?? !!instagram) ? "draft" : "disabled", id, version));
   else if (instagram === null) statements.push(
     db.prepare(`DELETE FROM instagram_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version));
   const results = await db.batch(statements);

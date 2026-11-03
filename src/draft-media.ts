@@ -32,7 +32,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div class="row"><button type="button" class="primary" id="media-upload-submit" disabled>Upload and attach images</button></div>
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
   </details>
-  <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video ? "+ Replace video" : "+ Add video"}</summary>
+  <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video || post.instagram?.video ? "+ Replace video" : "+ Add video"}</summary>
   <p class="hint">One MP4, up to 20 MB. A platform can have photos or a video, not both. Nothing is published.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
@@ -44,6 +44,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
     <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.images.length ? "checked" : "disabled"}>Facebook</label>
     <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
     <label><input type="checkbox" id="video-tiktok" ${post.tiktok_enabled && !tt.images.length ? "checked" : "disabled"}>TikTok inbox</label>
+    <label><input type="checkbox" id="video-instagram" ${post.instagram && !post.instagram.items.length ? "checked" : "disabled"}>Instagram Reel download</label>
   </div>
   <label for="video-alt">Bluesky video alternative text</label>
   <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
@@ -80,6 +81,7 @@ export const DRAFT_MEDIA_JS = `
   const videoFacebook = document.getElementById("video-facebook");
   const videoBluesky = document.getElementById("video-bluesky");
   const videoTikTok = document.getElementById("video-tiktok");
+  const videoInstagram = document.getElementById("video-instagram");
   const videoAlt = document.getElementById("video-alt");
   let selectedVideo = null;
   let previewUrl = null;
@@ -93,7 +95,7 @@ export const DRAFT_MEDIA_JS = `
     previewUrl = URL.createObjectURL(file);
     videoPreview.src = previewUrl;videoPreview.hidden = false;
     videoName.textContent = file.name+" ("+(file.size/1048576).toFixed(1)+" MB)";
-    videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled && videoTikTok.disabled;
+    videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled && videoTikTok.disabled && videoInstagram.disabled;
     videoStatus.textContent = "";
   }
   videoDrop.addEventListener("click", () => videoInput.click());
@@ -240,11 +242,38 @@ export const DRAFT_MEDIA_JS = `
       if (completed === 0) importButton.disabled = false;
     }
   });
+  document.querySelectorAll("[data-prepare-video]").forEach(button=>{
+    button.addEventListener("click",async()=>{
+      if(running)return;
+      const target=button.dataset.prepareVideo;
+      const statusLine=document.createElement("p");
+      statusLine.className="hint";
+      statusLine.setAttribute("role","status");
+      button.parentElement.insertAdjacentElement("afterend",statusLine);
+      if(unsaved()){
+        statusLine.textContent="Save the draft before preparing its linked video.";
+        return;
+      }
+      running=window.gsMediaBusy=true;
+      button.disabled=true;
+      try{
+        statusLine.textContent="Importing and verifying the linked video in private storage...";
+        const result=await api("import-video",{target,expected_updated_at:panel.dataset.version});
+        panel.dataset.version=result.updated_at;
+        statusLine.textContent=result.audit_warning||"Video privately prepared. Refreshing the editor...";
+        if(!result.audit_warning)location.reload();
+      }catch(e){
+        statusLine.textContent="Video could not be prepared: "+(e instanceof Error?e.message:String(e))+
+          ". Reload before retrying if the result was uncertain.";
+        button.disabled=false;
+      }finally{running=window.gsMediaBusy=false;}
+    });
+  });
   videoSubmit.addEventListener("click",async()=>{
     if(running || !selectedVideo)return;
     if(unsaved()){videoStatus.textContent="Save your text changes first, then add the video.";return;}
-    const facebook=!!videoFacebook.checked,bluesky=!!videoBluesky.checked,tiktok=!!videoTikTok.checked;
-    if (!facebook && !bluesky && !tiktok) {videoStatus.textContent="Choose at least one available platform.";return;}
+    const facebook=!!videoFacebook.checked,bluesky=!!videoBluesky.checked,tiktok=!!videoTikTok.checked,instagram=!!videoInstagram.checked;
+    if (!facebook && !bluesky && !tiktok && !instagram) {videoStatus.textContent="Choose at least one available platform.";return;}
     const alt=videoAlt.value.trim();
     if (bluesky && !alt) {videoStatus.textContent="Bluesky requires alternative text.";return;}
     running=window.gsMediaBusy=true;videoSubmit.disabled=true;
@@ -257,11 +286,15 @@ export const DRAFT_MEDIA_JS = `
       if (!uploaded.ok || !body.ok)throw new Error(body.error || "Video upload failed.");
       videoStatus.textContent="Attaching video to the draft...";
       const saved=await api("attach-video",{
-        reference:body.reference,alt,facebook,bluesky,tiktok,expected_updated_at:panel.dataset.version
+        reference:body.reference,alt,facebook,bluesky,tiktok,instagram,expected_updated_at:panel.dataset.version
       });
       panel.dataset.version=saved.updated_at;
-      videoStatus.textContent="Video attached. Refreshing...";
-      location.reload();
+      if(saved.audit_warning){
+        videoStatus.textContent=saved.audit_warning+" The video is attached. Reload the page to inspect it.";
+      }else{
+        videoStatus.textContent="Video attached. Refreshing...";
+        location.reload();
+      }
     } catch(error) {
       videoStatus.textContent="Could not attach: "+(error instanceof Error?error.message:String(error));
       videoSubmit.disabled=false;

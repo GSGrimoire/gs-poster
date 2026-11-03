@@ -43,6 +43,8 @@ export interface InstagramDraft {
   caption: string;
   frame: InstagramFrame;
   items: InstagramItem[];
+  /** Optional Reel source: an existing post MP4 or a private Instagram-only upload. */
+  video?: string | null;
 }
 
 export interface PlanRect { x: number; y: number; w: number; h: number }
@@ -85,10 +87,12 @@ export function countMentions(text: string): number {
 }
 
 /** Hard problems that stop a save. Showing them live is the editor's job. */
-export function instagramSaveErrors(d: InstagramDraft, allowedUrls: Set<string>): string[] {
+export function instagramSaveErrors(d: InstagramDraft, allowedUrls: Set<string>, allowedVideos: Set<string> = new Set()): string[] {
   const errors: string[] = [];
   if (!INSTAGRAM_FRAMES.includes(d.frame)) errors.push("Choose an Instagram frame: 4:5, 1:1 or 1.91:1.");
   if (d.items.length > INSTAGRAM_MAX_ITEMS) errors.push(`Instagram carousels hold at most ${INSTAGRAM_MAX_ITEMS} photos.`);
+  if (d.video && d.items.length) errors.push("Choose either Instagram photos or a Reel video, not both.");
+  if (d.video && !allowedVideos.has(d.video)) errors.push("The Instagram video must already belong to this post.");
   if (d.caption.length > INSTAGRAM_CAPTION_MAX) errors.push(`The Instagram caption is ${d.caption.length} characters; Instagram allows ${INSTAGRAM_CAPTION_MAX}.`);
   if (countHashtags(d.caption) > INSTAGRAM_HASHTAG_MAX) errors.push(`Instagram allows at most ${INSTAGRAM_HASHTAG_MAX} hashtags.`);
   if (countMentions(d.caption) > INSTAGRAM_MENTION_MAX) errors.push(`Instagram allows at most ${INSTAGRAM_MENTION_MAX} @ tags.`);

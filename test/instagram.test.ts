@@ -10,7 +10,7 @@ import {INSTAGRAM_PLAN_JS,instagramPlan,instagramSaveErrors,readInstagramItems,r
   countHashtags,defaultItem,type InstagramDraft} from "../src/instagram.ts";
 import {createPost,deletePost,ensureSchema,getPost,saveEditorDraft,type EditorDraft} from "../src/db.ts";
 import {parseEditorForm,postPhotos} from "../src/draft-editor.ts";
-import {makeSession,SESSION_COOKIE} from "../src/session.ts";
+import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
 import type {Env} from "../src/env.ts";
 
 const ORIGIN="https://gs-poster.test";
@@ -181,6 +181,78 @@ test("editor form: Instagram may use this post's photos only, and may be the onl
   assert.match(garbled.errors.join(" "),/Could not read the Instagram/);
   const off=parseEditorForm(form([],{p_instagram:"0",p_facebook:"1"}),p,"Europe/Copenhagen");
   assert.equal(off.instagram,null,"turning Instagram off removes the target on save");
+});
+
+test("paused Instagram rejects an untrusted Reel reference and cannot bootstrap ownership",async()=>{
+  const p=(await getPost(db,(await draft()).id))!;
+  const forged="upload://"+"c".repeat(32)+".mp4";
+  const unrelated="https://raw.githubusercontent.com/GSGrimoire/Other/main/missing.mp4";
+  const paused={...p,instagram:null,instagram_paused:{
+    caption:"Cave",frame:"4:5" as const,items:[],
+  }};
+  const form=(source:string,enabled:boolean)=>{
+    const f=new FormData();
+    for(const [key,value] of Object.entries({
+      p_facebook:"1",p_instagram:enabled?"1":"0",ig_caption:"Cave",
+      ig_frame:"4:5",ig_items:"[]",ig_video_source:source,
+    }))f.set(key,value);
+    return f;
+  };
+  for(const source of [forged,unrelated]){
+    const off=parseEditorForm(form(source,false),paused,"Europe/Copenhagen");
+    assert.match(off.errors.join(" "),/Instagram video must already belong to this post/,
+      "a paused target must not accept an arbitrary MP4 or foreign private upload");
+    assert.equal(off.instagram,undefined,"invalid form has no savable Instagram draft");
+
+    const on=parseEditorForm(form(source,true),paused,"Europe/Copenhagen");
+    assert.match(on.errors.join(" "),/Instagram video must already belong to this post/,
+      "an active target must enforce the same source restriction");
+  }
+  // Existing Facebook, TikTok and Bluesky targets may supply a video.
+  const fb="https://raw.githubusercontent.com/GSGrimoire/Images/main/video.mp4";
+  const fromFacebook={...paused,video:fb};
+  const selected=parseEditorForm(form(fb,false),fromFacebook,"Europe/Copenhagen");
+  assert.deepEqual(selected.errors,[]);
+  assert.equal(selected.instagram?.video,fb);
+  // A previous Instagram-only verified upload remains editable while paused.
+  // This exception preserves the exact stored value, not a new caller value.
+  const trusted={...paused,instagram_paused:{...paused.instagram_paused,
+    video:"upload://"+"d".repeat(32)+".mp4"}};
+  assert.deepEqual(parseEditorForm(form(trusted.instagram_paused.video,false),trusted,
+    "Europe/Copenhagen").errors,[]);
+  assert.match(parseEditorForm(form(forged,false),trusted,
+    "Europe/Copenhagen").errors.join(" "),/Instagram video must already belong/);
+});
+
+test("signed-in save cannot persist a forged video into a paused Instagram target",async()=>{
+  const p=await draft();
+  const version=await saveEditorDraft(db,p.id,p.updated_at,{
+    ...editorDraft(p),instagram_enabled:false,
+  },null,{caption:"Paused",frame:"4:5",items:[]});
+  assert.ok(version);
+  const paused=(await getPost(db,p.id))!;
+  assert.equal(paused.instagram,null);
+  assert.ok(paused.instagram_paused);
+  const signer={COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire"} as Env;
+  const raw=await makeSession(signer,"GSGrimoire");
+  const csrf=await csrfToken(signer,{login:"GSGrimoire",raw} as Session);
+  const malicious="upload://"+"e".repeat(32)+".mp4";
+  const body=new URLSearchParams({
+    csrf,expected_updated_at:version!,p_facebook:"1",
+    ig_caption:"Paused",ig_frame:"4:5",ig_items:"[]",ig_video_source:malicious,
+  });
+  const response=await mf.dispatchFetch(ORIGIN+"/post/"+p.id+"/save",{
+    method:"POST",
+    headers:{Origin:ORIGIN,"Sec-Fetch-Site":"same-origin",
+      Cookie:SESSION_COOKIE+"="+raw,"X-GS-Autosave":"1",Accept:"application/json",
+      "Content-Type":"application/x-www-form-urlencoded"},
+    body:body.toString(),redirect:"manual",
+  });
+  assert.equal(response.status,400,await response.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.updated_at,version,"failed validation must not write a new draft version");
+  assert.equal(saved.instagram_paused?.video,undefined,"paused target remains free of the forged private reference");
+  assert.equal(saved.approved_at,null,"no publish or approval side effects");
 });
 
 // ------------------------------------------------------------ render route

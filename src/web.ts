@@ -23,6 +23,7 @@ import { DRAFT_EDITOR_JS, parseEditorForm, postPhotos, renderDraftEditor } from 
 import { renderInstagram } from "./instagram.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { importTikTokLinkedImage, TikTokImportError } from "./tiktok-import.ts";
+import { prepareLinkedVideo, VideoPrepareError, type VideoPrepareTarget } from "./video-import.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
 import {
@@ -119,7 +120,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   if (path === "/new-draft.js" && req.method === "GET") return new Response(NEW_DRAFT_JS, {headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
   if (path === "/draft-editor.js" && req.method === "GET") return new Response(DRAFT_EDITOR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
-  const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video|import-tiktok-image)$/.exec(path);
+  const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video|import-tiktok-image|import-video)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   // Server clock and schedule rules for the editor's "Earliest valid time" button (#61). Read-only.
@@ -140,8 +141,10 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     if (!action && req.method === "GET") return postPage(env, session, id, {});
     if (action && req.method === "POST") return postAction(req, env, session, id, action);
   }
-  const video = /^\/video\/(p_[a-z0-9]+)\/(facebook|bluesky|tiktok)$/.exec(path);
+  const video = /^\/video\/(p_[a-z0-9]+)\/(facebook|bluesky|tiktok|instagram)$/.exec(path);
   if (video && req.method === "GET") return videoProxy(req,env,video[1],video[2]);
+  const igVideo = /^\/instagram\/(p_[a-z0-9]+)\/video\.mp4$/.exec(path);
+  if (igVideo && req.method === "GET") return instagramVideo(env,igVideo[1]);
   const igPhoto = /^\/instagram\/(p_[a-z0-9]+)\/(\d+)\.jpg$/.exec(path);
   if (igPhoto && req.method === "GET") return instagramPhoto(env, igPhoto[1], Number(igPhoto[2]));
   const media = /^\/media\/(p_[a-z0-9]+)\/(\d+)$/.exec(path);
@@ -432,7 +435,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
   const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="Photo ${i + 1}">`).join("")}</div>${p.images.length > 12 ? `<details class="card"><summary>Review remaining ${p.images.length - 12} photos in order</summary><div class="thumbs">${p.images.slice(12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i + 12}" alt="Photo ${i + 13}">`).join("")}</div></details>` : ""}` : "";
-  const videoPreview = (target:"facebook"|"bluesky"|"tiktok") =>
+  const videoPreview = (target:"facebook"|"bluesky"|"tiktok"|"instagram") =>
     '<video controls playsinline preload="metadata" style="max-width:100%;max-height:440px;border-radius:8px" src="/video/' +
     esc(p.id) + '/' + target + '"></video>';
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
@@ -680,6 +683,13 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <h3>TikTok</h3><p class="caption">${esc(p.tiktok_caption ?? p.message)}</p>
         ${ttMedia.video?videoPreview("tiktok"):ttThumbs}
         <p class="hint">${ttMedia.video?"Video":ttMedia.images.length+" images"} · manual transfer only</p></section>`:""}
+      ${p.instagram ? `<section class="platform-preview" aria-label="Instagram preparation">
+        <h3>Instagram (manual)</h3><p class="caption">${esc(p.instagram.caption)}</p>
+        ${p.instagram.video ? videoPreview("instagram")+
+          `<p><a href="/instagram/${p.id}/video.mp4" download="instagram-${p.id}-reel.mp4">Download MP4 Reel</a></p>
+          <p class="hint">Original MP4, not transcoded. Verify 9:16, H.264 and audio before posting.</p>`
+          : p.instagram.items.map((_,i)=>`<a href="/instagram/${p.id}/${i}.jpg" download>Photo ${i+1}</a>`).join(" · ")}
+        <p class="hint">Nothing is published to Instagram from GS Poster.</p></section>` : ""}
       ${bs ? `<section class="platform-preview" aria-label="Bluesky review">
         <h3>Bluesky</h3><p class="caption">${esc(bs.caption)}</p>
         ${bs.video?videoPreview("bluesky"):bsThumbs}
@@ -713,6 +723,18 @@ async function draftImageAction(
   if (!["draft","rejected"].includes(current.status) || current.approved_at)
     return fail("Media cannot be changed after approval.",409);
   try {
+    if (action === "import-video") {
+      const target=input.target;
+      if (target!=="tiktok"&&target!=="bluesky"&&target!=="instagram")
+        return fail("Choose TikTok, Bluesky or Instagram video.");
+      const expected=typeof input.expected_updated_at==="string"?input.expected_updated_at:"";
+      const result=await prepareLinkedVideo(env,id,target as VideoPrepareTarget,
+        expected,session.login,new URL(req.url).origin);
+      const logged=await audit(env.DB,session.login,"private-video-prepared",id,target).then(()=>true,()=>false);
+      return Response.json({ok:true,...result,
+        ...(logged?{}:{audit_warning:"Video imported, but the activity log could not be recorded."}),
+      },{headers:{"Cache-Control":"no-store"}});
+    }
     if (action === "import-tiktok-image") {
       if (typeof input.index !== "number" || !Number.isSafeInteger(input.index))
         return fail("Select a valid TikTok photo position.");
@@ -748,8 +770,10 @@ async function draftImageAction(
       const facebook = input.facebook === true;
       const bluesky = input.bluesky === true;
       const tiktok = input.tiktok === true;
+      const instagram = input.instagram === true;
       const version = String(input.expected_updated_at || "");
-      if (!facebook && !bluesky && !tiktok) return fail("Select at least one video target.");
+      if (!facebook && !bluesky && !tiktok && !instagram) return fail("Select at least one video target.");
+      if (instagram && !current.instagram) return fail("Instagram is not a selected draft target.");
       if (tiktok && !current.tiktok_enabled) return fail("TikTok is not selected for this draft.");
       if (facebook && !current.facebook_enabled) return fail("Facebook is not selected for this draft.");
       if (bluesky && !current.bluesky) return fail("Bluesky is not selected for this draft.");
@@ -758,11 +782,14 @@ async function draftImageAction(
       if (version !== current.updated_at) return fail("The draft changed. Reload.",409);
       if (!(await isStoredOwnerVideo(env.DB,reference,session.login)))
         return fail("This private video is not stored or does not belong to your account.");
-      const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version,tiktok);
+      const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version,tiktok,instagram);
       if (!updated) return fail("A target already has media or the draft changed. Reload.",409);
-      await audit(env.DB,session.login,"draft-video-attached",id,
-        (facebook?"facebook ":"")+(bluesky?"bluesky":""));
-      return Response.json({ok:true,updated_at:updated},{headers:{"Cache-Control":"no-store"}});
+      const logged=await audit(env.DB,session.login,"draft-video-attached",id,
+        [facebook?"facebook":"",bluesky?"bluesky":"",tiktok?"tiktok":"",instagram?"instagram":""]
+          .filter(Boolean).join(" ")).then(()=>true,()=>false);
+      return Response.json({ok:true,updated_at:updated,
+        ...(logged?{}:{audit_warning:"Video attached, but the activity log could not be recorded."}),
+      },{headers:{"Cache-Control":"no-store"}});
     }
     if (action === "attach-image") {
       const reference = String(input.reference || "");
@@ -788,7 +815,7 @@ async function draftImageAction(
     }
     return fail("Unknown media action.",404);
   } catch(error) {
-    if (error instanceof TikTokImportError) return fail(error.message, error.status);
+    if (error instanceof TikTokImportError || error instanceof VideoPrepareError) return fail(error.message, error.status);
     return fail(error instanceof Error ? error.message : "Upload failed.",400);
   }
 }
@@ -1116,7 +1143,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
 /** Signed-in video preview with HTTP byte ranges for native playback. */
 async function videoProxy(req: Request, env: Env, id: string, target: string): Promise<Response> {
   const p = await getPost(env.DB,id);
-  const reference = target === "facebook" ? p?.video : target==="tiktok" ? (p?tiktokMedia(p).video:null) : (p?.bluesky ?? p?.bluesky_paused)?.video?.url;
+  const reference = target === "facebook" ? p?.video : target==="tiktok" ? (p?tiktokMedia(p).video:null) : target==="instagram" ? p?.instagram?.video : (p?.bluesky ?? p?.bluesky_paused)?.video?.url;
   if (!reference) return new Response("Not found",{status:404});
   try {
     const bytes = await fetchVideo(env,reference);
@@ -1140,9 +1167,27 @@ async function videoProxy(req: Request, env: Env, id: string, target: string): P
   }
 }
 
+/** Private download of the original MP4 for manual Instagram Reels.
+ * No transcoding or posting. The user must verify actual codec, dimensions and duration.
+ */
+async function instagramVideo(env: Env,id:string):Promise<Response> {
+  const p=await getPost(env.DB,id);
+  if(!p?.instagram?.video)return new Response("Not found",{status:404});
+  try {
+    const bytes=await fetchVideo(env,p.instagram.video);
+    return new Response(bytes,{headers:{"Content-Type":"video/mp4",
+      "Content-Length":String(bytes.byteLength),
+      "Content-Disposition":'attachment; filename="instagram-'+id+'-reel.mp4"',
+      "Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"}});
+  }catch(error){
+    return new Response(error instanceof Error?error.message:"Could not prepare Instagram video",
+      {status:502,headers:{"Cache-Control":"no-store"}});
+  }
+}
+
 /** The finished Instagram JPEG for one saved photo, rendered on the server
- * from the saved frame and crop/pad settings. Signed-in editors only (the
- * session check above). Sends nothing to Instagram. */
+ * from the saved frame and crop/pad settings. Signed-in editors only.
+ * Sends nothing to Instagram. */
 async function instagramPhoto(env: Env, id: string, n: number): Promise<Response> {
   const p = await getPost(env.DB, id);
   const item = p?.instagram?.items[n];
