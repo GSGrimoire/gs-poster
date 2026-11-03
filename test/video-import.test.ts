@@ -6,6 +6,7 @@ import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {createPost,ensureSchema,getPost,saveEditorDraft, type Post, type EditorDraft} from "../src/db.ts";
 import {createUpload,handleUploadPut,readUpload,parseUploadRef,uploadStatusForOwner} from "../src/upload.ts";
 import {parseEditorForm} from "../src/draft-editor.ts";
+import {prepareLinkedVideo} from "../src/video-import.ts";
 import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
 import type {Env} from "../src/env.ts";
 import type {InstagramDraft} from "../src/instagram.ts";
@@ -178,4 +179,71 @@ test("Instagram-only MP4 upload can attach without enabling a publishing platfor
   assert.equal(saved.video,null);
   assert.equal(saved.approved_at,null);
   assert.equal((await getDownload(p.id)).status,200);
+});
+
+
+test("Bluesky copy from Facebook needs a description and does not change Facebook",async()=>{
+  const p=await makeDraft();
+  const form=new FormData();
+  form.set("p_facebook","1");form.set("p_bluesky","1");
+  form.set("bs_caption","Bluesky copy");
+  form.set("bs_copy_fb_video","1");
+  const invalid=parseEditorForm(form,p,"Europe/Copenhagen");
+  assert.match(invalid.errors.join(" "),/Describe the Facebook video/);
+  form.set("bs_copy_video_alt","A creature on camera");
+  const valid=parseEditorForm(form,p,"Europe/Copenhagen");
+  assert.deepEqual(valid.errors,[]);
+  assert.equal(valid.bluesky?.video?.url,FB);
+  assert.equal(valid.bluesky?.video?.alt,"A creature on camera");
+  assert.equal(valid.next?.video,FB);
+});
+
+test("Instagram download stays available after separate Facebook approval",async()=>{
+  const p=await makeDraft();
+  const saved=(await saveEditorDraft(db,p.id,p.updated_at,next(p),p.bluesky,ig(IG)))!;
+  assert.ok(saved);
+  await db.prepare("UPDATE posts SET approved_at=? WHERE id=?").bind(new Date().toISOString(),p.id).run();
+  const download=await getDownload(p.id);
+  assert.equal(download.status,200);
+  assert.deepEqual(new Uint8Array(await download.arrayBuffer()),BODY);
+  assert.equal((await request(p.id,"import-video",{target:"instagram",expected_updated_at:saved})).status,409);
+});
+
+test("private video readback corruption blocks readiness and never changes gallery",async()=>{
+  clear();
+  const p=await makeDraft();
+  const origFetch=globalThis.fetch;
+  const corrupted=new Proxy(bucket,{get(target,key){
+    if(key==="get")return async(...args:unknown[])=>{
+      const result=await (target.get as (...args:unknown[])=>Promise<unknown>).apply(target,args);
+      return result?{arrayBuffer:async()=>new Uint8Array([1,2,3,4]).buffer}:null;
+    };
+    const item=(target as unknown as Record<PropertyKey,unknown>)[key];
+    return typeof item==="function"?(item as Function).bind(target):item;
+  }});
+  globalThis.fetch=async()=>new Response(MP4,{status:200});
+  try{
+    await assert.rejects(prepareLinkedVideo({DB:db,UPLOADS:corrupted} as Env,
+      p.id,"tiktok",p.updated_at,"GSGrimoire",ORIGIN),/not confirmed/i);
+    assert.equal((await getPost(db,p.id))!.tiktok_video,TT);
+    assert.equal((await getPost(db,p.id))!.approved_at,null);
+    const latest=await db.prepare("SELECT status FROM uploads WHERE created_by='GSGrimoire' ORDER BY created_at DESC LIMIT 1")
+      .first<{status:string}>();
+    assert.equal(latest?.status,"uploading");
+  }finally{globalThis.fetch=origFetch;}
+});
+
+test("audit failures are visible without retrying an already saved video",async()=>{
+  clear();
+  const p=await makeDraft();
+  await db.prepare("CREATE TRIGGER block_prepared_video_audit BEFORE INSERT ON audit "+
+    "WHEN NEW.action='private-video-prepared' "+
+    "BEGIN SELECT RAISE(FAIL,'audit unavailable'); END").run();
+  try{
+    const response=await request(p.id,"import-video",{target:"tiktok",expected_updated_at:p.updated_at});
+    assert.equal(response.status,200,await response.clone().text());
+    const body=await response.json() as {reference:string;audit_warning?:string};
+    assert.match(body.audit_warning??"",/activity log could not be recorded/);
+    assert.equal((await getPost(db,p.id))!.tiktok_video,body.reference);
+  }finally{await db.prepare("DROP TRIGGER IF EXISTS block_prepared_video_audit").run();}
 });
