@@ -27,6 +27,12 @@ export interface EditorParse {
 }
 
 /** Every photo already on the post, in a stable order, for the Instagram picker. */
+export function postVideos(p:Post):string[] {
+  const tt=tiktokMedia(p);
+  return [...new Set([p.video,p.bluesky?.video?.url,p.bluesky_paused?.video?.url,tt.video,
+    p.instagram?.video,p.instagram_paused?.video].filter((x):x is string=>!!x))];
+}
+
 export function postPhotos(p: Post): string[] {
   const all = [...p.images, ...(p.tiktok_images ?? []), ...(p.bluesky?.images.map((i) => i.url) ?? []),
     ...(p.instagram?.items.map((i) => i.url) ?? []),
@@ -109,9 +115,14 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     const caption = text(form, "bs_caption", base.caption);
     if (blueskyOn && textLength(caption) > BSKY_TEXT_LIMIT) errors.push(`The Bluesky caption is over ${BSKY_TEXT_LIMIT} characters.`);
     const bsAll = base.images.map((img, i) => ({ url: img.url, alt: text(form, "bs_alt_" + i, img.alt).trim() }));
-    const bsImages = ordered(bsAll, savedBluesky ? bsOrder ?? [] : [], form, "remove_bs_");
-    const bsVideo = base.video && form.get("remove_bs_video") !== "1"
-      ? { url: base.video.url, alt: text(form, "bs_video_alt", base.video.alt).trim() } : null;
+    let bsImages = ordered(bsAll, savedBluesky ? bsOrder ?? [] : [], form, "remove_bs_");
+    const copyFbVideo=form.get("bs_copy_fb_video")==="1";
+    if(copyFbVideo && !cur.video)errors.push("Facebook has no video to copy to Bluesky.");
+    const bsVideo=copyFbVideo && cur.video
+      ? {url:cur.video,alt:text(form,"bs_video_alt",base.video?.alt??"").trim()}
+      : base.video && form.get("remove_bs_video")!=="1"
+        ? {url:base.video.url,alt:text(form,"bs_video_alt",base.video.alt).trim()} : null;
+    if(copyFbVideo && cur.video)bsImages=[];
     for (const a of [...bsImages.map((x) => x.alt), ...(bsVideo ? [bsVideo.alt] : [])])
       if (blueskyOn && a.length > MAX_ALT) errors.push(`Alternative text is limited to ${MAX_ALT} characters.`);
     const patreonUrl = text(form, "bs_patreon_url", base.patreon?.url ?? "").trim();
@@ -129,17 +140,20 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   // through the private upload routes.
   let instagram: InstagramDraft | null = null;
   if (instagramOn || savedInstagram) {
-    const base = savedInstagram ?? { caption: "", frame: "4:5" as InstagramFrame, items: [] };
+    const base = savedInstagram ?? { caption: "", frame: "4:5" as InstagramFrame, items: [], video:null };
     const rawItems = form.get("ig_items");
     const items = rawItems === null ? base.items : readInstagramItems(String(rawItems));
     if (!items) errors.push("Could not read the Instagram photo settings. Reload the page and try again.");
     else {
+      const videoSource=text(form,"ig_video_source",base.video??"").trim();
       instagram = {
-        caption: text(form, "ig_caption", base.caption),
-        frame: text(form, "ig_frame", base.frame) as InstagramFrame,
+        caption: text(form,"ig_caption",base.caption),
+        frame: text(form,"ig_frame",base.frame) as InstagramFrame,
         items,
+        ...(videoSource?{video:videoSource}:{}),
       };
-      if (instagramOn) errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur))));
+      if(instagramOn)errors.push(...instagramSaveErrors(instagram,
+        new Set(postPhotos(cur)),new Set(postVideos(cur))));
     }
   }
 
@@ -210,7 +224,7 @@ export function targetStates(p: Post): Record<PlatformId, TargetState> {
       photos: bs?.video ? 0 : (bs?.images.length ?? 0), video: !!bs?.video,
       missingAlt: (bs?.images.filter((i) => !i.alt.trim()).length ?? 0) + (bs?.video && !bs.video.alt.trim() ? 1 : 0) },
     instagram: { id: "instagram", captionLength: p.instagram?.caption.length ?? 0,
-      photos: p.instagram?.items.length ?? 0, video: false, missingAlt: 0, hashtags: countHashtags(p.instagram?.caption ?? "") },
+      photos: p.instagram?.items.length ?? 0, video: !!p.instagram?.video, missingAlt: 0, hashtags: countHashtags(p.instagram?.caption ?? "") },
     tiktok: { id: "tiktok", captionLength: (p.tiktok_caption ?? p.message).length,
       photos: ttShared ? (p.video ? 0 : p.images.length) : tt.images.length,
       video: ttShared ? !!p.video : !!tt.video, missingAlt: 0 },
@@ -223,11 +237,11 @@ function formatLine(id: PlatformId): string {
     ? `${r.caption.photo.toLocaleString("en-GB")} characters`
     : `${r.caption.photo.toLocaleString("en-GB")} characters with photos, ${r.caption.video.toLocaleString("en-GB")} with video`;
   return [
-    r.framed ? `Up to ${r.maxPhotos} photos` : `Up to ${r.maxPhotos} photos or 1 video`,
+    `Up to ${r.maxPhotos} photos or 1 video`,
     caps,
     r.altRequired ? "descriptions required" : "",
     r.maxHashtags ? `${r.maxHashtags} hashtags` : "",
-    r.framed ? "JPEG, one frame for all photos" : `shows best at ${r.aspect.label}`,
+    r.framed ? "JPEG photos or an MP4 Reel download" : `shows best at ${r.aspect.label}`,
   ].filter(Boolean).join(" · ");
 }
 
@@ -253,6 +267,8 @@ export function renderDraftEditor(v: EditorView): string {
   const ig = p.instagram ?? p.instagram_paused ?? null;
   const pool = postPhotos(p);
   const igItems = ig?.items ?? [];
+  const igVideo=ig?.video??null;
+  const availableVideos=postVideos(p);
   const igFrame: InstagramFrame = ig?.frame ?? "4:5";
   const states = targetStates(p);
   const fbMedia = p.video
@@ -495,6 +511,17 @@ export function renderDraftEditor(v: EditorView): string {
             <button type="button" class="copy-cap" data-copy-to="ed-ig" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-ig" name="ig_caption" maxlength="${INSTAGRAM_CAPTION_MAX}" data-max="${INSTAGRAM_CAPTION_MAX}" data-caption="instagram" placeholder="Instagram caption; links are not clickable here">${esc(ig?.caption ?? "")}</textarea>
           <div class="field-meter"></div>
+          <label for="ig-video-source" class="cap-label">Reel video from this post (optional)</label>
+          <select name="ig_video_source" id="ig-video-source">
+            <option value="">Photo carousel, not a video</option>
+            ${availableVideos.map((url,i)=>`<option value="${esc(url)}"${igVideo===url?" selected":""}>Video ${i+1} from this post</option>`).join("")}
+          </select>
+          <p class="hint">Choose a video to prepare a Reel, or use the photos below. Switching to a video clears the Instagram photo selection after confirmation. You can also upload an Instagram-only MP4 in Add video.</p>
+          <div id="ig-reel-panel">
+            <video id="ig-reel-preview" controls playsinline preload="metadata" style="max-width:100%;max-height:440px" src="/video/${p.id}/instagram"${ig?.video?"":" hidden"}></video>
+            <p class="hint" id="ig-reel-specs">Reels work best at 9:16 with H.264 video and Advanced Audio Coding audio. GS Poster does not transcode or crop video. Verify the source before posting in Instagram.</p>
+            <p><a id="ig-reel-download" href="/instagram/${p.id}/video.mp4" download="instagram-${p.id}-reel.mp4"${ig?.video?"":" hidden"}>Download MP4 for Instagram Reel</a></p>
+          </div>
           <input type="hidden" name="ig_items" id="ig-items-field" value="${esc(JSON.stringify(igItems))}">
           <ol class="ig-items" id="ig-items" data-media="instagram" data-post="${id}" data-saved="${esc(JSON.stringify(igItems))}"
             data-pool="${esc(JSON.stringify(pool.map((url, i) => ({ url, src: `/media/${p.id}/${i}?platform=pool` }))))}"
@@ -506,6 +533,7 @@ export function renderDraftEditor(v: EditorView): string {
             <div class="tiles ig-pool" id="ig-pool">${pool.map((url, i) => `<button type="button" class="ig-add" data-url="${esc(url)}"><img loading="lazy" src="/media/${p.id}/${i}?platform=pool" alt="Add photo ${i + 1}"><span>Add</span></button>`).join("")}</div>
             <button type="button" id="ig-add-all">Add all, in this order</button>
           </details>` : `<p class="hint">Add photos to the post first; Instagram picks from them.</p>`}
+          ${on.instagram && igVideo && parseGitHubUrl(igVideo) ? `<div class="row"><button type="button" data-prepare-video="instagram">Prepare Instagram video privately</button></div>` : ""}
           <p class="hint" id="ig-unsaved" hidden>Save to download the finished photos.</p>
           <p class="hint ig-downloads" id="ig-downloads"${igItems.length ? "" : " hidden"}>${esc(PLATFORMS.instagram.delivery)}
             ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" · ")}</p>
@@ -517,7 +545,9 @@ export function renderDraftEditor(v: EditorView): string {
             <button type="button" class="copy-cap" data-copy-to="ed-bs" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-bs" name="bs_caption" data-max="${BSKY_TEXT_LIMIT}" data-graphemes="1" data-caption="bluesky" placeholder="A short companion caption">${esc(bs?.caption ?? "")}</textarea>
           <div class="field-meter"></div>
+          ${p.video ? `<div class="row"><button type="button" id="bs-copy-fb-video">Use Facebook video for Bluesky</button><input type="hidden" name="bs_copy_fb_video" id="bs-copy-fb-video-flag" value="0"></div>` : ""}
           <div class="tiles" data-media="bluesky" data-order="order_bs">${bsMedia || empty}</div>
+          ${on.bluesky && bs?.video?.url && parseGitHubUrl(bs.video.url) ? `<div class="row"><button type="button" data-prepare-video="bluesky">Prepare Bluesky video privately</button></div>` : ""}
           ${bs && !bs.video && bs.images.length > 1 ? `<input type="hidden" name="order_bs" value="${Array.from({ length: bs.images.length }, (_, i) => i).join(",")}">` : ""}
           <details${bs?.patreon ? " open" : ""}><summary>Patreon link card (optional)</summary>
             <label for="ed-patreon-url">Free Patreon post URL</label>
@@ -540,6 +570,7 @@ export function renderDraftEditor(v: EditorView): string {
           ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button><input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0"></div>
           <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. After saving, prepare any linked GitHub photos for TikTok using the action below.</p>` : ""}
           <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
+          ${on.tiktok && !ttShared && tt.video && parseGitHubUrl(tt.video) ? `<div class="row"><button type="button" data-prepare-video="tiktok">Prepare TikTok video privately</button></div>` : ""}
           ${p.tiktok_enabled && ttImportIndices.length ? `<div class="row"><button type="button" id="tt-import" data-indices="${esc(JSON.stringify(ttImportIndices))}">Prepare ${ttImportIndices.length} linked photo${ttImportIndices.length === 1 ? "" : "s"} for TikTok</button></div>
           <p class="hint" id="tt-import-status" role="status" aria-live="polite">Copies only the linked TikTok photos into private storage. Facebook originals stay unchanged. Prepare them close to publication; private copies expire after 45 days.</p>` : ""}
           ${!ttShared && !tt.video && tt.images.length > 1 ? `<input type="hidden" name="order_tt" value="${Array.from({ length: tt.images.length }, (_, i) => i).join(",")}">` : ""}
