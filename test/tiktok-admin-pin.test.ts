@@ -42,8 +42,9 @@ async function auth(login="GSGrimoire"){
   return {raw,csrf:await csrfToken(signer,{login,raw} as Session)};
 }
 async function submit(action:"connect"|"disconnect"|"verify",pin:string|null,
-  options:{origin?:string;fetchSite?:string;csrf?:string;login?:string|null;confirm?:boolean;filename?:string}={}){
-  const a=await auth(options.login??"GSGrimoire");
+  options:{origin?:string;fetchSite?:string;csrf?:string;login?:string|null;confirm?:boolean;filename?:string;
+    session?:{raw:string;csrf:string}}={}){
+  const a=options.session??await auth(options.login??"GSGrimoire");
   const f=new URLSearchParams({csrf:options.csrf??a.csrf});
   if(pin!==null)f.set("pin",pin);
   if(action==="connect")f.set("video.upload","1");
@@ -59,10 +60,10 @@ async function submit(action:"connect"|"disconnect"|"verify",pin:string|null,
   return mf.dispatchFetch(ORIGIN+"/tiktok/"+action,{method:"POST",
     headers,body:f.toString(),redirect:"manual"});
 }
-async function get(path:string,login="GSGrimoire",extraCookie=""){
-  const a=await auth(login);
+async function get(path:string,login="GSGrimoire",extraCookie="",sessionRaw?:string){
+  const raw=sessionRaw??(await auth(login)).raw;
   return mf.dispatchFetch(ORIGIN+path,{
-    headers:{Cookie:SESSION_COOKIE+"="+a.raw+(extraCookie?"; "+extraCookie:"")},
+    headers:{Cookie:SESSION_COOKIE+"="+raw+(extraCookie?"; "+extraCookie:"")},
     redirect:"manual"});
 }
 async function states(){
@@ -106,8 +107,10 @@ test("all three administrative actions reject absent or wrong PIN before mutatio
     assert.equal(await states(),beforeState,action+" must not create an OAuth state");
     assert.equal(await verification(),beforeMedia,action+" must not host verification contents");
     assert.equal(await account(),null,action+" must not change the account");
+    // Every action is assessed independently: six wrong PINs would correctly
+    // trigger the global five-failure lockout during this table-driven test.
+    await resetFailures();
   }
-  await resetFailures();
 });
 
 test("a forged cross-site request, bad CSRF or signed-in but nonallowlisted user cannot administer",async()=>{
@@ -167,7 +170,8 @@ test("connected account displays a disconnect PIN, wrong PIN preserves its accou
 
 test("correct PIN creates a signed-in short-lived OAuth state, not an automatic connection",async()=>{
   const beforeState=await states();
-  const res=await submit("connect",PIN);
+  const signed=await auth();
+  const res=await submit("connect",PIN,{session:signed});
   assert.equal(res.status,200,await res.clone().text());
   assert.match(await res.text(),/Continue to TikTok/);
   assert.match(res.headers.get("Set-Cookie")??"",/__Host-gsp_tiktok_state=/);
@@ -176,13 +180,13 @@ test("correct PIN creates a signed-in short-lived OAuth state, not an automatic 
   const state=(res.headers.get("Set-Cookie")??"").match(/__Host-gsp_tiktok_state=([^;]+)/)?.[1];
   assert.ok(state);
   const callback=await get("/tiktok/callback?state="+encodeURIComponent(state)+"&error=access_denied",
-    "GSGrimoire","__Host-gsp_tiktok_state="+state);
+    "GSGrimoire","__Host-gsp_tiktok_state="+state,signed.raw);
   assert.equal(callback.status,400,"the test uses a cancelled consent without TikTok token exchange");
   assert.match(await callback.text(),/TikTok authorization was cancelled/);
   assert.equal(await account(),null);
   assert.equal(await states(),beforeState,"OAuth state consumed, even on denied consent");
   const replay=await get("/tiktok/callback?state="+encodeURIComponent(state)+"&error=access_denied",
-    "GSGrimoire","__Host-gsp_tiktok_state="+state);
+    "GSGrimoire","__Host-gsp_tiktok_state="+state,signed.raw);
   assert.equal(replay.status,400);
   assert.match(await replay.text(),/expired or was already used/);
 });
