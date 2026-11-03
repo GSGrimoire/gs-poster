@@ -536,7 +536,7 @@ export function renderDraftEditor(v: EditorView): string {
             <button type="button" id="ig-add-all">Add all, in this order</button>
           </details>` : `<p class="hint">Add photos to the post first; Instagram picks from them.</p>`}
           ${on.instagram && igVideo && parseGitHubUrl(igVideo) ? `<div class="row"><button type="button" data-prepare-video="instagram">Prepare Instagram video privately</button></div>` : ""}
-          <p class="hint" id="ig-unsaved" hidden>Save to download the finished photos.</p>
+          <p class="hint" id="ig-unsaved" hidden>Save to download prepared Instagram media.</p>
           <p class="hint ig-downloads" id="ig-downloads"${igItems.length ? "" : " hidden"}>${esc(PLATFORMS.instagram.delivery)}
             ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" · ")}</p>
         </article>
@@ -1082,7 +1082,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   // CSRF and version-fenced save runs and returns JSON. One save at a time;
   // edits made while one is in flight are saved next. A refused save keeps
   // every edit on the page. Saving never approves or publishes.
-  const STRUCTURAL = /^(p_|remove_|order_|tt_copy_fb$|tiktok_title$|tiktok_caption$|when$)/;
+  const STRUCTURAL = /^(p_|remove_|order_|tt_copy_fb$|bs_copy_fb_video$|ig_video_source$|tiktok_title$|tiktok_caption$|when$)/;
   const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
   let timer = null, inflight = false, stopped = false, needsReload = false;
   function setVersion(v) {
