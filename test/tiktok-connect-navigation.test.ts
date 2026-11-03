@@ -18,6 +18,7 @@ before(async()=>{
   env={
     DB:await worker.getD1Database("DB") as unknown as D1Database,
     COOKIE_SECRET:"test-signed-session-secret",
+    APPROVE_PIN:"test-only-approval-pin",
     TIKTOK_CLIENT_KEY:"sandbox-client-key",
     TIKTOK_CLIENT_SECRET:"sandbox-client-secret-must-not-leak",
     TIKTOK_TOKEN_ENCRYPTION_KEY:"this-is-a-random-test-key-with-more-than-32-chars"
@@ -28,6 +29,7 @@ after(async()=>await worker?.dispose());
 test("TikTok connect renders same-site navigation instead of a CSP-blocked form redirect",async()=>{
   const params=new URLSearchParams({
     csrf:await csrfToken(env,session),
+    pin:"test-only-approval-pin",
     "video.upload":"1"
   });
   const req=new Request("https://gs-poster.goofyspook.workers.dev/tiktok/connect",{
