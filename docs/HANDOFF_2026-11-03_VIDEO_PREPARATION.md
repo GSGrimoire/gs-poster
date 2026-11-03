@@ -29,6 +29,16 @@ Review depth: **Full**. High-risk triggers: remote GitHub downloads, private R2 
 5. Require `isStoredOwnerVideo` confirmation, then `replacePreparedVideoReference` uses exact original reference and post version, approval, target selection, and no-photo guards. Update only that target's reference; leave all others unchanged.
 6. Return success plus updated version. If the activity log fails after persistence, explicitly return an audit warning rather than a misleading failure/retry.
 
+## Reviewer correction: paused Instagram video provenance (Claude Full review)
+
+Claude's Full review of head `97981e8b171b98b576c849f602408d576a1f86d7` found one blocking security invariant failure: `parseEditorForm` accepted arbitrary `ig_video_source` values when Instagram was disabled and already had a saved target. The draft could then store an unowned `upload://` MP4, which the Instagram slot could validate on reactivation because `postVideos` included its own paused video value.
+
+The correction keeps the active/disabled photo and caption rules intact, but validates **all newly selected Instagram video references** in either state. A new source must already exist as the Facebook video, Bluesky video (including paused Bluesky) or TikTok video on the current post. An exact unchanged value from the previously saved Instagram target remains eligible so that a legitimate Instagram-only private upload can survive pausing and reactivation. The Instagram slot itself is **never** included as an independent allowlist source for new values.
+
+Adversarial regressions in `test/instagram.test.ts` now exercise a forged private `upload://` reference and arbitrary GitHub MP4 while disabled and enabled; another platform's video as a legitimate copy source; unchanged saved Instagram-only media; and an actual authenticated same-origin, anti-forgery-checked `POST /post/:id/save` denial preserving the original database version and media. This repair does not change media reads, storage, publication or approval routes.
+
+This is author remediation, **not** independent approval. The reviewer must inspect the corrected pinned head, check the server-side provenance allowlist and owner invariants, and submit a new disposition before merge. The prior `Changes required` verdict remains effective for the old head.
+
 ## Failure and recovery states
 
 - No session, foreign origin, bad antiforgery token, malformed target or stale draft: no fetch and no upload grant.
