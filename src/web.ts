@@ -435,7 +435,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
   const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="Photo ${i + 1}">`).join("")}</div>${p.images.length > 12 ? `<details class="card"><summary>Review remaining ${p.images.length - 12} photos in order</summary><div class="thumbs">${p.images.slice(12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i + 12}" alt="Photo ${i + 13}">`).join("")}</div></details>` : ""}` : "";
-  const videoPreview = (target:"facebook"|"bluesky"|"tiktok") =>
+  const videoPreview = (target:"facebook"|"bluesky"|"tiktok"|"instagram") =>
     '<video controls playsinline preload="metadata" style="max-width:100%;max-height:440px;border-radius:8px" src="/video/' +
     esc(p.id) + '/' + target + '"></video>';
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
@@ -683,6 +683,13 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <h3>TikTok</h3><p class="caption">${esc(p.tiktok_caption ?? p.message)}</p>
         ${ttMedia.video?videoPreview("tiktok"):ttThumbs}
         <p class="hint">${ttMedia.video?"Video":ttMedia.images.length+" images"} · manual transfer only</p></section>`:""}
+      ${p.instagram ? `<section class="platform-preview" aria-label="Instagram preparation">
+        <h3>Instagram (manual)</h3><p class="caption">${esc(p.instagram.caption)}</p>
+        ${p.instagram.video ? videoPreview("instagram")+
+          `<p><a href="/instagram/${p.id}/video.mp4" download="instagram-${p.id}-reel.mp4">Download MP4 Reel</a></p>
+          <p class="hint">Original MP4, not transcoded. Verify 9:16, H.264 and audio before posting.</p>`
+          : p.instagram.items.map((_,i)=>`<a href="/instagram/${p.id}/${i}.jpg" download>Photo ${i+1}</a>`).join(" · ")}
+        <p class="hint">Nothing is published to Instagram from GS Poster.</p></section>` : ""}
       ${bs ? `<section class="platform-preview" aria-label="Bluesky review">
         <h3>Bluesky</h3><p class="caption">${esc(bs.caption)}</p>
         ${bs.video?videoPreview("bluesky"):bsThumbs}
