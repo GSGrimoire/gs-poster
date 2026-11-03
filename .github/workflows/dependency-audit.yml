@@ -25,6 +25,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # PR-only lockfile candidate computation. No runner pushes.
+      - name: Generate candidate lockfile metadata
+        run: |
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          node -e 'const fs=require("fs"),cp=require("child_process");const old=JSON.parse(cp.execFileSync("git",["show","HEAD:package-lock.json"],{encoding:"utf8"}));const now=JSON.parse(fs.readFileSync("package-lock.json","utf8"));const change={};for(const [key,item] of Object.entries(now.packages)){if(JSON.stringify(old.packages[key])!==JSON.stringify(item))change[key]=item;}console.log("LOCK_PATCH_JSON_START"+JSON.stringify(change)+"LOCK_PATCH_JSON_END");'
       - run: npm ci --ignore-scripts
       - name: Classify all and production dependency advisories
         run: node scripts/audit-dependencies.mjs
