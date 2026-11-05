@@ -79,12 +79,12 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
       <div class="eyebrow">Connection readiness</div>
       <div class="summary-row"><span><span class="status-led ${enabled?"":"err"}"></span>Worker credentials</span><strong>${enabled?"Configured":"Action needed"}</strong></div>
       <div class="summary-row"><span><span class="status-led ${conn?"":"warn"}"></span>TikTok account</span><strong>${conn?"Connected":"Not connected"}</strong></div>
-      <div class="summary-row"><span><span class="status-led ${hosted.length?"warn":"err"}"></span>Media URL ownership</span><strong>${hosted.length?"File hosted · confirm in TikTok":"Action needed: no verification file hosted"}</strong></div>
+      <div class="summary-row"><span><span class="status-led ${hosted.length?"warn":"err"}"></span>Media URL ownership</span><strong>${hosted.length?"File hosted | confirm in TikTok":"Action needed: no verification file hosted"}</strong></div>
       <p class="rail-note">${hosted.length?"The last step is verified in TikTok's developer portal. GS Poster cannot check it automatically.":
         "Photo carousels fail with url_ownership_unverified until step 2 below is done."}</p>
     </div>`;
   const body=`<div class="hero">
-    <div class="hero-kicker">GS Grimoire · Social connections</div>
+    <div class="hero-kicker">GS Grimoire | Social connections</div>
     <h2>Connect once. Create freely.</h2>
     <p>Control which TikTok account receives your videos and carousels. Connecting, disconnecting and hosting verification files require your approval PIN. Posting still requires a separate PIN approval.</p>
     </div>
@@ -96,7 +96,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   <div class="step-card"><div class="step-heading"><span class="step-number">1</span><div>
     <h3>App authorization</h3><p class="hint">Only the requested permissions appear on TikTok's consent screen.</p></div></div>
     <p class="form-info">Login Kit redirect address</p><code style="display:block;overflow-wrap:anywhere">${esc(tiktokRedirect(env))}</code>
-    <p class="form-info"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/about">Public About page</a></p>
+    <p class="form-info"><a href="/terms">Terms</a> | <a href="/privacy">Privacy</a> | <a href="/about">Public About page</a></p>
   </div>
   <div class="step-card">
     <div class="step-heading"><span class="step-number">2</span><div><h3>Verify your media address</h3>
