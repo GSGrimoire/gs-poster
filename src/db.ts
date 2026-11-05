@@ -538,6 +538,8 @@ export async function updatePost(db: D1Database, id: string, patch: Patch, onlyI
  * Refuses posts with a recorded Facebook id, an approved post unless the
  * caller confirmed human reconciliation, and any Bluesky target that is
  * scheduled, publishing, published or carries a remote record.
+ * Refuses when an Instagram job is scheduled, in progress, or has an
+ * unresolved failure, without cancelling its job or changing the post.
  * With expectedVersion, the post must still be the version the editor saw.
  */
 export async function reopenFailedDraft(
@@ -555,6 +557,7 @@ export async function reopenFailedDraft(
         scheduled_at = CASE WHEN scheduled_at > ? THEN scheduled_at ELSE NULL END, updated_at = ?
       WHERE id = ? AND updated_at = ? AND status IN ('failed','rejected') AND fb_post_id IS NULL
         AND (approved_at IS NULL OR ? = 1)
+        AND NOT ${igPending("posts")}
         AND NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND
           (b.status IN ('scheduled','publishing','published') OR b.uri IS NOT NULL OR b.cid IS NOT NULL
            OR b.card_uri IS NOT NULL OR b.permalink IS NOT NULL))`)
