@@ -73,7 +73,7 @@ test("the approval card offers Instagram once it is connected", async () => {
   const ready = await page(on.mf, "/post/" + b.id);
   assert.match(ready, /name="target_instagram" value="1" checked/);
   assert.match(ready, /name="confirm_instagram" value="1" required/);
-  assert.match(ready, /Instagram · 2-photo carousel/);
+  assert.match(ready, /Instagram | 2-photo carousel/);
 });
 
 test("approving Instagram needs the PIN and the explicit consent tick", async () => {
