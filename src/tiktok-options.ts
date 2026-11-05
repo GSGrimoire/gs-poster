@@ -63,7 +63,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
       <label>Approval PIN<input type="password" name="pin" required autocomplete="off"></label>`;
   }
   const inbox=scopes.includes("video.upload")?`<form method="post" action="/post/${esc(p.id)}/tiktok-send" class="step-card">
-      ${TIKTOK_DIRECT_POST_VISIBLE?'<div class="eyebrow">Option A · Controlled transfer</div>':""}
+      ${TIKTOK_DIRECT_POST_VISIBLE?'<div class="eyebrow">Option A | Controlled transfer</div>':""}
       <h3 style="margin:9px 0">Send to TikTok inbox</h3>
       <p class="form-info">Send ${type==="PHOTO"?"this carousel":"the video"} to TikTok and finish its caption, privacy and publication in TikTok itself. No publication occurs from this choice until you finish it inside TikTok.</p>
       ${type==="VIDEO"?'<p class="hint">TikTok does not accept video inbox captions through this endpoint. Set the final caption inside TikTok.</p>':""}
@@ -76,7 +76,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
     esc(v==="SELF_ONLY"?"Only me (private test)":v+" (needs app audit)")+'</option>').join("")||"";
   const direct=!TIKTOK_DIRECT_POST_VISIBLE?"":creator&&creator.privacy_level_options.includes("SELF_ONLY")?
     `<form method="post" action="/post/${esc(p.id)}/tiktok-send" class="step-card">
-      <div class="eyebrow">Option B · Immediate private publication</div>
+      <div class="eyebrow">Option B | Immediate private publication</div>
       <h3 style="margin:9px 0">Direct Post test</h3>
       <p class="notice">This creates an actual TikTok post immediately. Unaudited testing is restricted to private, SELF_ONLY posts. It does not wait for a GS Poster calendar time.</p>
       <p>Creator: <strong>${esc(creator.creator_nickname)} (${esc(creator.creator_username)})</strong></p>
@@ -96,9 +96,9 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
     </form>`:
     '<p class="hint">'+esc(creatorError||"Direct Post requires video.publish consent and the SELF_ONLY option. Reconnect in TikTok settings if necessary.")+'</p>';
   const body=`<div class="hero">
-    <div class="hero-kicker">GS Grimoire · Final review</div>
+    <div class="hero-kicker">GS Grimoire | Final review</div>
     <h2>${TIKTOK_DIRECT_POST_VISIBLE?"Choose how to share on TikTok.":"Send to your TikTok inbox."}</h2>
-    <p>${type==="PHOTO"?media.images.length+" images in carousel order":"One MP4 video"} · ${esc(p.label||"Untitled post")}. ${TIKTOK_DIRECT_POST_VISIBLE?"Both methods require":"Sending requires"} your approval PIN. Your calendar date does not trigger TikTok posting. Add music, edit and publish inside the TikTok app.</p>
+    <p>${type==="PHOTO"?media.images.length+" images in carousel order":"One MP4 video"} | ${esc(p.label||"Untitled post")}. ${TIKTOK_DIRECT_POST_VISIBLE?"Both methods require":"Sending requires"} your approval PIN. Your calendar date does not trigger TikTok posting. Add music, edit and publish inside the TikTok app.</p>
     </div>
     <p><a href="/post/${esc(p.id)}">← Back to post</a></p>
     <style>
@@ -108,7 +108,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
     .tiktok-slide figcaption{font:750 12px system-ui,sans-serif;padding:8px 10px;color:var(--accent2)}
     </style>
     <section aria-label="Selected TikTok media">
-      <div class="eyebrow">Your media · Final order</div>
+      <div class="eyebrow">Your media | Final order</div>
       ${preview}
     </section>
     <p class="choice-advice">For photo carousels or link-based videos, TikTok must verify <code>${esc(TIKTOK_MEDIA_PREFIX)}</code> in your developer app. Original media stays private, and temporary links are created only after an explicit transfer.</p>
