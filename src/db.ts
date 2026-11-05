@@ -373,7 +373,8 @@ export async function updateCalendarCaptions(
  * is no longer available: the old Page schedule must not be reactivated.
  *
  * A single D1 batch resets both targets. Stale forms and active/published
- * Bluesky targets cannot be reopened.
+ * Bluesky targets cannot be reopened. An unresolved Instagram job also
+ * prevents revoking the shared approval, in the same database operation.
  */
 export async function reopenCancelledDraft(
   db: D1Database, id: string, expectedVersion: string,
@@ -387,7 +388,7 @@ export async function reopenCancelledDraft(
   const results = await db.batch([
     db.prepare("UPDATE posts SET status='draft', approved_at=NULL, scheduled_at=NULL, " +
       "fb_post_id=NULL, permalink=NULL, error=NULL, note=NULL, updated_at=? " +
-      "WHERE id=? AND status='cancelled' AND updated_at=? AND " + safeBluesky)
+      "WHERE id=? AND status='cancelled' AND updated_at=? AND " + safeBluesky + " AND NOT " + igPending("posts"))
       .bind(now,id,expectedVersion),
     db.prepare("UPDATE bluesky_targets SET status='draft', error=NULL, uri=NULL, cid=NULL, " +
       "card_uri=NULL, permalink=NULL, started_at=NULL WHERE post_id=? " +
