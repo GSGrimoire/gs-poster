@@ -317,11 +317,20 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 
 // ---------------------------------------------------------------- approval site
 
+/** A TikTok-only approved transfer is in the creator inbox workflow, not
+ * an actual scheduled provider publication. */
+function isTikTokInboxRecord(p: Post): boolean {
+  return p.status === "scheduled" && !!p.approved_at && !!p.tiktok_enabled &&
+    !p.fb_post_id && !["scheduled","publishing","published"].includes(p.bluesky?.status ?? "") &&
+    p.scheduled_at === null;
+}
 function statusChip(p: Post): string {
-  return `<span class="chip s-${esc(p.status)}">${esc(p.status)}</span>`;
+  const label = isTikTokInboxRecord(p) ? "TikTok Inbox" : p.status;
+  return `<span class="chip s-${esc(p.status)}">${esc(label)}</span>`;
 }
 
 function whenText(env: Env, p: Post): string {
+  if (isTikTokInboxRecord(p)) return "TikTok transfer, finish in app";
   if (p.scheduled_at) return formatLocal(new Date(p.scheduled_at), env.TIMEZONE);
   if (p.status === "published" && p.approved_at) return `posted ${formatLocal(new Date(p.approved_at), env.TIMEZONE)}`;
   return "posts on approval";
@@ -332,14 +341,17 @@ function shortTime(env: Env, iso: string): string {
 }
 
 function postCard(env: Env, p: Post): string {
-  const thumbs = p.images.length
-    ? `<div class="thumbs">${p.images.map((_, i) => `<img src="/media/${p.id}/${i}" alt="" loading="lazy">`).join("")}</div>`
+  const tiktokOnly = isTikTokInboxRecord(p);
+  const gallery = tiktokOnly ? tiktokMedia(p).images : p.images;
+  const source = tiktokOnly ? "?platform=tiktok" : "?platform=facebook";
+  const thumbs = gallery.length
+    ? `<div class="thumbs">${gallery.slice(0,6).map((_, i) => `<img src="/media/${p.id}/${i}${source}" alt="" loading="lazy">`).join("")}</div>`
     : "";
   const live = p.permalink ? ` · <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
   const bsky = p.bluesky?.permalink ? ` · <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
     <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.tiktok_enabled?'<span class="chip">TikTok</span>':""}</div>
-    <p class="caption clip">${esc(p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
+    <p class="caption clip">${esc(tiktokOnly ? (p.tiktok_caption ?? p.message) : p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
     ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
 
