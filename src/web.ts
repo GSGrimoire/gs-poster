@@ -369,20 +369,17 @@ function pager<T>(data: Paged<T>, params: URLSearchParams, key: string, path: st
     link(data.page+1,"Next",data.page<data.pages) + '</nav>';
 }
 function postSection(
-  id: string, title: string, data: Paged<Post>, params: URLSearchParams,
+  env: Env, id: string, title: string, data: Paged<Post>, params: URLSearchParams,
   path: string, key: string, empty: string,
 ): string {
   return '<details class="history-section" id="' + esc(id) + '" open>' +
     '<summary><span>' + esc(title) + '</span><span class="history-count">' +
     data.total + '</span></summary>' +
     '<div class="history-section-body">' +
-    (data.items.length ? data.items.map((p) => postCardForHistory(p)).join("") :
+    (data.items.length ? data.items.map((p) => postCard(env,p)).join("") :
       '<p class="empty">' + esc(empty) + '</p>') +
     pager(data,params,key,path,id) + '</div></details>';
 }
-/** Set only while rendering history cards; format below uses the same Page shell. */
-let historyRenderEnv: Env;
-function postCardForHistory(p: Post): string { return postCard(historyRenderEnv,p); }
 
 async function dashboard(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
   await refreshScheduled(env).catch(() => undefined);
@@ -395,7 +392,6 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
   const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
   const calendar = renderCalendar(env,calendarPosts,await csrfToken(env,session),start);
   const drafts = await searchPosts(env.DB,"drafts","",viewPage(params,"drafts_page"));
-  historyRenderEnv = env;
   const missing = missingSecrets(env);
   const body =
     (missing.length ? '<div class="notice err">Not fully set up. Missing secrets: ' +
@@ -409,7 +405,7 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
     '<a class="btn" href="/new">New draft</a></div></div>' +
     calendar +
-    postSection("drafts","Drafts",drafts,params,"/","drafts_page",
+    postSection(env,"drafts","Drafts",drafts,params,"/","drafts_page",
       "No drafts waiting for review.") ;
   return html(page("GS Poster",body,{login:session.login,wide:true}));
 }
@@ -444,11 +440,11 @@ async function historyPage(env: Env, session: Session, params: URLSearchParams):
     '<input type="search" id="history-q" name="q" maxlength="120" placeholder="Search posts, captions, labels or activity" value="' +
     esc(search) + '"><button class="primary" type="submit">Search</button>' +
     (search ? '<a class="btn" href="/history">Clear</a>' : '') + '</form>' +
-    postSection("scheduled","Scheduled / In Inbox",scheduled,params,"/history","scheduled_page",
+    postSection(env,"scheduled","Scheduled / In Inbox",scheduled,params,"/history","scheduled_page",
       "No scheduled or inbox posts match this search.") +
-    postSection("published","Published",published,params,"/history","published_page",
+    postSection(env,"published","Published",published,params,"/history","published_page",
       "No published posts match this search.") +
-    postSection("other","Failed / Cancelled",other,params,"/history","other_page",
+    postSection(env,"other","Failed / Cancelled",other,params,"/history","other_page",
       "No failed or cancelled posts match this search.") +
     activityMarkup;
   return html(page("History",body,{login:session.login,wide:true}));
