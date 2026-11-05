@@ -517,6 +517,7 @@ interface PageState {
 }
 
 async function postPage(env: Env, session: Session, id: string, state: PageState, status = 200): Promise<Response> {
+  await reconcileOldTikTokInboxDrafts(env.DB);
   const p = await getPost(env.DB, id);
   if (!p) return html(page("Not found", `<p class="empty">That post does not exist (it may have been deleted).</p><p><a href="/">Back</a></p>`, { login: session.login }), { status: 404 });
   const csrf = await csrfToken(env, session);
@@ -687,7 +688,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="row"><button class="primary" type="submit">Reopen as editable draft</button></div>
     </form>`;
   }
-  if (p.status === "scheduled" || p.bluesky?.status === "scheduled") {
+  if ((p.status === "scheduled" && !isTikTokInboxRecord(p)) || p.bluesky?.status === "scheduled") {
     actions += `<form method="post" action="/post/${p.id}/cancel" class="card">${hidden}
       <p>Pending for <strong>${esc(whenText(env, p))}</strong>. Cancellation stops pending targets only, not already published posts.</p>
       <label for="cancel-pin">PIN</label>
@@ -695,7 +696,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
   }
-  if (p.status === "scheduled" && p.scheduled_at) {
+  if (p.status === "scheduled" && !isTikTokInboxRecord(p) && p.scheduled_at) {
     actions += `<form method="post" action="/post/${p.id}/reschedule" class="card">${hidden}
       <h2>Change release time</h2>
       <p class="hint">Moves the pending schedule without creating another post. Facebook and Bluesky are updated together when both are pending.</p>
@@ -704,7 +705,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label for="move-pin">Approval PIN</label><input id="move-pin" type="password" name="pin" required autocomplete="off">
       <div class="row"><button class="primary">Save new time</button></div></form>`;
   }
-  if (p.status === "scheduled") {
+  if (p.status === "scheduled" && !isTikTokInboxRecord(p)) {
     actions += `<form method="post" action="/post/${p.id}/edit-caption" class="card">${hidden}
       <h2>Edit unreleased captions</h2>
       <p class="hint">Save caption changes without publishing. Media and publishing targets are fixed after approval. An approved post will be updated on Facebook where supported.</p>
