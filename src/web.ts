@@ -5,7 +5,7 @@
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
 import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
-import { markTikTokInboxApproved, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, type Paged } from "./history.ts";
+import { markTikTokInboxApproved, markTikTokCreatorPublished, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, type Paged } from "./history.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { POSTER_FAVICON } from "./favicon.ts";
@@ -337,6 +337,9 @@ function statusChip(p: Post): string {
 
 function whenText(env: Env, p: Post): string {
   if (isTikTokInboxRecord(p)) return "TikTok transfer, finish in app";
+  if (p.status === "published" && p.tiktok_enabled && !p.fb_post_id && !p.scheduled_at &&
+      !["published","scheduled"].includes(p.bluesky?.status ?? ""))
+    return "Published by creator on TikTok";
   if (p.scheduled_at) return formatLocal(new Date(p.scheduled_at), env.TIMEZONE);
   if (p.status === "published" && p.approved_at) return `posted ${formatLocal(new Date(p.approved_at), env.TIMEZONE)}`;
   return "posts on approval";
@@ -1103,6 +1106,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     }
     if (action === "tiktok-status") {
       const checked=await refreshTikTokInboxTransfer(env,id,session.login);
+      if (checked.status === "published_by_creator")
+        await markTikTokCreatorPublished(env.DB,id);
       return postPage(env,session,id,{notice:"TikTok transfer: "+checked.status.replaceAll("_"," ")+
         (checked.post_mode==="DIRECT_POST"?". TikTok is processing your direct post.":". Complete publication inside TikTok if it is an inbox upload.")});
     }
