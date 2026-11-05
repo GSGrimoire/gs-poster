@@ -409,7 +409,8 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
   const range = weekRange(start, env.TIMEZONE);
   const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
   const calendar = renderCalendar(env,calendarPosts,await csrfToken(env,session),start);
-  const drafts = await searchPosts(env.DB,"drafts","",viewPage(params,"drafts_page"));
+  const draftSearch = normalizedSearch(params.get("q") ?? "");
+  const drafts = await searchPosts(env.DB,"drafts",draftSearch,viewPage(params,"drafts_page"));
   const missing = missingSecrets(env);
   const body =
     (missing.length ? '<div class="notice err">Not fully set up. Missing secrets: ' +
@@ -423,8 +424,13 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
     '<a class="btn" href="/new">New draft</a></div></div>' +
     calendar +
+    '<form class="history-search" method="get" action="/" role="search">' +
+    '<label for="drafts-q">Search drafts</label>' +
+    '<input type="search" id="drafts-q" name="q" maxlength="120" placeholder="Search titles, captions or releases" value="' +
+    esc(draftSearch) + '"><button class="primary" type="submit">Search</button>' +
+    (draftSearch ? '<a class="btn" href="/">Clear</a>' : '') + '</form>' +
     postSection(env,"drafts","Drafts",drafts,params,"/","drafts_page",
-      "No drafts waiting for review.") ;
+      "No drafts match this search.") ;
   return html(page("GS Poster",body,{login:session.login,wide:true}));
 }
 
