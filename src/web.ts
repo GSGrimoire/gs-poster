@@ -1005,7 +1005,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       const restored=await restoreCancelledPost(env,id,version,session.login);
       return restored
         ? redirect("/post/"+id)
-        : postPage(env,session,id,{error:"The post changed, or it still has an active publishing target. Reload before trying again."},409);
+        : postPage(env,session,id,{error:instagramPending(await getInstagramJob(env.DB,id))
+          ? "Instagram still has an approved job for this post. Reconcile or cancel it with your PIN from the Instagram card before restoring the cancelled Facebook post. Nothing was changed."
+          : "The post changed, or it still has an active publishing target. Reload before trying again."},409);
     }
     if (action === "resume-facebook") {
       const resumed = await resumeFailedFacebookUploads(env, id, session.login);
