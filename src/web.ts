@@ -437,7 +437,6 @@ async function historyPage(env: Env, session: Session, params: URLSearchParams):
     searchPosts(env.DB,"other",search,viewPage(params,"other_page")),
     searchActivity(env.DB,search,viewPage(params,"activity_page")),
   ]);
-  historyRenderEnv = env;
   const activityMarkup = '<details class="history-section" id="activity" open>' +
     '<summary><span>Activity</span><span class="history-count">' + activity.total + '</span></summary>' +
     '<div class="history-section-body">' +
