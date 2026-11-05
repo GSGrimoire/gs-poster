@@ -76,7 +76,8 @@ const env = (extra: Partial<Env> = {}) =>
 
 function editorDraft(p: any): EditorDraft {
   return { message: p.message, tiktok_caption: null, images: p.images, tiktok_images: p.tiktok_images, video: null,
-    tiktok_video: null, facebook_enabled: true, tiktok_enabled: false, scheduled_at: null, label: p.label, release: p.release };
+    tiktok_video: null, facebook_enabled: true, tiktok_enabled: false, scheduled_at: null, label: p.label, release: p.release,
+    bluesky_enabled: false, instagram_enabled: true } as EditorDraft;
 }
 async function draft(ig: InstagramDraft) {
   const p = await createPost(db, { message: "Cave. Free in the Archive.", label: "Cave", release: null,
@@ -507,4 +508,40 @@ test("F3: if saving the returned post id fails, the job is unclear and shows tha
   assert.equal(job.ambiguous, true);
   assert.match(job.error!, /returned post id ig-media-1/);
   assert.equal(publishes().length, 1);
+});
+
+// ---------------------------------------------------------------- review #83: F4 frozen approved jobs
+
+test("F4: Claude's update tool cannot move or switch off an approved Instagram post; text edits still save", async () => {
+  const { handleUpdateDraft } = await import("../src/mcp.ts");
+  const editor = env({ ALLOWED_GITHUB_LOGINS: "gsgrimoire", TIMEZONE: "Europe/Copenhagen" });
+  const at = new Date(Date.now() + 2 * 86400_000);
+  const p = await draft(CAROUSEL);
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, at, "gsgrimoire");
+  const moved = await handleUpdateDraft(editor, "https://gs-poster.test", "gsgrimoire", { id: p.id, publish_at: "2030-01-01T18:00" } as any);
+  assert.match(JSON.stringify(moved), /time is locked/);
+  const off = await handleUpdateDraft(editor, "https://gs-poster.test", "gsgrimoire", { id: p.id, instagram: null } as any);
+  assert.match(JSON.stringify(off), /cannot be switched off/);
+  assert.equal((await getPost(db, p.id))!.scheduled_at, null);
+  const text = await handleUpdateDraft(editor, "https://gs-poster.test", "gsgrimoire", { id: p.id, message: "Edited Facebook caption." } as any);
+  assert.equal(JSON.parse((text as any).content[0].text).saved, true);
+  assert.equal((await getInstagramJob(db, p.id))!.due_at, at.toISOString());
+});
+
+test("F4: the database refuses a frozen-field change even when a caller skips the check", async () => {
+  const { saveEditorDraft: save, rejectDraft } = await import("../src/db.ts");
+  const p = await draft(CAROUSEL);
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, new Date(Date.now() + 3600_000), "gsgrimoire");
+  const cur = (await getPost(db, p.id))!;
+  const base = { ...editorDraft(cur), tiktok_title: null };
+  assert.equal(await save(db, p.id, cur.updated_at, { ...base, scheduled_at: new Date(Date.now() + 86400_000).toISOString() }, null), null);
+  assert.equal(await save(db, p.id, cur.updated_at, { ...base, instagram_enabled: false }, null), null);
+  assert.equal(await rejectDraft(db, p.id, "no"), false);
+  for (const status of ["preparing", "processing", "sending", "failed"]) {
+    await db.prepare("UPDATE instagram_jobs SET status = ? WHERE post_id = ?").bind(status, p.id).run();
+    assert.equal(await rejectDraft(db, p.id, "no"), false, status);
+  }
+  // Once published, the job cannot publish again: the draft is free again (for example for a later Facebook post).
+  await db.prepare("UPDATE instagram_jobs SET status = 'published' WHERE post_id = ?").bind(p.id).run();
+  assert.ok(await save(db, p.id, cur.updated_at, { ...base, scheduled_at: new Date(Date.now() + 86400_000).toISOString() }, null));
 });

@@ -16,7 +16,7 @@ import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction
 import { tiktokConnection } from "./tiktok.ts";
 import { tiktokOptionsPage, TIKTOK_DIRECT_POST_VISIBLE } from "./tiktok-options.ts";
 import { serveTikTokMedia } from "./tiktok-media.ts";
-import { cancelInstagramJob, closeAmbiguousInstagramJob, getInstagramJob, instagramJobCard, instagramReleasePlan,
+import { cancelInstagramJob, closeAmbiguousInstagramJob, getInstagramJob, instagramFreezeProblem, instagramJobCard, instagramPending, instagramReleasePlan,
   queueInstagramOnApproval, retryInstagramJob, serveInstagramMedia } from "./instagram-publish.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
 import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
@@ -862,6 +862,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const parsed = parseEditorForm(form, current, env.TIMEZONE);
     if (parsed.errors.length || !parsed.next)
       return fail("Not saved: " + parsed.errors.join(" "), 400);
+    const frozen = instagramFreezeProblem(await getInstagramJob(env.DB, id), current, parsed.next);
+    if (frozen) return fail("Not saved: " + frozen, 409);
     const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null, parsed.instagram ?? null);
     if (!saved) return fail("This draft changed while saving. Your edits were not saved. Reload and edit again.", 409);
     await audit(env.DB, session.login, current.status === "rejected" ? "revised-rejected" : "edited", id, auto ? "web editor autosave" : "web editor")
@@ -871,7 +873,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
   if (action === "reject") {
     const ok = await rejectPost(env, id, String(form.get("reason") || "").slice(0, 500), session.login);
-    return ok ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Only drafts can be rejected." }, 409);
+    if (ok) return redirect(`/post/${id}`);
+    return postPage(env, session, id, { error: instagramPending(await getInstagramJob(env.DB, id))
+      ? "This post is approved for Instagram and may still publish, so it cannot be rejected. Cancel Instagram with your PIN in the Instagram card first."
+      : "Only drafts can be rejected." }, 409);
   }
   // All publication, cancellation and failed-target recovery require the PIN
   const whenRaw = String(form.get("when") ?? "").trim();

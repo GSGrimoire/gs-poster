@@ -106,6 +106,22 @@ export async function ensureInstagramJobs(db: D1Database): Promise<void> {
   schemaReady = true;
 }
 
+/** An approved job that may still publish or whose result is unclear (see db.ts IG_PENDING). */
+export function instagramPending(job: InstagramJob | null): boolean {
+  return !!job && job.status !== "cancelled" && job.status !== "published";
+}
+
+/** Why a PIN-free draft change would be refused, or null when it is allowed. */
+export function instagramFreezeProblem(job: InstagramJob | null, cur: { scheduled_at: string | null },
+  next: { scheduled_at: string | null; instagram_enabled: boolean }): string | null {
+  if (!instagramPending(job)) return null;
+  if (next.scheduled_at !== cur.scheduled_at)
+    return "This post is approved for Instagram, so its time is locked. Move it in the calendar with your PIN, or cancel Instagram with your PIN first.";
+  if (!next.instagram_enabled)
+    return "This post is approved for Instagram, so Instagram cannot be switched off here. Cancel it with your PIN in the Instagram card first.";
+  return null;
+}
+
 export async function getInstagramJob(db: D1Database, postId: string): Promise<InstagramJob | null> {
   await ensureInstagramJobs(db);
   const row = await db.prepare("SELECT * FROM instagram_jobs WHERE post_id = ?").bind(postId).first<Row>();
@@ -452,6 +468,7 @@ export function instagramJobCard(job: InstagramJob | null, postId: string, csrf:
     `<p><strong>${esc(LABEL[job.status])}</strong> · ${esc(kind)}${job.status === "scheduled" ? " · " + esc(when(job.due_at)) : ""}</p>`,
     job.permalink ? `<p><a href="${esc(job.permalink)}" target="_blank" rel="noopener noreferrer">Open on Instagram</a></p>` : "",
     job.error ? `<p class="err">${esc(job.error)}</p>` : "",
+    instagramPending(job) ? `<p class="hint">This approved Instagram post is frozen. Editing the draft does not change it, and its time and the Instagram switch are locked. To change it, cancel it with your PIN and approve again.</p>` : "",
     job.status === "scheduled" ? pinForm("instagram-cancel", "Cancel Instagram post") : "",
     job.status === "failed" && !job.ambiguous ? pinForm("instagram-retry", "Try Instagram again") + pinForm("instagram-cancel", "Stop Instagram") : "",
     job.status === "failed" && job.ambiguous ? pinForm("instagram-close", "Close: it is not on Instagram",

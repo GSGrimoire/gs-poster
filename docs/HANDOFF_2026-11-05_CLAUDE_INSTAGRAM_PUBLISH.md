@@ -60,3 +60,17 @@ There have been no real Meta calls. Real Instagram container processing, Meta fe
   - F3: a crash right after the barrier, a send still inside its lease, a late answer before and after the owner's decision, and a failed media-id write.
   - Production router: successful Instagram-only and mixed Facebook plus Instagram approvals, using private uploads in a local R2 bucket.
 - **Checks:** `npm run check` gave 371 passed, 0 failed, three runs in a row. The `wrangler` dry-run passes and `git diff --check` is clean.
+
+## Review round 2 (ChatGPT-2, head `b283bb9`): F4
+
+- **Finding:** an Instagram-only approval leaves the post a draft. PIN-free saves (web autosave and MCP `update_draft`) could change its time or switch Instagram off, and the pre-PIN `/reject` could reject it, while the frozen job still published at its original time.
+- **Fix:** while a job is pending (`scheduled`, `preparing`, `processing`, `sending` or `failed`, which includes unclear):
+  - `saveEditorDraft` refuses, inside the posts `UPDATE` itself, a change to `scheduled_at` or switching Instagram off;
+  - `rejectDraft` replaces the generic status update and refuses to reject the post, in one statement.
+- **Still allowed:** other draft fields save, and the Instagram card says the approved post is frozen and unaffected. A cancelled or published job unlocks the draft again; a published job cannot publish twice, which keeps "Instagram now, Facebook later" possible. The PIN-gated calendar move remains the way to change an approved time.
+- **Messages:** the web save, MCP `update_draft` and reject return a plain reason before the database guard is reached. The database guard still holds against races and callers that skip the check.
+- **Tests:**
+  - Production router: a time change and switching Instagram off are refused with nothing changed; a text edit saves while the job's caption and time stay frozen; reject is refused until the PIN cancel, then works; a mixed approval allows no PIN-free change or rejection.
+  - MCP `handleUpdateDraft`: `publish_at` and `instagram: null` are refused, and a text edit saves.
+  - Database: the guard holds when a caller skips the check, in every pending state, and a published job unlocks the draft.
+- **Checks:** `npm run check` gave 376 passed, 0 failed, three runs. The `wrangler` dry-run passes and `git diff --check origin/main...HEAD` is clean.

@@ -4,7 +4,7 @@
  */
 import type { Env } from "./env.ts";
 import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
-import { audit, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, reopenFailedDraft, type Post, type ApprovalSnapshot, tiktokMedia } from "./db.ts";
+import { audit, rejectDraft, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, reopenFailedDraft, type Post, type ApprovalSnapshot, tiktokMedia } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
 import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchVideo } from "./video.ts";
@@ -248,7 +248,7 @@ export async function reconcileStuckPublishing(
 }
 
 export async function rejectPost(env: Env, id: string, reason: string, actor: string): Promise<boolean> {
-  const ok = await updatePost(env.DB, id, { status: "rejected", note: reason || null }, ["draft"]);
+  const ok = await rejectDraft(env.DB, id, reason || null);
   if (ok) await audit(env.DB, actor, "rejected", id, reason || undefined);
   return ok;
 }

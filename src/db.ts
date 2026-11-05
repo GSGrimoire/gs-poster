@@ -111,6 +111,11 @@ export const INSTAGRAM_JOBS_DDL = `CREATE TABLE IF NOT EXISTS instagram_jobs (
   ambiguous INTEGER NOT NULL DEFAULT 0, lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL)`;
 /** Instagram job states that are under way: their time and their post are fixed. */
 const IG_STARTED = "('preparing','processing','sending')";
+/** An approved Instagram job that may still publish (or whose result is unclear):
+ * PIN-free edits may not change its time, switch Instagram off or reject the post. */
+const IG_PENDING = "('scheduled','preparing','processing','sending','failed')";
+const igPending = (alias: string) =>
+  `EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = ${alias}.id AND j.status IN ${IG_PENDING})`;
 
 let schemaReady = false;
 
@@ -600,12 +605,16 @@ export async function saveEditorDraft(
     db.prepare(`UPDATE posts SET status = 'draft', message = ?, tiktok_caption = ?, tiktok_title = ?, images = ?, tiktok_images = ?,
         video = ?, tiktok_video = ?, facebook_enabled = ?, tiktok_enabled = ?, scheduled_at = ?, label = ?, release = ?,
         link = CASE WHEN ? = 1 THEN ? ELSE link END, updated_at = ?
-      WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL`)
+      WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL
+        AND ((scheduled_at IS ? AND ? = 1) OR NOT ${igPending("posts")})`)
       .bind(next.message, next.tiktok_caption, next.tiktok_title ?? null, JSON.stringify(next.images),
         next.tiktok_images === null ? null : JSON.stringify(next.tiktok_images),
         next.video, next.tiktok_video, next.facebook_enabled ? 1 : 0, next.tiktok_enabled ? 1 : 0,
         next.scheduled_at, next.label, next.release,
-        next.link === undefined ? 0 : 1, next.link ?? null, version, id, expectedVersion),
+        next.link === undefined ? 0 : 1, next.link ?? null, version, id, expectedVersion,
+        // With an approved Instagram job pending, the time and the Instagram
+        // switch are frozen here; only the PIN-gated cancel or move changes them.
+        next.scheduled_at, next.instagram_enabled ? 1 : 0),
     bluesky
       ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, video, patreon, facebook_enabled, status)
           SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${fenced}
@@ -795,6 +804,14 @@ export async function audit(db: D1Database, actor: string, action: string, postI
     .prepare(`INSERT INTO audit (ts, actor, action, post_id, detail) VALUES (?, ?, ?, ?, ?)`)
     .bind(new Date().toISOString(), actor, action, postId, detail ?? null)
     .run();
+}
+
+/** Reject a draft, unless an approved Instagram job for it may still publish. */
+export async function rejectDraft(db: D1Database, id: string, note: string | null): Promise<boolean> {
+  await ensureSchema(db);
+  const res = await db.prepare(`UPDATE posts SET status = 'rejected', note = ?, updated_at = ?
+    WHERE id = ? AND status = 'draft' AND NOT ${igPending("posts")}`).bind(note, new Date().toISOString(), id).run();
+  return (res.meta.changes ?? 0) === 1;
 }
 
 export interface AuditRow {

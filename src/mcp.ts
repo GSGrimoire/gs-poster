@@ -7,7 +7,7 @@ import { getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import type { Env } from "./env.ts";
 import { missingSecrets } from "./env.ts";
-import { checkInstagram, getInstagramJob } from "./instagram-publish.ts";
+import { checkInstagram, getInstagramJob, instagramFreezeProblem } from "./instagram-publish.ts";
 import { audit, createPost, deletePost, getPost, listPosts, saveEditorDraft, type Post, type PostStatus, type BlueskyDraft } from "./db.ts";
 import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
@@ -245,6 +245,10 @@ export async function handleUpdateDraft(
         errors.push(...instagramSaveErrors(instagram, own).map((e) => "Instagram: " + e));
         errors.push(...checkMessage(instagram.caption, { hasImages: instagram.items.length > 0 }).errors.map((e) => "Instagram caption: " + e));
       }
+      // An approved Instagram job freezes the post's time and Instagram switch (see db.ts).
+      const frozen = instagramFreezeProblem(await getInstagramJob(env.DB, id), cur,
+        { scheduled_at: time.when?.toISOString() ?? null, instagram_enabled: instagramOn });
+      if (frozen) errors.push(frozen);
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
       // One fenced D1 transaction for the post row AND its Bluesky target (#63).
       // facebook_enabled is written to posts, which is what approval reads.

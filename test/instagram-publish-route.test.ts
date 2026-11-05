@@ -43,7 +43,8 @@ after(async () => { await on?.mf.dispose(); });
 
 function editorDraft(p: any): EditorDraft {
   return { message: p.message, tiktok_caption: null, images: p.images, tiktok_images: p.tiktok_images, video: null,
-    tiktok_video: null, facebook_enabled: true, tiktok_enabled: false, scheduled_at: null, label: p.label, release: p.release };
+    tiktok_video: null, facebook_enabled: true, tiktok_enabled: false, scheduled_at: null, label: p.label, release: p.release,
+    bluesky_enabled: false, instagram_enabled: true } as EditorDraft;
 }
 async function draft(db: D1Database) {
   const p = await createPost(db, { message: "Cave.", label: "Cave", release: null, images: [IMG(1), IMG(2)],
@@ -182,4 +183,64 @@ test("one approval queues Instagram and the Facebook photo post together, on the
   const after = (await getPost(on.db, p.id))!;
   assert.ok(after.approved_at, "Facebook was claimed by the same approval");
   assert.equal(after.status, "publishing", "Facebook photo posts go through the cron queue");
+});
+
+// ---------------------------------------------------------------- review #83: F4 frozen approved jobs
+
+async function approvedIgOnly(at: Date | null) {
+  const p = await draftWith(await privatePhotos(2), false, at ? at.toISOString() : null);
+  await queueInstagramOnApproval({ DB: on.db, FB_PAGE_TOKEN: "t", IG_USER_ID: IG_ID } as Env, p.id, p.updated_at, at ?? new Date(), "gsgrimoire");
+  return (await getPost(on.db, p.id))!;
+}
+const save = (p: { id: string; updated_at: string }, extra: Record<string, string>) =>
+  post(on.mf, `/post/${p.id}/save`, { expected_updated_at: p.updated_at, auto: "1", message: "Cave.", p_instagram: "1",
+    ig_caption: "Into the cave #dnd", ...extra });
+
+test("F4: a PIN-free save cannot move the time of an approved Instagram post or switch Instagram off", async () => {
+  const at = new Date(Date.now() + 2 * 86400_000); at.setUTCSeconds(0, 0);
+  const p = await approvedIgOnly(at);
+  const html = await page(on.mf, "/post/" + p.id);
+  assert.match(html, /This approved Instagram post is frozen/);
+  const moved = await save(p, { when: "2030-01-01T18:00" });
+  assert.equal(moved.status, 409);
+  assert.match(await moved.text(), /approved for Instagram, so its time is locked/);
+  const off = await save(p, { p_instagram: "0", p_facebook: "1" });
+  assert.equal(off.status, 409);
+  assert.match(await off.text(), /cannot be switched off here/);
+  let cur = (await getPost(on.db, p.id))!;
+  assert.equal(cur.scheduled_at, at.toISOString(), "the post time did not move");
+  assert.ok(cur.instagram, "Instagram is still on");
+  // Text edits still save, and do not change what was approved.
+  const text = await save(cur, { ig_caption: "Edited after approval #dnd" });
+  assert.equal(text.status, 200, await text.clone().text());
+  cur = (await getPost(on.db, p.id))!;
+  assert.equal(cur.instagram!.caption, "Edited after approval #dnd");
+  const job = (await getInstagramJob(on.db, p.id))!;
+  assert.equal(job.caption, "Into the cave #dnd", "the approved caption is frozen");
+  assert.equal(job.due_at, at.toISOString(), "the approved time is unchanged");
+});
+
+test("F4: a post whose Instagram job may still publish cannot be rejected; after the PIN cancel it can", async () => {
+  const p = await approvedIgOnly(new Date(Date.now() + 86400_000));
+  const rejected = await post(on.mf, `/post/${p.id}/reject`, { reason: "no" });
+  assert.equal(rejected.status, 409);
+  assert.match(await rejected.text(), /cannot be rejected/);
+  assert.equal((await getPost(on.db, p.id))!.status, "draft");
+  assert.equal((await post(on.mf, `/post/${p.id}/instagram-cancel`, { pin: PIN })).status, 200);
+  const after = await post(on.mf, `/post/${p.id}/reject`, { reason: "no" });
+  assert.equal(after.status, 302);
+  assert.equal((await getPost(on.db, p.id))!.status, "rejected");
+});
+
+test("F4: a mixed approval leaves no PIN-free way to change the post or reject it", async () => {
+  const at = new Date(Date.now() + 2 * 86400_000); at.setUTCSeconds(0, 0);
+  const p = await draftWith(await privatePhotos(2), true, at.toISOString());
+  assert.equal((await post(on.mf, `/post/${p.id}/approve`, { expected_updated_at: p.updated_at,
+    target_facebook: "1", target_instagram: "1", confirm_instagram: "1", pin: PIN })).status, 200);
+  const cur = (await getPost(on.db, p.id))!;
+  const res = await save(cur, { when: "2030-01-01T18:00", p_facebook: "1" });
+  assert.equal(res.status, 409);
+  assert.equal((await post(on.mf, `/post/${p.id}/reject`, { reason: "no" })).status, 409);
+  assert.equal((await getPost(on.db, p.id))!.scheduled_at, at.toISOString());
+  assert.equal((await getInstagramJob(on.db, p.id))!.due_at, at.toISOString());
 });
