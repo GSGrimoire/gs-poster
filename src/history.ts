@@ -118,3 +118,24 @@ export async function markTikTokInboxApproved(
     .bind(now, postId, expectedVersion).run();
   return (result.meta.changes ?? 0) === 1;
 }
+
+
+/** Only a confirmed TikTok status check can move an inbox-only record to
+ * Published. No provider request occurs here, and mixed Facebook, Bluesky or
+ * Instagram jobs remain governed by their own independent delivery states. */
+export async function markTikTokCreatorPublished(db: D1Database,postId: string): Promise<boolean> {
+  await ensureSchema(db);
+  await ensureTikTokInboxSchema(db);
+  const now = new Date().toISOString();
+  const result = await db.prepare("UPDATE posts SET status='published', updated_at=?" +
+    " WHERE id=? AND status='scheduled' AND approved_at IS NOT NULL AND scheduled_at IS NULL" +
+    " AND tiktok_enabled=1 AND fb_post_id IS NULL" +
+    " AND NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id" +
+    " AND b.status IN ('scheduled','publishing','published'))" +
+    " AND NOT EXISTS (SELECT 1 FROM instagram_jobs i WHERE i.post_id=posts.id" +
+    " AND i.status IN ('scheduled','preparing','processing','sending','failed'))" +
+    " AND EXISTS (SELECT 1 FROM tiktok_inbox_transfers t WHERE t.post_id=posts.id" +
+    " AND t.status='published_by_creator')")
+    .bind(now,postId).run();
+  return (result.meta.changes ?? 0) === 1;
+}
