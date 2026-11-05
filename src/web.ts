@@ -4,7 +4,7 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
@@ -51,6 +51,7 @@ import { formatLocal, localToUtc, toLocalInput } from "./time.ts";
 import { APPROVE_MIN_LEAD_MS, checkMessage, checkWhen, mediaLooksPending } from "./validate.ts";
 import { decideReleaseTime, earliestValidTime, EDITOR_BUFFER_MS } from "./schedule.ts";
 import { sendTikTokOnApproval, tiktokReleasePlan } from "./tiktok-release.ts";
+import { renderXCard, xAvailable, X_SHARE_JS } from "./x-share.ts";
 
 const redirect = (location: string, headers?: Headers): Response => {
   const h = headers ?? new Headers();
@@ -119,6 +120,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   if (path === "/new-draft.js" && req.method === "GET") return new Response(NEW_DRAFT_JS, {headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
   if (path === "/draft-editor.js" && req.method === "GET") return new Response(DRAFT_EDITOR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+  if (path === "/x-share.js" && req.method === "GET") return new Response(X_SHARE_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   if (path === "/draft-media.js" && req.method === "GET") return new Response(DRAFT_MEDIA_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video|import-tiktok-image|import-video)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
@@ -135,7 +137,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|x-opened))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -463,6 +465,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <input type="text" id="bs_alt_${i}" name="bs_alt_${i}" value="${esc(item?.alt ?? "")}"></div>`;
   }).join("");
   const patreon = bs?.patreon;
+  const xCard = renderXCard(p, csrf, env.TIMEZONE);
 
 
   let actions = "";
@@ -515,7 +518,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ];
     const editor = renderDraftEditor({
       post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p), error: state.error, notice: state.notice,
-      checksHtml: checkList, releaseProblems, mediaPanel: draftMediaPanel(p, csrf), tiktokCard: actions,
+      checksHtml: checkList, releaseProblems, mediaPanel: draftMediaPanel(p, csrf), tiktokCard: actions, xCard,
       tiktokPlan: tiktokReleasePlan(p, tiktokConn, tiktokTransfer),
       mediaLooksPending: p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release),
       createdLine: `Drafted by ${p.created_by ?? "?"} · ${formatLocal(new Date(p.created_at), env.TIMEZONE)} · ${p.id}`,
@@ -710,6 +713,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
       <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} · ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} · ${esc(p.id)}</p>
     </div>
+    ${xCard}
     ${draftMediaPanel(p, csrf)}
     ${actions}`;
   return html(page(p.label || "Post", body, { login: session.login }), { status });
@@ -834,6 +838,17 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   const form = await req.formData();
   if (!(await checkCsrf(env, session, String(form.get("csrf") || "")))) {
     return postPage(env, session, id, { error: "The form expired. Reload the page and try again." }, 403);
+  }
+
+  // Logging an Open in X press sends nothing and changes no content, so it
+  // needs no PIN. The owner posts by hand in X. Session, same-origin and CSRF
+  // above still apply.
+  if (action === "x-opened") {
+    const current = await getPost(env.DB, id);
+    const noStore = { headers: { "Cache-Control": "no-store" } };
+    if (!current) return Response.json({ ok: false, error: "Post not found." }, { status: 404, ...noStore });
+    if (!xAvailable(current)) return Response.json({ ok: false, error: "This post is not offered for X." }, { status: 409, ...noStore });
+    return Response.json({ ok: true, first: await markXOpened(env.DB, id, session.login) }, noStore);
   }
 
   // Saving an unapproved draft is not a release, so it needs no PIN (owner

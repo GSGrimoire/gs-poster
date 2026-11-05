@@ -215,6 +215,7 @@ export interface EditorView {
   releaseProblems: string[];
   mediaPanel: string;
   tiktokCard: string;
+  xCard?: string;
   /** What the one-PIN release would send to TikTok (#61). */
   tiktokPlan?: TikTokReleasePlan;
   mediaLooksPending: boolean;
@@ -643,6 +644,7 @@ export function renderDraftEditor(v: EditorView): string {
   </form>
   <aside class="editor-rail" aria-label="Release">
     ${renderEditorialReview(p)}
+    ${v.xCard ?? ""}
     ${release}
     ${v.tiktokCard}
     <details class="ed-card"><summary>Reject and send back to the assistant</summary>
