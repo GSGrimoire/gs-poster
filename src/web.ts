@@ -1053,9 +1053,18 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         aiGenerated:form.get("is_aigc")==="1",
       };
       const version=String(form.get("expected_updated_at")||"");
-      const result=mode==="MEDIA_UPLOAD"&&mediaType==="VIDEO"
-        ? await startTikTokInboxTransfer(env,id,version,session.login)
-        : await startTikTokContentTransfer(env,id,version,session.login,options);
+      let result;
+      try {
+        result=mode==="MEDIA_UPLOAD"&&mediaType==="VIDEO"
+          ? await startTikTokInboxTransfer(env,id,version,session.login)
+          : await startTikTokContentTransfer(env,id,version,session.login,options);
+      } catch (error) {
+        // An uncertain provider response may already have caused an inbox
+        // transfer. Preserve its owner-approved state and never auto-retry.
+        await markTikTokInboxApproved(env.DB,id,version).catch(() => false);
+        throw error;
+      }
+      await markTikTokInboxApproved(env.DB,id,version);
       return postPage(env,session,id,{notice:
         "TikTok "+result.media_type+" transfer started. "+
         (mode==="DIRECT_POST"?"This private post is processing.":"Complete publication in the TikTok app.")});
@@ -1063,7 +1072,13 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (action === "tiktok-upload") {
       if (form.get("confirm_tiktok") !== "1")
         return postPage(env,session,id,{error:"Confirm that TikTok publication is manual."},400);
-      await startTikTokInboxTransfer(env,id,String(form.get("expected_updated_at")||""),session.login);
+      const version=String(form.get("expected_updated_at")||"");
+      try { await startTikTokInboxTransfer(env,id,version,session.login); }
+      catch(error) {
+        await markTikTokInboxApproved(env.DB,id,version).catch(()=>false);
+        throw error;
+      }
+      await markTikTokInboxApproved(env.DB,id,version);
       return postPage(env,session,id,{notice:"Video transferred to TikTok. Open your TikTok inbox to complete publication."});
     }
     if (action === "tiktok-clear") {
@@ -1268,6 +1283,16 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         outcomes.push({ ok: true, text: `TikTok: ${ttPlan.type === "VIDEO" ? "video" : ttPlan.count + "-photo carousel"} sent to your TikTok inbox now. Finish and publish it in the TikTok app.` });
       } catch (error) {
         outcomes.push({ ok: false, text: "TikTok: " + (error instanceof Error ? error.message : String(error)) + " See the TikTok card for the safe next step." });
+      }
+    }
+    // TikTok-only approval has no provider-side publishing schedule, but it
+    // must leave Drafts after the PIN-gated transfer claim. A rejected attempt
+    // stays a draft; an uncertain attempt moves to History for human review.
+    if (ttPlan?.ok && !facebook && !blueskySelected && !instagramSelected) {
+      const transfer = await getTikTokInboxTransfer(env.DB,id);
+      if (transfer && !["rejected","cleared"].includes(transfer.status)) {
+        const marked = await markTikTokInboxApproved(env.DB,id,current.updated_at);
+        if (!marked) outcomes.push({ ok:false, text:"TikTok was contacted, but GS Poster could not update the post status. Check the TikTok transfer card before taking further action." });
       }
     }
     // Instagram is queued, not sent: cron publishes it at the approved time.
