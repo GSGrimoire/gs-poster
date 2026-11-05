@@ -31,6 +31,7 @@ TikTok Login Kit and manual inbox uploads are implemented, with optional private
 | Draft, revise, delete drafts | yes | edit before approving |
 | Read Page posts and the schedule | yes | in Business Suite |
 | Publish or schedule | **no** | yes, with PIN |
+| Open a post in X's composer | no | yes, no PIN: it sends nothing and Gus presses Post in X |
 | Cancel a scheduled post | no | yes, with PIN |
 | See Facebook or Bluesky credentials | no | only in the Cloudflare dashboard |
 

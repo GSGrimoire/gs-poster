@@ -67,6 +67,8 @@ export interface Post {
   /** Instagram feed target, prepared only: nothing sends it yet. */
   instagram: InstagramDraft | null;
   instagram_paused?: InstagramDraft | null;
+  /** When the owner first pressed Open in X. Nothing is sent to X by GS Poster. */
+  x_opened_at?: string | null;
 }
 
 interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky" | "instagram"> {
@@ -145,7 +147,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       note TEXT,
       error TEXT,
       created_by TEXT,
-      approved_at TEXT
+      approved_at TEXT,
+      x_opened_at TEXT
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS posts_status ON posts(status, created_at)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS audit (
@@ -200,7 +203,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     catch(error) { if (!/duplicate column name/i.test(String(error))) throw error; }
   }
   const platformColumns=await db.prepare("PRAGMA table_info(posts)").all<{name:string}>();
-  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"],["tiktok_caption","TEXT"],["tiktok_title","TEXT"],["tiktok_images","TEXT"],["tiktok_video","TEXT"]]) {
+  for(const [name,definition] of [["facebook_enabled","INTEGER NOT NULL DEFAULT 1"],["tiktok_enabled","INTEGER NOT NULL DEFAULT 0"],["tiktok_caption","TEXT"],["tiktok_title","TEXT"],["tiktok_images","TEXT"],["tiktok_video","TEXT"],["x_opened_at","TEXT"]]) {
     if(!platformColumns.results.some(column=>column.name===name)) {
       try {await db.prepare("ALTER TABLE posts ADD COLUMN "+name+" "+definition).run();}
       catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
@@ -812,6 +815,23 @@ export async function rejectDraft(db: D1Database, id: string, note: string | nul
   const res = await db.prepare(`UPDATE posts SET status = 'rejected', note = ?, updated_at = ?
     WHERE id = ? AND status = 'draft' AND NOT ${igPending("posts")}`).bind(note, new Date().toISOString(), id).run();
   return (res.meta.changes ?? 0) === 1;
+}
+
+/**
+ * Record the first Open in X press with its audit line, in one transaction.
+ * updated_at is left alone on purpose: the press changes no content, and
+ * bumping it would make an open editor's next save fail the version fence.
+ */
+export async function markXOpened(db: D1Database, id: string, actor: string): Promise<boolean> {
+  await ensureSchema(db);
+  const now = new Date().toISOString();
+  const [marked] = await db.batch([
+    db.prepare(`UPDATE posts SET x_opened_at = ? WHERE id = ? AND x_opened_at IS NULL`).bind(now, id),
+    db.prepare(`INSERT INTO audit (ts, actor, action, post_id, detail)
+      SELECT ?, ?, 'x-opened', id, 'composer opened, posting is manual' FROM posts WHERE id = ? AND x_opened_at = ?
+      AND NOT EXISTS (SELECT 1 FROM audit WHERE action = 'x-opened' AND post_id = ?)`).bind(now, actor, id, now, id),
+  ]);
+  return (marked.meta.changes ?? 0) > 0;
 }
 
 export interface AuditRow {
