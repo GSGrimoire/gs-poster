@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {build} from "esbuild";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {createPost,ensureSchema,getPost,audit} from "../src/db.ts";
-import {searchPosts,searchActivity,reconcileOldTikTokInboxDrafts,markTikTokInboxApproved} from "../src/history.ts";
+import {searchPosts,searchActivity,reconcileOldTikTokInboxDrafts,markTikTokInboxApproved,markTikTokCreatorPublished} from "../src/history.ts";
 import {ensureTikTokInboxSchema} from "../src/tiktok-inbox.ts";
 import {makeSession,SESSION_COOKIE} from "../src/session.ts";
 import type {Env} from "../src/env.ts";
@@ -165,4 +165,27 @@ test("TikTok-only status promotion is version-fenced and needs an existing durab
   assert.equal(await markTikTokInboxApproved(db,p.id,p.updated_at),true);
   assert.equal((await getPost(db,p.id))!.status,"scheduled");
   assert.equal(await markTikTokInboxApproved(db,p.id,p.updated_at),false,"no duplicate promotion");
+});
+
+
+test("only a confirmed creator publication moves a TikTok inbox post to Published",async()=>{
+  const p=await createPost(db,{message:"Creator publication",label:"Published on TikTok",
+    release:null,images:[],video:null,created_by:"test",facebook_enabled:false,
+    tiktok_enabled:true,bluesky:null,scheduled_at:null});
+  const now=new Date().toISOString();
+  await db.prepare("INSERT INTO tiktok_inbox_transfers " +
+    "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by) VALUES (?,?,?,?,?,?,?)")
+    .bind(p.id,"processing","post-123","[]",now,now,"test").run();
+  assert.equal(await markTikTokInboxApproved(db,p.id,p.updated_at),true);
+  assert.equal(await markTikTokCreatorPublished(db,p.id),false,
+    "a transfer in progress is not a TikTok publication");
+  assert.equal((await getPost(db,p.id))!.status,"scheduled");
+  await db.prepare("UPDATE tiktok_inbox_transfers SET status='published_by_creator' WHERE post_id=?")
+    .bind(p.id).run();
+  assert.equal(await markTikTokCreatorPublished(db,p.id),true);
+  assert.equal((await getPost(db,p.id))!.status,"published");
+  assert.equal(await markTikTokCreatorPublished(db,p.id),false,"no repeat transition");
+  const html=await (await get("/history?q=Published%20on%20TikTok")).text();
+  assert.match(html,/Published by creator on TikTok/);
+  assert.match(html,/Published<\/span><span class="history-count">1<\/span>/);
 });
