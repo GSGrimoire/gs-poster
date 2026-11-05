@@ -333,8 +333,19 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
       return;
     }
     const sendLease = new Date(Date.now() + THREADS_SEND_LEASE_MS).toISOString();
-    if (!(await write(env.DB, job, { status: "sending", lease_until: sendLease }, ["processing"])))
+    // The one-way barrier is only crossed while the approved account is still
+    // connected, checked in the same statement: a disconnect (or a switch to
+    // another account) since this run read its sign-in stops the send here.
+    const barrier = await env.DB.prepare(`UPDATE threads_jobs SET status = 'sending', lease_until = ?, updated_at = ?
+      WHERE post_id = ? AND lease_until = ? AND status = 'processing'
+        AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = threads_jobs.account_id)`)
+      .bind(sendLease, new Date().toISOString(), job.post_id, job.lease_until).run();
+    if ((barrier.meta.changes ?? 0) !== 1) {
+      const stillOurs = await env.DB.prepare("SELECT 1 AS x FROM threads_jobs WHERE post_id = ? AND lease_until = ? AND status = 'processing'")
+        .bind(job.post_id, job.lease_until).first();
+      if (stillOurs) return await fail(`The approved Threads account @${job.account_username || job.account_id} was disconnected before the final send. Nothing was sent. Reconnect it and press Try Threads again, or cancel this post.`, false, ["processing"]);
       throw new Error("Threads publication lost its claim before sending; nothing was published.");
+    }
     job.lease_until = sendLease;
     sent = true;
     let mediaId: string;

@@ -133,9 +133,9 @@ test("a signed-in approval with the PIN queues a Threads text post", async () =>
   const { sealThreadsToken } = await import("../src/threads.ts");
   const { saveEditorDraft } = await import("../src/db.ts");
   const sealed = await sealThreadsToken({ COOKIE_SECRET: SECRET } as Env, "test-only-threads-token");
-  await db.prepare(`INSERT OR REPLACE INTO threads_accounts (account_key, user_id, username, token_cipher, connected_by, expires_at, issued_at, updated_at)
-    VALUES ('primary', '17841400000000077', 'gsgrimoire', ?, 'gsgrimoire', ?, ?, ?)`)
-    .bind(sealed, Math.floor(Date.now() / 1000) + 50 * 86400, Math.floor(Date.now() / 1000), new Date().toISOString()).run();
+  await db.prepare(`INSERT OR REPLACE INTO threads_accounts (account_key, user_id, username, token_cipher, connected_by, expires_at, issued_at, updated_at, connected_at)
+    VALUES ('primary', '17841400000000077', 'gsgrimoire', ?, 'gsgrimoire', ?, ?, ?, ?)`)
+    .bind(sealed, Math.floor(Date.now() / 1000) + 50 * 86400, Math.floor(Date.now() / 1000), new Date().toISOString(), Math.floor(Date.now() / 1000)).run();
   const p = await createPost(db, { message: "Cave.", label: "Cave", release: null, images: [], video: null,
     created_by: "test", scheduled_at: null } as any);
   assert.ok(await saveEditorDraft(db, p.id, p.updated_at, { message: "Cave.", tiktok_caption: null, tiktok_title: null, images: [],
@@ -183,4 +183,17 @@ test("T1: an approved Threads post cannot be re-timed, switched off or rejected 
   assert.equal(after.status, "draft");
   assert.equal(after.scheduled_at, due);
   assert.equal((await getThreadsJob(db, p.id))!.due_at, due);
+});
+
+test("T5: Meta's public callbacks refuse a declared oversize body and malformed bodies through the router", async () => {
+  // (A streamed body with no declared size is tested on the handler directly in
+  // test/threads.test.ts, where the early refusal cannot race the sending client.)
+  // A declared size over the limit is refused before reading.
+  const declared = await mf.dispatchFetch(ORIGIN + "/threads/delete", { method: "POST", body: "signed_request=" + "b".repeat(9000) });
+  assert.equal(declared.status, 413);
+  for (const body of ["", "%%%", "--boundary\r\nContent-Disposition: form-data; name=signed_request\r\n\r\nx.y\r\n--boundary--"]) {
+    const res = await mf.dispatchFetch(ORIGIN + "/threads/deauthorize", { method: "POST", body,
+      headers: { "Content-Type": "multipart/form-data; boundary=boundary" } });
+    assert.equal(res.status, 400, JSON.stringify(body));
+  }
 });

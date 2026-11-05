@@ -36,6 +36,8 @@ export interface ThreadsConnection {
   connected_by: string;
   expires_at: number;
   issued_at: number;
+  /** When the owner signed in (unchanged by renewal). Older Meta callbacks never act on it. */
+  connected_at: number;
   updated_at: string;
 }
 interface Row extends ThreadsConnection { token_cipher: string; lease_id: string | null; lease_until: number | null }
@@ -75,13 +77,14 @@ export async function ensureThreadsSchema(db: D1Database): Promise<void> {
     db.prepare("CREATE TABLE IF NOT EXISTS threads_oauth_states (state_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL, actor TEXT NOT NULL, expires_at INTEGER NOT NULL)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS threads_accounts (account_key TEXT PRIMARY KEY CHECK(account_key='primary'),
       user_id TEXT NOT NULL, username TEXT NOT NULL, token_cipher TEXT NOT NULL, connected_by TEXT NOT NULL,
-      expires_at INTEGER NOT NULL, issued_at INTEGER NOT NULL, updated_at TEXT NOT NULL, lease_id TEXT, lease_until INTEGER)`),
+      expires_at INTEGER NOT NULL, issued_at INTEGER NOT NULL, updated_at TEXT NOT NULL, lease_id TEXT, lease_until INTEGER,
+      connected_at INTEGER NOT NULL)`),
   ]);
 }
 
 export async function threadsConnection(db: D1Database): Promise<ThreadsConnection | null> {
   await ensureThreadsSchema(db);
-  return await db.prepare("SELECT user_id, username, connected_by, expires_at, issued_at, updated_at FROM threads_accounts WHERE account_key = 'primary'")
+  return await db.prepare("SELECT user_id, username, connected_by, expires_at, issued_at, connected_at, updated_at FROM threads_accounts WHERE account_key = 'primary'")
     .first<ThreadsConnection>() ?? null;
 }
 
@@ -139,14 +142,14 @@ export async function finishThreadsConnection(env: Env, session: Session, req: R
   const existing = await threadsConnection(env.DB);
   if (existing && existing.user_id !== me.id) throw new Error("Another Threads account is connected. Disconnect it first.");
   const now = unix();
-  await env.DB.prepare(`INSERT INTO threads_accounts (account_key, user_id, username, token_cipher, connected_by, expires_at, issued_at, updated_at)
-      VALUES ('primary', ?, ?, ?, ?, ?, ?, ?)
+  await env.DB.prepare(`INSERT INTO threads_accounts (account_key, user_id, username, token_cipher, connected_by, expires_at, issued_at, updated_at, connected_at)
+      VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(account_key) DO UPDATE SET username = excluded.username, token_cipher = excluded.token_cipher,
       connected_by = excluded.connected_by, expires_at = excluded.expires_at, issued_at = excluded.issued_at,
-      updated_at = excluded.updated_at, lease_id = NULL, lease_until = NULL
+      updated_at = excluded.updated_at, connected_at = excluded.connected_at, lease_id = NULL, lease_until = NULL
     WHERE threads_accounts.user_id = excluded.user_id`)
     .bind(me.id, String(me.username ?? ""), await sealThreadsToken(env, long.access_token), session.login,
-      now + long.expires_in, now, new Date().toISOString()).run();
+      now + long.expires_in, now, new Date().toISOString(), now).run();
   return (await threadsConnection(env.DB))!;
 }
 
@@ -214,17 +217,57 @@ export async function verifySignedRequest(env: Env, signed: string): Promise<{ u
 export async function threadsAccountCallback(req: Request, env: Env, kind: "deauthorize" | "delete"): Promise<Response> {
   const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { ...headers, Allow: "POST" } });
-  if (Number(req.headers.get("content-length") || 0) > 8192) return new Response("Too large", { status: 413, headers });
-  const form = await req.formData().catch(() => null);
-  const data = await verifySignedRequest(env, String(form?.get("signed_request") || ""));
+  // Read at most CALLBACK_MAX_BYTES whatever Content-Length says, then parse
+  // Meta's form encoding ourselves: an oversized or endless body is cut off unread.
+  const body = await readBounded(req, CALLBACK_MAX_BYTES);
+  if (body === null) return new Response("Too large", { status: 413, headers });
+  const data = await verifySignedRequest(env, new URLSearchParams(body).get("signed_request") ?? "");
   if (!data?.user_id) return new Response("Invalid signed request", { status: 400, headers });
+  // A signed request is only valid briefly. One older than a day, from the
+  // future, or without a time is refused, so a captured one cannot be replayed.
+  const now = unix();
+  const issued = typeof data.issued_at === "number" ? data.issued_at : NaN;
+  if (!Number.isFinite(issued) || issued < now - CALLBACK_MAX_AGE || issued > now + CALLBACK_SKEW)
+    return new Response("Stale signed request", { status: 400, headers });
   const conn = await threadsConnection(env.DB);
-  if (conn && conn.user_id === String(data.user_id)) await disconnectThreads(env.DB);
+  // It may only remove a connection that existed when it was issued: an event
+  // from before the owner (re)connected never revokes the newer sign-in.
+  if (conn && conn.user_id === String(data.user_id) && issued + CALLBACK_SKEW >= conn.connected_at)
+    await env.DB.prepare("DELETE FROM threads_accounts WHERE account_key = 'primary' AND user_id = ? AND connected_at = ?")
+      .bind(conn.user_id, conn.connected_at).run();
   if (kind === "deauthorize") return new Response("ok", { headers });
   // Meta expects a status URL and a confirmation code for data deletion.
   const code = (await sha256(String(data.user_id) + ":" + String(data.issued_at ?? ""))).slice(0, 16);
   return Response.json({ url: (env.PUBLIC_ORIGIN || "https://gs-poster.goofyspook.workers.dev").replace(/\/$/, "") + "/privacy", confirmation_code: code },
     { headers });
+}
+
+const CALLBACK_MAX_BYTES = 8192;
+/** How old a Meta signed request may be (Meta sends them right away). */
+const CALLBACK_MAX_AGE = 86400;
+/** Allowed clock difference between Meta and the Worker. */
+const CALLBACK_SKEW = 300;
+
+/** The request body as text, or null if it is larger than `max` bytes. Never reads past `max`. */
+async function readBounded(req: Request, max: number): Promise<string | null> {
+  if (Number(req.headers.get("content-length") || 0) > max) return null;
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) { await reader.cancel().catch(() => undefined); return null; }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) { all.set(c, at); at += c.byteLength; }
+  return new TextDecoder().decode(all);
 }
 
 export function threadsStateCookie(state: string): string { return cookie(THREADS_STATE_COOKIE, state, STATE_TTL); }

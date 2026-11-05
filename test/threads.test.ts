@@ -37,6 +37,7 @@ let publishFails = false;
 let nextId = 0;
 let holdPublish: (() => Promise<void>) | undefined;
 let renewFails = false;
+let holdStatus: (() => Promise<void>) | undefined;
 /** A pause for one mocked call: `reached` resolves when it is waiting, `release` lets it go on. */
 function gate() {
   let release!: () => void, arrived!: () => void;
@@ -58,7 +59,7 @@ after(async () => { await worker?.dispose(); });
 beforeEach(async () => {
   for (const t of ["threads_jobs", "threads_media_grants", "threads_targets", "threads_accounts", "threads_oauth_states",
     "instagram_targets", "bluesky_targets", "posts", "audit"]) await db.prepare(`DELETE FROM ${t}`).run();
-  calls = []; accountId = USER; status = "FINISHED"; publishFails = false; nextId = 0; holdPublish = undefined; renewFails = false;
+  calls = []; accountId = USER; status = "FINISHED"; publishFails = false; nextId = 0; holdPublish = undefined; renewFails = false; holdStatus = undefined;
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
     assert.equal(url.hostname, "graph.threads.net", "no unexpected network request: " + url.href);
@@ -79,7 +80,11 @@ beforeEach(async () => {
       if (publishFails) throw new TypeError("network connection lost");
       return Response.json({ id: "th-post-1" });
     }
-    if (method === "GET" && path.startsWith("/v1.0/th-container-")) return Response.json({ status });
+    if (method === "GET" && path.startsWith("/v1.0/th-container-")) {
+      const pause = holdStatus; holdStatus = undefined;
+      if (pause) await pause();
+      return Response.json({ status });
+    }
     if (method === "GET" && path === "/v1.0/th-post-1") return Response.json({ permalink: "https://www.threads.net/@gsgrimoire/post/test" });
     return Response.json({ error: { message: "unexpected " + method + " " + path } }, { status: 500 });
   };
@@ -167,7 +172,7 @@ test("Meta's signed callbacks: a forged request changes nothing, a valid one rem
   assert.equal(forged.status, 400);
   assert.ok(await threadsConnection(db));
   const del = await threadsAccountCallback(new Request("https://gs-poster.test/threads/delete", { method: "POST",
-    body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", user_id: USER, issued_at: 1 }) }) }), env(), "delete");
+    body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", user_id: USER, issued_at: Math.floor(Date.now() / 1000) }) }) }), env(), "delete");
   assert.equal(del.status, 200);
   const body = await del.json() as { url: string; confirmation_code: string };
   assert.match(body.confirmation_code, /^[A-Za-z0-9_-]{16}$/);
@@ -499,4 +504,75 @@ test("T3: approval records the account connected at the moment the job is queued
   // The plan sees a connection, but the fence binds the queued job to the account read at that moment.
   const job = await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(), "gsgrimoire");
   assert.equal(job.account_id, OTHER);
+});
+
+// ---------------------------------------------------------------- T4 and the send-barrier fence
+
+const callback = (kind: "deauthorize" | "delete", payload: object) => threadsAccountCallback(new Request(`https://gs-poster.test/threads/${kind}`,
+  { method: "POST", body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", ...payload }) }) }), env(), kind);
+
+test("T4: an old or timeless signed callback is refused and cannot revoke a sign-in", async () => {
+  await connect();
+  const now = Math.floor(Date.now() / 1000);
+  for (const issued_at of [undefined, 1, now - 2 * 86400, now + 3600]) {
+    const res = await callback("deauthorize", { user_id: USER, ...(issued_at === undefined ? {} : { issued_at }) });
+    assert.equal(res.status, 400, String(issued_at));
+    assert.ok(await threadsConnection(db), "still connected after " + issued_at);
+  }
+});
+
+test("T4: replaying a callback from before a reconnect never revokes the newer sign-in", async () => {
+  await connect();
+  const before = (await threadsConnection(db))!;
+  // An event from the owner's earlier connection, ten minutes before this one.
+  const oldEvent = { user_id: USER, issued_at: before.connected_at - 600 };
+  for (const kind of ["deauthorize", "delete"] as const) {
+    const res = await callback(kind, oldEvent);
+    assert.equal(res.status, 200, kind);
+    assert.ok(await threadsConnection(db), "the newer connection stays after a replayed " + kind);
+  }
+  // A fresh event for the current connection does remove it.
+  const res = await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) });
+  assert.equal(res.status, 200);
+  assert.equal(await threadsConnection(db), null);
+});
+
+test("renewal leaves the connection time alone, so a fresh callback still applies after it", async () => {
+  await connect();
+  const before = (await threadsConnection(db))!;
+  const now = Math.floor(Date.now() / 1000);
+  await db.prepare("UPDATE threads_accounts SET issued_at = ?, expires_at = ?").bind(now - 50 * 86400, now + 10 * 86400).run();
+  assert.equal(await renewThreadsToken(env()), "renewed");
+  assert.equal((await threadsConnection(db))!.connected_at, before.connected_at);
+});
+
+test("a disconnect after a run read its sign-in stops the job at the send barrier, before anything is sent", async () => {
+  await connect();
+  const p = await queued();
+  await processThreadsBatch(env());
+  assert.equal((await getThreadsJob(db, p.id))!.status, "processing");
+  const g = gate();
+  holdStatus = g.hold;
+  const run = processThreadsBatch(env());
+  await g.reached;
+  await disconnectThreads(db);
+  g.release();
+  await run;
+  assert.equal(graphPosts("/threads_publish").length, 0, "never sent");
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false);
+  assert.match(job.error!, /was disconnected before the final send/);
+});
+
+test("T5: a streamed callback body with no declared size is cut off after 8 KB, unread beyond that", async () => {
+  await connect();
+  let pulled = 0;
+  const endless = new ReadableStream<Uint8Array>({ pull(c) { pulled++; c.enqueue(new TextEncoder().encode("signed_request=" + "a".repeat(1024))); } });
+  const req = new Request("https://gs-poster.test/threads/deauthorize", { method: "POST", body: endless, duplex: "half" } as any);
+  assert.equal(req.headers.get("content-length"), null);
+  const res = await threadsAccountCallback(req, env(), "deauthorize");
+  assert.equal(res.status, 413);
+  assert.ok(pulled <= 12, "stopped reading after about 8 KB, read " + pulled + " chunks");
+  assert.ok(await threadsConnection(db), "nothing was revoked");
 });
