@@ -4,7 +4,8 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { markTikTokInboxApproved, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, type Paged } from "./history.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
@@ -137,7 +138,8 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     return Response.json({ iso: at.toISOString(), local: toLocalInput(at, env.TIMEZONE), text: formatLocal(at, env.TIMEZONE) },
       { headers: { "Cache-Control": "no-store" } });
   }
-  if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
+  if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams);
+  if (path === "/history" && req.method === "GET") return historyPage(env, session, url.searchParams);
   if (path === "/new" && (req.method === "GET" || req.method === "POST")) return newDraftPage(req,env,session);
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
@@ -341,41 +343,115 @@ function postCard(env: Env, p: Post): string {
     ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
 
-async function dashboard(env: Env, session: Session, requestedWeek: string | null): Promise<Response> {
+
+/** Keep page numbers bounded; query parameters never enter database SQL. */
+function viewPage(params: URLSearchParams, key: string): number {
+  const raw = params.get(key) ?? "1";
+  return /^\d{1,6}$/.test(raw) ? Math.min(100_000, Math.max(1,Number(raw))) : 1;
+}
+function pager<T>(data: Paged<T>, params: URLSearchParams, key: string, path: string, anchor: string): string {
+  if (data.total <= 20) return "";
+  const link = (n: number, label: string, enabled: boolean) => {
+    if (!enabled) return '<span class="page-disabled">' + esc(label) + '</span>';
+    const p = new URLSearchParams(params);
+    p.set(key,String(n));
+    return '<a class="page-link" href="' + esc(path + "?" + p.toString() + "#" + anchor) + '">' + esc(label) + '</a>';
+  };
+  const range = Array.from(new Set([1, data.pages, data.page-1, data.page, data.page+1]))
+    .filter((n) => n >= 1 && n <= data.pages).sort((a,b) => a-b);
+  return '<nav class="pager" aria-label="' + esc(anchor + " pages") + '">' +
+    '<span>Showing ' + ((data.page-1)*20+1) + ' to ' + Math.min(data.page*20,data.total) +
+    ' of ' + data.total + '</span>' +
+    link(data.page-1,"Previous",data.page>1) +
+    range.map((n,i) => (i>0 && n-range[i-1]>1 ? '<span aria-hidden="true">…</span>' : '') +
+      (n === data.page ? '<strong aria-current="page">' + n + '</strong>' :
+        link(n,String(n),true))).join("") +
+    link(data.page+1,"Next",data.page<data.pages) + '</nav>';
+}
+function postSection(
+  id: string, title: string, data: Paged<Post>, params: URLSearchParams,
+  path: string, key: string, empty: string,
+): string {
+  return '<details class="history-section" id="' + esc(id) + '" open>' +
+    '<summary><span>' + esc(title) + '</span><span class="history-count">' +
+    data.total + '</span></summary>' +
+    '<div class="history-section-body">' +
+    (data.items.length ? data.items.map((p) => postCardForHistory(p)).join("") :
+      '<p class="empty">' + esc(empty) + '</p>') +
+    pager(data,params,key,path,id) + '</div></details>';
+}
+/** Set only while rendering history cards; format below uses the same Page shell. */
+let historyRenderEnv: Env;
+function postCardForHistory(p: Post): string { return postCard(historyRenderEnv,p); }
+
+async function dashboard(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
   await refreshScheduled(env).catch(() => undefined);
-  const posts = await listPosts(env.DB, { limit: 100 });
+  await reconcileOldTikTokInboxDrafts(env.DB);
   const currentDate = toLocalInput(new Date(), env.TIMEZONE).slice(0, 10);
   let start = weekStart(currentDate);
-  try { if (requestedWeek) start = weekStart(requestedWeek); } catch { /* invalid date: show current week */ }
+  try { if (params.get("week")) start = weekStart(params.get("week")!); }
+  catch { /* invalid week: show the current week */ }
   const range = weekRange(start, env.TIMEZONE);
-  const onCalendar = await listCalendarPosts(env.DB, range.from, range.to);
-  const calendar = renderCalendar(env, onCalendar, await csrfToken(env, session), start);
-  const drafts = posts.filter((p) => p.status === "draft").reverse();
-  const scheduled = posts.filter((p) => p.status === "scheduled").sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-  const other = posts.filter((p) => !["draft", "scheduled"].includes(p.status)).slice(0, 15);
+  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
+  const calendar = renderCalendar(env,calendarPosts,await csrfToken(env,session),start);
+  const drafts = await searchPosts(env.DB,"drafts","",viewPage(params,"drafts_page"));
+  historyRenderEnv = env;
   const missing = missingSecrets(env);
-  const log = await recentAudit(env.DB, 20);
+  const body =
+    (missing.length ? '<div class="notice err">Not fully set up. Missing secrets: ' +
+      missing.map(esc).join(", ") + '.</div>' : '') +
+    '<div class="hero"><div class="hero-kicker">GS Grimoire editorial planner</div>' +
+    '<h2>Drafts and the weekly planner</h2>' +
+    '<p>Review and approve your saved drafts. Scheduled posts, TikTok inbox transfers, published posts and activity are in History.</p></div>' +
+    '<div class="row" style="justify-content:space-between;align-items:center">' +
+    '<h2 style="margin:0">Weekly planner</h2><div class="inline-actions">' +
+    '<a class="btn" href="/history">View History</a>' +
+    '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
+    '<a class="btn" href="/new">New draft</a></div></div>' +
+    calendar +
+    postSection("drafts","Drafts",drafts,params,"/","drafts_page",
+      "No drafts waiting for review.") ;
+  return html(page("GS Poster",body,{login:session.login,wide:true}));
+}
 
-  const section = (title: string, list: Post[], empty: string) =>
-    `<h2>${esc(title)}</h2>${list.length ? list.map((p) => postCard(env, p)).join("") : `<p class="empty">${esc(empty)}</p>`}`;
-
-  const body = `
-    ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
-    <div class="hero" style="margin-bottom:15px">
-      <div class="hero-kicker">GS Grimoire · Editorial calendar</div>
-      <h2>One place for every story.</h2>
-      <p>Review drafts, schedule approved Facebook and Bluesky posts, and prepare TikTok videos or carousels for separate, explicit transfer.</p>
-    </div>
-    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><div class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/tiktok/settings">TikTok connection</a><a class="btn" href="/new">+ New draft</a></div></div>
-    ${calendar}
-    ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
-    ${section("Scheduled", scheduled, "Nothing scheduled.")}
-    ${section("Recent", other, "Nothing yet.")}
-    <h2>Activity</h2>
-    ${log.length ? `<table class="log">${log
-      .map((a) => `<tr><td class="ts">${esc(shortTime(env, a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}${a.post_id ? ` <a href="/post/${esc(a.post_id)}">${esc(a.post_id)}</a>` : ""}</td></tr>`)
-      .join("")}</table>` : `<p class="empty">No activity yet.</p>`}`;
-  return html(page("GS Poster", body, { login: session.login, wide: true }));
+async function historyPage(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
+  await reconcileOldTikTokInboxDrafts(env.DB);
+  const search = normalizedSearch(params.get("q") ?? "");
+  const [scheduled,published,other,activity] = await Promise.all([
+    searchPosts(env.DB,"scheduled",search,viewPage(params,"scheduled_page")),
+    searchPosts(env.DB,"published",search,viewPage(params,"published_page")),
+    searchPosts(env.DB,"other",search,viewPage(params,"other_page")),
+    searchActivity(env.DB,search,viewPage(params,"activity_page")),
+  ]);
+  historyRenderEnv = env;
+  const activityMarkup = '<details class="history-section" id="activity" open>' +
+    '<summary><span>Activity</span><span class="history-count">' + activity.total + '</span></summary>' +
+    '<div class="history-section-body">' +
+    (activity.items.length ? '<table class="log"><caption class="sr-only">Activity history</caption><tbody>' +
+      activity.items.map((a) => '<tr><td class="ts">' + esc(shortTime(env,a.ts)) +
+        '</td><td>' + esc(a.actor) + '</td><td>' + esc(a.action) +
+        (a.post_id ? ' <a href="/post/' + esc(a.post_id) + '">' + esc(a.post_id) + '</a>' : '') +
+        (a.detail ? '<span class="activity-detail">' + esc(a.detail) + '</span>' : '') +
+        '</td></tr>').join("") + '</tbody></table>' :
+      '<p class="empty">No matching activity.</p>') +
+    pager(activity,params,"activity_page","/history","activity") + '</div></details>';
+  const body =
+    '<div class="hero"><div class="hero-kicker">Post and transfer records</div>' +
+    '<h2>History</h2><p>Search all queued, inbox, published and completed records, plus the activity log. ' +
+    'TikTok inbox transfers are not automatically published.</p></div>' +
+    '<form class="history-search" method="get" action="/history" role="search">' +
+    '<label for="history-q">Search history</label>' +
+    '<input type="search" id="history-q" name="q" maxlength="120" placeholder="Search posts, captions, labels or activity" value="' +
+    esc(search) + '"><button class="primary" type="submit">Search</button>' +
+    (search ? '<a class="btn" href="/history">Clear</a>' : '') + '</form>' +
+    postSection("scheduled","Scheduled / In Inbox",scheduled,params,"/history","scheduled_page",
+      "No scheduled or inbox posts match this search.") +
+    postSection("published","Published",published,params,"/history","published_page",
+      "No published posts match this search.") +
+    postSection("other","Failed / Cancelled",other,params,"/history","other_page",
+      "No failed or cancelled posts match this search.") +
+    activityMarkup;
+  return html(page("History",body,{login:session.login,wide:true}));
 }
 
 /** Only creates a draft. No PIN, Graph or publishing calls are permitted here. */
