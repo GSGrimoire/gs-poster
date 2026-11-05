@@ -85,3 +85,9 @@ While a Threads job may still publish or is unclear:
 - the Threads card says the approved post is frozen.
 
 A cancelled or published job unlocks the draft. Tested in `test/threads.test.ts` (database guard, MCP refusals, a text edit still saves with the job frozen, reject works after the PIN cancel). `npm run check`: 398 passed, 0 failed, twice.
+
+## Review round 1 (ChatGPT-2, head `8c4d83d`)
+
+- **T1 (frozen approved Threads posts):** already fixed at `9d40304` (see the F4 section above). It now also has a production-router test: a time change, switching Threads off and reject are each refused for a Threads-only approval, and the post stays frozen while only its Instagram job is pending.
+- **T2 (renewal blocking publishing):** the scheduled handler now calls `runThreadsCron`. It tries renewal first; a renewal failure goes to the audit log (`threads-renewal-failed`) and never stops `processThreadsBatch`, which uses the still-valid token. The cron run is still reported as failed afterwards. Tested: with renewal failing, a due post is processed; the next run renews and publishes.
+- **Checks:** `npm run check` gave 400 passed, 0 failed, twice. The `wrangler` dry-run passes.

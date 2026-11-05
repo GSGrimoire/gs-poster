@@ -17,7 +17,7 @@ import { esc } from "./html.ts";
 import { checkMessage } from "./validate.ts";
 import { randomToken, sha256 } from "./session.ts";
 import { renderInstagram, type InstagramFrame, type InstagramItem } from "./instagram.ts";
-import { THREADS_GRAPH, threadsAccessToken, threadsConfigured, threadsConnection } from "./threads.ts";
+import { renewThreadsToken, THREADS_GRAPH, threadsAccessToken, threadsConfigured, threadsConnection } from "./threads.ts";
 
 export const THREADS_MEDIA_PATH = "/threads/media/";
 export const THREADS_MAX_ITEMS = 20;
@@ -352,6 +352,22 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
       .catch(() => undefined); // if this write also fails, the expired send lease surfaces it on the next run
     else await fail(message, false, ["preparing", "processing"]);
   }
+}
+
+/**
+ * The Threads part of the scheduled handler. Renewal failures are recorded
+ * but never stop due posts from being processed with the still-valid token.
+ * Throws afterwards, so the cron run is still reported as failed.
+ */
+export async function runThreadsCron(env: Env, now = new Date()): Promise<void> {
+  let renewalError: unknown = null;
+  try { await renewThreadsToken(env, Math.floor(now.getTime() / 1000)); }
+  catch (e) {
+    renewalError = e;
+    await audit(env.DB, "cron", "threads-renewal-failed", null, e instanceof Error ? e.message.slice(0, 200) : "unknown").catch(() => undefined);
+  }
+  await processThreadsBatch(env, now);
+  if (renewalError) throw renewalError;
 }
 
 export async function checkThreads(env: Env): Promise<{ ok: boolean; username?: string; expires_at?: string; error?: string }> {

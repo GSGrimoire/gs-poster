@@ -153,3 +153,34 @@ test("a signed-in approval with the PIN queues a Threads text post", async () =>
   assert.equal(job.kind, "TEXT");
   assert.equal(job.text, "Into the cave");
 });
+
+test("T1: an approved Threads post cannot be re-timed, switched off or rejected through the router, alone or with Instagram", async () => {
+  const p = await createPost(db, { message: "Cave.", label: "Cave", release: null, images: [], video: null,
+    created_by: "test", scheduled_at: new Date(Date.now() + 2 * 86400_000).toISOString() } as any);
+  const due = p.scheduled_at!;
+  const now = new Date().toISOString();
+  await db.prepare("INSERT INTO threads_targets (post_id, caption, media, status) VALUES (?, 'Into the cave', 'none', 'draft')").bind(p.id).run();
+  await db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at)
+    VALUES (?, 'scheduled', 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?)`).bind(p.id, due, now).run();
+  const cur = (await getPost(db, p.id))!;
+  const save = (extra: Record<string, string>) => post(`/post/${p.id}/save`, { expected_updated_at: cur.updated_at, auto: "1",
+    message: "Cave.", p_facebook: "1", p_threads: "1", th_caption: "Into the cave", th_media: "none", ...extra });
+  const moved = await save({ when: "2030-01-01T18:00" });
+  assert.equal(moved.status, 409);
+  assert.match(await moved.text(), /approved for Threads, so its time is locked/);
+  const off = await save({ p_threads: "0" });
+  assert.equal(off.status, 409);
+  assert.match(await off.text(), /Threads cannot be switched off/);
+  const rejected = await post(`/post/${p.id}/reject`, { reason: "no" });
+  assert.equal(rejected.status, 409);
+  assert.match(await rejected.text(), /approved for Threads/);
+  // The same post also approved for Instagram: either job alone keeps it frozen.
+  await db.prepare(`INSERT INTO instagram_jobs (post_id, status, kind, due_at, caption, frame, items, created_by, updated_at)
+    VALUES (?, 'scheduled', 'IMAGE', ?, 'x', '4:5', '[]', 'gsgrimoire', ?)`).bind(p.id, due, now).run();
+  await db.prepare("UPDATE threads_jobs SET status = 'cancelled' WHERE post_id = ?").bind(p.id).run();
+  assert.equal((await post(`/post/${p.id}/reject`, { reason: "no" })).status, 409, "Instagram still pending");
+  const after = (await getPost(db, p.id))!;
+  assert.equal(after.status, "draft");
+  assert.equal(after.scheduled_at, due);
+  assert.equal((await getThreadsJob(db, p.id))!.due_at, due);
+});

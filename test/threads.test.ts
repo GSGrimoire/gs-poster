@@ -36,6 +36,7 @@ let status = "FINISHED";
 let publishFails = false;
 let nextId = 0;
 let holdPublish: (() => Promise<void>) | undefined;
+let renewFails = false;
 /** A pause for one mocked call: `reached` resolves when it is waiting, `release` lets it go on. */
 function gate() {
   let release!: () => void, arrived!: () => void;
@@ -57,7 +58,7 @@ after(async () => { await worker?.dispose(); });
 beforeEach(async () => {
   for (const t of ["threads_jobs", "threads_media_grants", "threads_targets", "threads_accounts", "threads_oauth_states",
     "instagram_targets", "bluesky_targets", "posts", "audit"]) await db.prepare(`DELETE FROM ${t}`).run();
-  calls = []; accountId = USER; status = "FINISHED"; publishFails = false; nextId = 0; holdPublish = undefined;
+  calls = []; accountId = USER; status = "FINISHED"; publishFails = false; nextId = 0; holdPublish = undefined; renewFails = false;
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
     assert.equal(url.hostname, "graph.threads.net", "no unexpected network request: " + url.href);
@@ -68,6 +69,7 @@ beforeEach(async () => {
     calls.push({ method, path, params });
     if (path === "/oauth/access_token") return Response.json({ access_token: "short-lived-test-token", user_id: accountId });
     if (path === "/access_token") return Response.json({ access_token: "long-lived-test-token", token_type: "bearer", expires_in: 60 * 86400 });
+    if (path === "/refresh_access_token" && renewFails) throw new TypeError("network connection lost");
     if (path === "/refresh_access_token") return Response.json({ access_token: "renewed-test-token", token_type: "bearer", expires_in: 60 * 86400 });
     if (path === "/v1.0/me") return Response.json({ id: accountId, username: "gsgrimoire" });
     if (method === "POST" && path === `/v1.0/${USER}/threads`) return Response.json({ id: "th-container-" + ++nextId });
@@ -389,4 +391,23 @@ test("F4 for Threads: an approved Threads post's time and switch are frozen agai
   assert.equal(job.text, "Into the cave", "the approved text is frozen");
   assert.equal(await cancelThreadsJob(env(), p.id, "gsgrimoire"), true);
   assert.equal(await rejectDraft(db, p.id, "no"), true, "after the PIN cancel the draft can be rejected");
+});
+
+test("T2: a failed token renewal does not hold back a due post while the sign-in is still valid", async () => {
+  const { runThreadsCron } = await import("../src/threads-publish.ts");
+  await connect();
+  // Ten days left and older than a day: inside the renewal window.
+  const now = Math.floor(Date.now() / 1000);
+  await db.prepare("UPDATE threads_accounts SET issued_at = ?, expires_at = ?").bind(now - 50 * 86400, now + 10 * 86400).run();
+  const p = await queued();
+  renewFails = true;
+  await assert.rejects(runThreadsCron(env()), /network connection lost/, "the cron run is still reported as failed");
+  assert.equal(graphPosts("/threads").length, 1, "the due post was processed with the existing token");
+  assert.equal((await getThreadsJob(db, p.id))!.status, "processing");
+  const log = await db.prepare("SELECT 1 AS x FROM audit WHERE action = 'threads-renewal-failed'").first();
+  assert.ok(log, "the renewal failure is in the activity log");
+  renewFails = false;
+  await runThreadsCron(env());
+  assert.equal((await getThreadsJob(db, p.id))!.status, "published");
+  assert.ok((await threadsConnection(db))!.expires_at > now + 50 * 86400, "renewal succeeds on a later run");
 });
