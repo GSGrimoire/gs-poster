@@ -12,6 +12,7 @@ import { localToUtc, toLocalInput } from "./time.ts";
 import { captionLimit, checkTarget, PLATFORM_ORDER, PLATFORMS, platformRulesJson, FACEBOOK_CAPTION_MAX,
   type PlatformId, type TargetState } from "./platforms.ts";
 import type { TikTokReleasePlan } from "./tiktok-release.ts";
+import type { InstagramPlan } from "./instagram-publish.ts";
 import { parseGitHubUrl } from "./media.ts";
 import { countHashtags, defaultItem, INSTAGRAM_BACKGROUNDS, INSTAGRAM_CAPTION_MAX, INSTAGRAM_FRAMES, INSTAGRAM_MAX_ITEMS,
   INSTAGRAM_MAX_ZOOM, INSTAGRAM_PLAN_JS, instagramSaveErrors, readInstagramItems,
@@ -218,6 +219,8 @@ export interface EditorView {
   xCard?: string;
   /** What the one-PIN release would send to TikTok (#61). */
   tiktokPlan?: TikTokReleasePlan;
+  /** Whether this approval can also queue Instagram, and what it would post. */
+  instagramPlan?: InstagramPlan;
   mediaLooksPending: boolean;
   createdLine: string;
 }
@@ -316,7 +319,17 @@ export function renderDraftEditor(v: EditorView): string {
   const ttPlan = v.tiktokPlan;
   const ttOk = ttPlan?.ok ? ttPlan : null;
   const fbBs = !!(p.facebook_enabled || p.bluesky);
-  const canRelease = fbBs || !!ttOk;
+  const igPlan = v.instagramPlan;
+  const igOk = igPlan?.ok ? igPlan : null;
+  const igWhat = igOk ? (igOk.kind === "REELS" ? "Reel" : igOk.kind === "CAROUSEL" ? igOk.count + "-photo carousel" : "photo") : "";
+  const igBlock = igOk ? `
+      <fieldset class="ig-release">
+        <legend class="sr-only">Instagram</legend>
+        <label><input type="checkbox" name="target_instagram" value="1" checked data-ig-toggle> Instagram · ${igWhat}</label>
+        <p class="hint">Caption: ${esc(igOk.caption.slice(0, 140))}${igOk.caption.length > 140 ? "..." : ""} (edit it in the Instagram card; it saves automatically)</p>
+        <label><input type="checkbox" name="confirm_instagram" value="1" required data-ig-required> Post this to the GS Grimoire Instagram automatically ${p.scheduled_at ? "at " + esc(v.whenText) : "within a few minutes"}.</label>
+      </fieldset>` : igPlan && !igPlan.ok && igPlan.offered ? `<p class="hint">Instagram: ${esc(igPlan.reason)}</p>` : "";
+  const canRelease = fbBs || !!ttOk || !!igOk;
   const scheduledOthers = fbBs && p.scheduled_at;
   const ttPreview = ttOk ? (ttOk.type === "VIDEO"
     ? `<video class="tt-video" controls playsinline preload="metadata" src="/video/${id}/tiktok"></video>`
@@ -337,15 +350,16 @@ export function renderDraftEditor(v: EditorView): string {
       </fieldset>` : ttPlan && !ttPlan.ok && ttPlan.offered ? `<p class="hint tt-blocked">TikTok: ${esc(ttPlan.reason)}</p>` : "";
   const effects = [
     ...(ttOk ? [`<li><strong>Now:</strong> TikTok inbox</li>`] : []),
-    ...(fbBs ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", p.bluesky ? "Bluesky" : ""].filter(Boolean).join(" and ")}</li>`] : []),
+    ...(fbBs || igOk ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", p.bluesky ? "Bluesky" : "", igOk ? "Instagram" : ""].filter(Boolean).join(", ")}</li>`] : []),
   ];
-  const buttonText = ttOk && fbBs ? "Approve selected targets" : ttOk ? "Approve and send to TikTok inbox" : p.scheduled_at ? "Approve and schedule" : "Approve and post now";
+  const targetCount = (fbBs ? 1 : 0) + (ttOk ? 1 : 0) + (igOk ? 1 : 0);
+  const buttonText = targetCount > 1 ? "Approve selected targets" : ttOk ? "Approve and send to TikTok inbox" : p.scheduled_at ? "Approve and schedule" : "Approve and post now";
   const release = canRelease ? `
     <form method="post" action="/post/${id}/approve" class="release-card" id="release-form">
       <input type="hidden" name="csrf" value="${esc(v.csrf)}">
       <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
       <div class="eyebrow">Release</div>
-      <h3>${!fbBs ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
+      <h3>${!fbBs && !igOk ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
       ${releaseTargets}
       ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
@@ -353,6 +367,7 @@ export function renderDraftEditor(v: EditorView): string {
       ${fbBs && p.scheduled_at ? `<label class="rollover"><input type="checkbox" name="auto_rollover" value="1"> Automatically move to the next valid time if necessary</label>
       <p class="hint">Off: if ${esc(v.whenText)} has become too close, approval is refused and you pick a new time. On: it moves to the earliest valid time and tells you the new time.</p>`
       : p.facebook_enabled && p.images.length ? `<p class="hint">Photo posts go through the upload queue and usually appear on Facebook within a few minutes.</p>` : ""}
+      ${igBlock}
       ${ttBlock}
       ${effects.length > 1 ? `<ul class="effects" aria-label="What approving does">${effects.join("")}</ul>` : ""}
       <label for="release-pin">PIN</label>
@@ -360,11 +375,11 @@ export function renderDraftEditor(v: EditorView): string {
       <p class="hint release-dirty" id="release-dirty" hidden>Saving your changes. Approval unlocks when they are saved; it releases the saved version.</p>
       <div class="row"><button class="primary" id="release-button">${buttonText}</button></div>
       <p class="rail-note">Releases exactly the saved draft. Each platform's result is shown separately; nothing is retried automatically.</p>
-      ${p.instagram ? `<p class="rail-note">Instagram is prepared only and is not released here. Download its photos from the Instagram card.</p>` : ""}
+      ${p.instagram && !igOk ? `<p class="rail-note">Instagram is not released here${igPlan && !igPlan.ok && !igPlan.offered ? " until it is connected" : ""}. Download its media from the Instagram card.</p>` : ""}
     </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok</h3>
       <p class="hint">${esc(ttPlan && !ttPlan.ok ? ttPlan.reason : "Nothing to release yet.")}</p></div>`
     : `<div class="release-card"><div class="eyebrow">Release</div><h3>Instagram only</h3>
-      <p class="hint">Instagram is not connected yet, so there is nothing to approve. Download the finished photos from the Instagram card.</p></div>`;
+      <p class="hint">${esc(igPlan && !igPlan.ok ? igPlan.reason : "Nothing to release yet.")} Download the finished media from the Instagram card.</p></div>`;
 
   return `
 <style>
@@ -1278,6 +1293,13 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     };
     ttToggle.addEventListener("change", sync);
     sync();
+  }
+  // Instagram the same way: unticked means no automatic Instagram post.
+  const igToggle = document.querySelector("[data-ig-toggle]");
+  if (igToggle) {
+    const igSync = () => { document.querySelector("[data-ig-required]").required = igToggle.checked; };
+    igToggle.addEventListener("change", igSync);
+    igSync();
   }
   window.addEventListener("beforeunload", e => {
     if (!submitting && (dirty() || inflight)) { e.preventDefault(); e.returnValue = ""; }

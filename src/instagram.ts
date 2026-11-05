@@ -1,6 +1,7 @@
 /**
- * Instagram feed target: preparation only. Nothing here sends anything to
- * Instagram. Each photo is fitted to one frame for the whole carousel by
+ * Instagram feed target: preparation. Nothing in this file sends anything to
+ * Instagram; PIN-approved publishing lives in instagram-publish.ts. Each
+ * photo is fitted to one frame for the whole carousel by
  * either CROPPING (fill the frame, choose the part to keep) or PADDING (keep
  * the whole picture, fill the rest with a background colour).
  *

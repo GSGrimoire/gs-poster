@@ -62,6 +62,16 @@ test("long captions are flagged instead of silently cut",()=>{
   assert.equal(long.href.length,"https://x.com/intent/tweet?text=".length+1000);
 });
 
+test("the length estimate follows X's weighting for emoji and links",()=>{
+  assert.equal(xCompose("😀".repeat(140),"").note,"");
+  assert.match(xCompose("😀".repeat(150),"").note,/About 300 characters/);
+  assert.match(xCompose("日".repeat(141),"").note,/About 282 characters/);
+  const longLink="https://www.patreon.com/posts/"+"a".repeat(300);
+  assert.equal(xCompose("See "+longLink,"").note,"");
+  assert.equal(xCompose("Free in the Archive: patreon.com/GSGrimoire "+"a".repeat(230),"").note,"");
+  assert.match(xCompose("a".repeat(270)+" patreon.com/GSGrimoire","").note,/About 294 characters/);
+});
+
 test("Bluesky text comes first and disabled targets are ignored",async()=>{
   const p=await draft();
   assert.deepEqual(xSource(p),{text:"Short kiln teaser",link:"https://www.patreon.com/posts/1"});
@@ -98,13 +108,15 @@ test("the draft page shows a new-tab link, and one press greys it out on both pa
   assert.equal(await auditCount(p.id),1);
   const greyDraft=await page(p.id);
   assert.match(greyDraft,/<button type="button" disabled>Opened in X<\/button>/);
-  assert.doesNotMatch(greyDraft,/x\.com\/intent/);
+  assert.match(greyDraft,/data-x-open>Reopen in X<\/a>/);
+  assert.doesNotMatch(greyDraft,/>Open in X</);
 
   await db.prepare("UPDATE posts SET status='published',approved_at=? WHERE id=?").bind(new Date().toISOString(),p.id).run();
   const greyPublished=await page(p.id);
   assert.doesNotMatch(greyPublished,/id="draft-editor"/);
   assert.match(greyPublished,/<button type="button" disabled>Opened in X<\/button>/);
-  assert.doesNotMatch(greyPublished,/x\.com\/intent/);
+  assert.match(greyPublished,/data-x-open>Reopen in X<\/a>/);
+  assert.match(greyPublished,/not that it was posted/);
 });
 
 test("a post published without pressing it still offers the button, and logging there greys the draft view too",async()=>{
@@ -124,6 +136,34 @@ test("a repeat press keeps the first time and logs once",async()=>{
   assert.deepEqual(await (await press(p.id)).json(),{ok:true,first:false});
   assert.equal((await getPost(db,p.id))?.x_opened_at,first);
   assert.equal(await auditCount(p.id),1);
+  assert.equal((await recentAudit(db,200)).filter(r=>r.action==="x-reopened"&&r.post_id===p.id).length,1);
+});
+
+test("a press that never became a post can be reopened with the revised text",async()=>{
+  const p=await draft();
+  await press(p.id);
+  const first=(await getPost(db,p.id))?.x_opened_at;
+  await db.prepare("UPDATE bluesky_targets SET caption='Revised teaser' WHERE post_id=?").bind(p.id).run();
+  const revised=await page(p.id);
+  assert.match(revised,/href="https:\/\/x\.com\/intent\/tweet\?text=Revised%20teaser[^"]*" target="_blank" rel="noopener noreferrer" data-x-open>Reopen in X/);
+  assert.match(revised,/Opened in X<\/button>/);
+  await db.prepare("UPDATE posts SET status='failed' WHERE id=?").bind(p.id).run();
+  assert.match(await page(p.id),/data-x-open>Reopen in X/);
+  assert.equal((await press(p.id)).status,200);
+  const after=await getPost(db,p.id);
+  assert.equal(after?.x_opened_at,first);
+  assert.equal(after?.status,"failed");
+  assert.equal(await auditCount(p.id),1);
+});
+
+test("a post with nothing to send keeps its opened record without a link",async()=>{
+  const p=await draft();
+  await press(p.id);
+  await db.prepare("UPDATE bluesky_targets SET caption='',patreon=NULL WHERE post_id=?").bind(p.id).run();
+  await db.prepare("UPDATE posts SET message='',status='published' WHERE id=?").bind(p.id).run();
+  const html=await page(p.id);
+  assert.match(html,/Opened in X<\/button>/);
+  assert.match(html,/<p data-x-link hidden>/);
 });
 
 test("logging refuses cross-site, bad CSRF and signed-out requests",async()=>{
