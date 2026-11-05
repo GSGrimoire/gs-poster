@@ -7,6 +7,7 @@ import { getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import type { Env } from "./env.ts";
 import { missingSecrets } from "./env.ts";
+import { checkInstagram } from "./instagram-publish.ts";
 import { audit, createPost, deletePost, getPost, listPosts, saveEditorDraft, type Post, type PostStatus, type BlueskyDraft } from "./db.ts";
 import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
@@ -72,8 +73,8 @@ function view(env: Env, origin: string, p: Post) {
     tiktok_enabled: p.tiktok_enabled===true,
     bluesky: p.bluesky,
     bluesky_saved_while_disabled: p.bluesky_paused ?? null,
-    /** Prepared in the web editor only; nothing sends it to Instagram yet. */
-    instagram: p.instagram ? { ...p.instagram, note: "Prepared only. Not connected to Instagram; Gus downloads the rendered photos from the editor." } : null,
+    /** Prepared here; only Gus's PIN approval on the review site can queue it for Instagram. */
+    instagram: p.instagram ? { ...p.instagram, note: "Prepared only by this tool. It reaches Instagram only if Gus approves it for Instagram with his PIN on the review site (when Instagram is connected); otherwise he downloads the rendered media." } : null,
     instagram_saved_while_disabled: p.instagram_paused ?? null,
     link: p.link,
     publish_at: p.scheduled_at,
@@ -172,7 +173,7 @@ const updateDraftSchema = z.object({
             zoom: z.number().min(1).max(INSTAGRAM_MAX_ZOOM).default(1).describe("Crop zoom, 1 to 4."),
             bg: z.enum(Object.keys(INSTAGRAM_BACKGROUNDS) as [InstagramBackground, ...InstagramBackground[]]).default("dark").describe("Pad background: dark (brand), black, white or parchment (brand)."),
           })).max(INSTAGRAM_MAX_ITEMS),
-        }).nullable().optional().describe("Instagram feed carousel, PREPARED ONLY: nothing is sent to Instagram. Omit to leave selection as is; null disables Instagram while retaining its saved editing content."),
+        }).nullable().optional().describe("Instagram feed carousel, PREPARED ONLY: this tool never sends anything to Instagram; only Gus's PIN approval on the review site can. Omit to leave selection as is; null disables Instagram while retaining its saved editing content."),
         expected_updated_at: z.string().optional().describe("The updated_at you last read from get_post, list_posts or a previous save. If the draft has changed since, nothing is saved and you must fetch it again. Strongly recommended; when omitted, the version read at the start of this call is used."),
       });
 
@@ -675,7 +676,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     "check_setup",
     {
       title: "Check the connection",
-      description: "Report which settings are missing and whether the Facebook Page token works. Use it first, or when something fails.",
+      description: "Report which settings are missing, whether the Facebook Page token works and whether the linked Instagram account is reachable. Use it first, or when something fails.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -720,6 +721,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         graph_version: env.GRAPH_VERSION,
         timezone: env.TIMEZONE,
         facebook,
+        instagram: await checkInstagram(env),
       });
     },
   );

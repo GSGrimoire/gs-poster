@@ -83,7 +83,7 @@ export const PLATFORMS: Record<PlatformId, PlatformRules> = {
     graphemes: false, maxPhotos: INSTAGRAM_MAX_ITEMS, textOnly: false, mixPhotoVideo: false, altRequired: false,
     aspect: { min: 0.8, max: 1.91, label: "4:5 to 1.91:1",
       outside: "Each photo is cropped or padded to the frame you choose." },
-    delivery: "Not connected yet. Download prepared photos or the original Reel MP4 and post manually in Instagram.",
+    delivery: "Once Instagram is connected, approve it with your PIN and GS Poster posts it at the set time. Until then, download the prepared photos or the original Reel MP4 and post in Instagram yourself.",
     maxHashtags: INSTAGRAM_HASHTAG_MAX, framed: true,
   },
 };

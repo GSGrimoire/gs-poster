@@ -10,6 +10,7 @@ import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPos
 import { fetchVideo } from "./video.ts";
 import { fetchImage } from "./media.ts";
 import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload, ensureFacebookQueue } from "./facebook-queue.ts";
+import { cancelScheduledInstagram, getInstagramJob, moveScheduledInstagram } from "./instagram-publish.ts";
 
 export interface ApproveInput extends ApprovalSnapshot {
   actor: string;
@@ -266,6 +267,8 @@ export async function reschedulePost(
   if ((p.status === "draft" || p.status === "rejected") && !p.approved_at) {
     const saved = await updateCalendarTime(env.DB, id, nextIso, version, false);
     if (!saved) throw new Error("Draft changed before rescheduling. Reload.");
+    // An Instagram-only approval leaves the post a draft; keep its job in step.
+    await moveScheduledInstagram(env.DB, id, nextIso);
     await audit(env.DB, actor, "draft-rescheduled", id, nextIso);
     return;
   }
@@ -310,6 +313,8 @@ export async function reschedulePost(
     throw new Error(saveError ? "GS Poster could not save the schedule; Facebook was restored. Try again later." :
       "Post changed during rescheduling. Reload.");
   }
+  // An approved, not-yet-started Instagram job follows the moved schedule.
+  await moveScheduledInstagram(env.DB, id, nextIso);
   await audit(env.DB, actor, "scheduled-rescheduled", id, p.scheduled_at + " to " + nextIso);
 }
 
@@ -382,7 +387,8 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
   if (!post) throw new Error("Post not found.");
   const fbScheduled = post.status === "scheduled" && post.facebook_enabled && !!post.fb_post_id;
   const bsScheduled = post.bluesky?.status === "scheduled";
-  if (!fbScheduled && !bsScheduled) throw new Error("No scheduled target remains to cancel.");
+  const igScheduled = (await getInstagramJob(env.DB, id))?.status === "scheduled";
+  if (!fbScheduled && !bsScheduled && !igScheduled) throw new Error("No scheduled target remains to cancel.");
 
   // Stop the Worker queue first, before any potentially slow Facebook API call.
   let stoppedBluesky = false;
@@ -390,10 +396,17 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
     stoppedBluesky = await setBlueskyStatus(env.DB, id, { status: "cancelled" }, ["scheduled"]);
     if (!stoppedBluesky) throw new Error("Bluesky has started publishing; it could not be cancelled.");
   }
+  // Instagram's queue is stopped before Facebook too; it has no remote schedule.
+  const stoppedInstagram = igScheduled ? await cancelScheduledInstagram(env.DB, id) : false;
+  if (igScheduled && !stoppedInstagram) {
+    if (stoppedBluesky) await setBlueskyStatus(env.DB, id, { status: "scheduled" }, ["cancelled"]);
+    throw new Error("Instagram has started publishing; it could not be cancelled.");
+  }
   try {
     if (fbScheduled) await deleteFbPost(env, post.fb_post_id!);
   } catch (e) {
     if (stoppedBluesky) await setBlueskyStatus(env.DB, id, { status: "scheduled" }, ["cancelled"]);
+    if (stoppedInstagram) await env.DB.prepare("UPDATE instagram_jobs SET status = 'scheduled' WHERE post_id = ? AND status = 'cancelled'").bind(id).run();
     throw e;
   }
   // A successful Facebook post or failed Facebook attempt keeps its own status
@@ -402,7 +415,7 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
     await updatePost(env.DB, id, { status: "cancelled" }, ["scheduled"]);
   }
   await audit(env.DB, actor, "cancelled-targets", id,
-    [fbScheduled ? "facebook" : null, stoppedBluesky ? "bluesky" : null].filter(Boolean).join(","));
+    [fbScheduled ? "facebook" : null, stoppedBluesky ? "bluesky" : null, stoppedInstagram ? "instagram" : null].filter(Boolean).join(","));
 }
 
 /**
@@ -463,6 +476,7 @@ export async function refreshScheduled(env: Env): Promise<void> {
       const info = p.video ? await getPageVideoInfo(env,p.fb_post_id!) : await getPostInfo(env,p.fb_post_id!);
       if (!info) {
         if (p.bluesky?.status === "scheduled") await setBlueskyStatus(env.DB, p.id, { status: "cancelled" }, ["scheduled"]);
+        await cancelScheduledInstagram(env.DB, p.id);
         await updatePost(env.DB, p.id, { status: "cancelled", note: "Removed on Facebook" }, ["scheduled"]);
       } else if (info.is_published) {
         await updatePost(env.DB, p.id, { status: "published", permalink: info.permalink_url ?? null }, ["scheduled"]);
