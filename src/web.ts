@@ -8,6 +8,7 @@ import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, get
 import { markTikTokInboxApproved, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, type Paged } from "./history.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
+import { POSTER_FAVICON } from "./favicon.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
@@ -83,6 +84,11 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const path = url.pathname;
 
   if (path === "/health") return Response.json({ok:true});
+  if (path === "/favicon.svg" && (req.method === "GET" || req.method === "HEAD"))
+    return new Response(req.method === "HEAD" ? null : POSTER_FAVICON, { headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400",
+      "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'",
+    } });
   // Public legal/app-review URLs are deliberately outside the GitHub login wall.
   if (path === "/about" || path === "/terms" || path === "/privacy") {
     if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed",{status:405,headers:{"Allow":"GET, HEAD"}});
