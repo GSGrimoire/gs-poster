@@ -166,12 +166,16 @@ test("TikTok only: one PIN sends exactly one inbox transfer and publishes nothin
   const t=await transfer(p.id);
   assert.equal(t?.status,"processing");
   assert.equal(t?.media_type,"PHOTO");
-  assert.equal((await getPost(db,p.id))!.status,"draft","no Facebook or Bluesky target, so the post itself is not released");
+  const approved=(await getPost(db,p.id))!;
+  assert.equal(approved.status,"scheduled","a PIN-approved TikTok-only transfer moves out of Drafts");
+  assert.ok(approved.approved_at,"approval is recorded, even though TikTok publication remains manual");
+  assert.equal(approved.scheduled_at,null,"TikTok inbox is not a provider schedule");
+  assert.match(await page(p.id),/TikTok Inbox/);
   // A second click (same form) cannot send again.
   outbound.length=0;
   const again=await approve(p);
-  assert.equal(again.status,400);
-  assert.match(await again.text(),/Already sent to TikTok/);
+  assert.equal(again.status,409);
+  assert.match(await again.text(),/Only drafts can be approved/);
   assert.equal(tiktokCalls().length,0);
 });
 
@@ -184,6 +188,7 @@ test("TikTok video: the private MP4 goes to the inbox once",async()=>{
   assert.deepEqual(tiktokCalls().map(c=>c.method+" "+new URL(c.url).pathname),
     ["POST /v2/post/publish/inbox/video/init/","PUT /video/"]);
   assert.equal((await transfer(p.id))?.status,"transfer_complete");
+  assert.equal((await getPost(db,p.id))!.status,"scheduled");
 });
 
 test("Facebook scheduled + TikTok: TikTok now, Facebook queued, both reported, no Graph call",async()=>{
@@ -223,9 +228,10 @@ test("TikTok outcome unclear: recorded for review, and a later approval cannot r
   const r=await approve(p);
   assert.equal(r.status,502);
   assert.equal((await transfer(p.id))?.status,"needs_review");
+  assert.equal((await getPost(db,p.id))!.status,"scheduled","uncertain transfer remains in History for human reconciliation");
   tiktokMode="ok";outbound.length=0;
   const again=await approve(p);
-  assert.equal(again.status,400);
+  assert.equal(again.status,409);
   assert.equal(tiktokCalls().length,0);
 });
 
