@@ -353,8 +353,8 @@ function postCard(env: Env, p: Post): string {
   const thumbs = gallery.length
     ? `<div class="thumbs">${gallery.slice(0,6).map((_, i) => `<img src="/media/${p.id}/${i}${source}" alt="" loading="lazy">`).join("")}</div>`
     : "";
-  const live = p.permalink ? ` · <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
-  const bsky = p.bluesky?.permalink ? ` · <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
+  const live = p.permalink ? ` | <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
+  const bsky = p.bluesky?.permalink ? ` | <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
     <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.tiktok_enabled?'<span class="chip">TikTok</span>':""}</div>
     <p class="caption clip">${esc(tiktokOnly ? (p.tiktok_caption ?? p.message) : p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
@@ -567,7 +567,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   let actions = instagramJobCard(igJob, p.id, csrf, (iso) => formatLocal(new Date(iso), env.TIMEZONE));
   const postVideo=ttMedia.video;
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && !tiktokConn) {
-    actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
+    actions += '<div class="step-card"><div class="eyebrow">TikTok | Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
   }
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
     const ttRetry=tiktokTransfer?.status==="rejected"||tiktokTransfer?.status==="cleared";
@@ -575,7 +575,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     // separate options step stays for scheduled and published posts.
     const inEditor=["draft","rejected"].includes(p.status)&&!p.approved_at;
     if((!tiktokTransfer||ttRetry) && !inEditor && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
-      <div class="eyebrow">TikTok · ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
+      <div class="eyebrow">TikTok | ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
       <h3 style="margin:8px 0">${TIKTOK_DIRECT_POST_VISIBLE?"Choose your TikTok publishing path":"Send to your TikTok inbox"}</h3>
       <p class="hint">Review the ${ttMedia.video?"video":"carousel"} before sending it to your TikTok inbox${TIKTOK_DIRECT_POST_VISIBLE?" or starting a private Direct Post test":""}. Sending needs your approval PIN. The calendar time does not trigger TikTok publication; you finish and publish in the TikTok app.</p>
       <p><a class="btn" href="/post/${p.id}/tiktok-options">${TIKTOK_DIRECT_POST_VISIBLE?"Review TikTok posting options":"Review and send to TikTok inbox"}</a></p>
@@ -618,7 +618,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       tiktokPlan: tiktokReleasePlan(p, tiktokConn, tiktokTransfer),
       instagramPlan: instagramReleasePlan(env, p, igJob),
       mediaLooksPending: p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release),
-      createdLine: `Drafted by ${p.created_by ?? "?"} · ${formatLocal(new Date(p.created_at), env.TIMEZONE)} · ${p.id}`,
+      createdLine: `Drafted by ${p.created_by ?? "?"} | ${formatLocal(new Date(p.created_at), env.TIMEZONE)} | ${p.id}`,
     });
     return html(page(p.label || "Draft", editor, { login: session.login, wide: true }), { status });
   }
@@ -787,17 +787,17 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       ${p.facebook_enabled ? `<section class="platform-preview" aria-label="Facebook review">
         <h3>Facebook</h3><p class="caption">${esc(p.message)}</p>
         ${p.video?videoPreview("facebook"):thumbs}
-        <p class="hint">${p.video?"Video":p.images.length+" images"} · separate Facebook approval</p></section>`:""}
+        <p class="hint">${p.video?"Video":p.images.length+" images"} | separate Facebook approval</p></section>`:""}
       ${p.tiktok_enabled ? `<section class="platform-preview" aria-label="TikTok review">
         <h3>TikTok</h3><p class="caption">${esc(p.tiktok_caption ?? p.message)}</p>
         ${ttMedia.video?videoPreview("tiktok"):ttThumbs}
-        <p class="hint">${ttMedia.video?"Video":ttMedia.images.length+" images"} · manual transfer only</p></section>`:""}
+        <p class="hint">${ttMedia.video?"Video":ttMedia.images.length+" images"} | manual transfer only</p></section>`:""}
       ${p.instagram ? `<section class="platform-preview" aria-label="Instagram preparation">
         <h3>Instagram (manual)</h3><p class="caption">${esc(p.instagram.caption)}</p>
         ${p.instagram.video ? videoPreview("instagram")+
           `<p><a href="/instagram/${p.id}/video.mp4" download="instagram-${p.id}-reel.mp4">Download MP4 Reel</a></p>
           <p class="hint">Original MP4, not transcoded. Verify 9:16, H.264 and audio before posting.</p>`
-          : p.instagram.items.map((_,i)=>`<a href="/instagram/${p.id}/${i}.jpg" download>Photo ${i+1}</a>`).join(" · ")}
+          : p.instagram.items.map((_,i)=>`<a href="/instagram/${p.id}/${i}.jpg" download>Photo ${i+1}</a>`).join(" | ")}
         <p class="hint">${igJob ? "Instagram publishing status is shown in the Instagram card." : "Not approved for Instagram: download and post it yourself, or approve it for Instagram from the draft."}</p></section>` : ""}
       ${bs ? `<section class="platform-preview" aria-label="Bluesky review">
         <h3>Bluesky</h3><p class="caption">${esc(bs.caption)}</p>
@@ -808,7 +808,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       </div>
       ${p.facebook_enabled && p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
-      <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} · ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} · ${esc(p.id)}</p>
+      <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} | ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} | ${esc(p.id)}</p>
     </div>
     ${xCard}
     ${draftMediaPanel(p, csrf)}
