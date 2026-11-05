@@ -32,7 +32,7 @@ export const CHAT_UPLOAD_JS=String.raw`
       message("File must be nonempty and at most "+(limit/1048576).toFixed(1)+" MB.",true);return;
     }
     selected=file;send.disabled=false;
-    hint.textContent=file.name+" · "+(file.size/1048576).toFixed(2)+" MB";
+    hint.textContent=file.name+" | "+(file.size/1048576).toFixed(2)+" MB";
     message("Ready to upload. Nothing will be published.");
   }
   input.addEventListener("change",()=>select(input.files?.[0]));
@@ -85,7 +85,7 @@ export async function browserUploadPage(req:Request,env:Env):Promise<Response> {
     ".jpg,.jpeg,image/jpeg";
   const body=`
     <div class="hero">
-      <div class="hero-kicker">GS Grimoire · Private chat media intake</div>
+      <div class="hero-kicker">GS Grimoire | Private chat media intake</div>
       <h2>Send your creation to GS Poster.</h2>
       <p>Upload straight into private storage. No GitHub staging, no public image address, and no publishing until you approve separately.</p>
     </div>
