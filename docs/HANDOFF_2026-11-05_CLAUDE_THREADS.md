@@ -91,3 +91,16 @@ A cancelled or published job unlocks the draft. Tested in `test/threads.test.ts`
 - **T1 (frozen approved Threads posts):** already fixed at `9d40304` (see the F4 section above). It now also has a production-router test: a time change, switching Threads off and reject are each refused for a Threads-only approval, and the post stays frozen while only its Instagram job is pending.
 - **T2 (renewal blocking publishing):** the scheduled handler now calls `runThreadsCron`. It tries renewal first; a renewal failure goes to the audit log (`threads-renewal-failed`) and never stops `processThreadsBatch`, which uses the still-valid token. The cron run is still reported as failed afterwards. Tested: with renewal failing, a due post is processed; the next run renews and publishes.
 - **Checks:** `npm run check` gave 400 passed, 0 failed, twice. The `wrangler` dry-run passes.
+
+## Review round 2 (ChatGPT-2, head `86ad685`): T3
+
+- **Finding:** jobs didn't record which Threads account they were approved for. After disconnecting A and connecting B, cron would publish A-approved content on B without a new approval.
+- **Fix:**
+  - `threads_jobs` gains `account_id` and `account_username`, both required. Approval stores the account connected at that moment; the insert is fenced on that `threads_accounts.user_id`.
+  - Each cron run reads the sign-in once (`threadsAccessToken`) and uses only those credentials for every Threads call in the run, so a reconnect mid-run can't switch accounts.
+  - Before any call, the run compares the connected account with `job.account_id`. On a mismatch it fails the job before sending, and not as unclear, whether the job was preparing or processing. The message names the approved account.
+  - Retrying with the wrong account fails again. Reconnecting the approved account and retrying publishes.
+  - A send already past the barrier keeps the existing unclear handling and is never replayed.
+  - The approval checkbox and the job card name the account.
+- **Tests (5 new):** A to disconnect to B before due (no Threads call at all, a retry under B still sends nothing); reconnecting A then retrying publishes once on A; an account change while the container is prepared stops before the final send; a reconnect while A's final send is in flight still sends with A's token to A's endpoint; approval records the account connected at queue time.
+- **Checks:** `npm run check` gave 405 passed, 0 failed, twice. The `wrangler` dry-run passes and `git diff --check origin/main...HEAD` is clean.

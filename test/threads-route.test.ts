@@ -115,8 +115,8 @@ test("Threads job controls need the PIN, and closing an unclear result needs the
   const p = await createPost(db, { message: "Cave.", label: "Cave", release: null, images: [], video: null,
     created_by: "test", scheduled_at: null } as any);
   const now = new Date().toISOString();
-  await db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at)
-    VALUES (?, 'scheduled', 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?)`).bind(p.id, new Date(Date.now() + 3600_000).toISOString(), now).run();
+  await db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at, account_id)
+    VALUES (?, 'scheduled', 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?, '17841400000000077')`).bind(p.id, new Date(Date.now() + 3600_000).toISOString(), now).run();
   const page = await (await get("/post/" + p.id)).text();
   assert.match(page, /Threads publishing/);
   assert.equal((await post(`/post/${p.id}/threads-cancel`, { pin: "111111" })).status, 403);
@@ -160,8 +160,8 @@ test("T1: an approved Threads post cannot be re-timed, switched off or rejected 
   const due = p.scheduled_at!;
   const now = new Date().toISOString();
   await db.prepare("INSERT INTO threads_targets (post_id, caption, media, status) VALUES (?, 'Into the cave', 'none', 'draft')").bind(p.id).run();
-  await db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at)
-    VALUES (?, 'scheduled', 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?)`).bind(p.id, due, now).run();
+  await db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at, account_id)
+    VALUES (?, 'scheduled', 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?, '17841400000000077')`).bind(p.id, due, now).run();
   const cur = (await getPost(db, p.id))!;
   const save = (extra: Record<string, string>) => post(`/post/${p.id}/save`, { expected_updated_at: cur.updated_at, auto: "1",
     message: "Cave.", p_facebook: "1", p_threads: "1", th_caption: "Into the cave", th_media: "none", ...extra });

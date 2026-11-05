@@ -181,11 +181,11 @@ test("the plan needs a connection and checks the text and photos", async () => {
   const off = await threadsReleasePlan(env(), p, null);
   assert.equal(off.ok === false && off.offered, false);
   await connect();
-  assert.deepEqual(await threadsReleasePlan(env(), p, null), { ok: true, kind: "TEXT", count: 0, text: "Into the cave #dnd" });
+  assert.deepEqual(await threadsReleasePlan(env(), p, null), { ok: true, kind: "TEXT", count: 0, text: "Into the cave #dnd", account: "gsgrimoire" });
   const long = await draft({ caption: "x".repeat(501), media: "none" });
   assert.match((await threadsReleasePlan(env(), long, null) as { reason: string }).reason, /over 500/);
   const fb = await draft({ caption: "Photos", media: "facebook" });
-  assert.deepEqual(await threadsReleasePlan(env(), fb, null), { ok: true, kind: "CAROUSEL", count: 3, text: "Photos" });
+  assert.deepEqual(await threadsReleasePlan(env(), fb, null), { ok: true, kind: "CAROUSEL", count: 3, text: "Photos", account: "gsgrimoire" });
   const reel = await draft({ caption: "Reel", media: "instagram" }, { caption: "r", frame: "4:5", items: [], video: IMG(9) });
   assert.match((await threadsReleasePlan(env(), reel, null) as { reason: string }).reason, /Reel/);
   const dash = await draft({ caption: "Into the cave — now", media: "none" });
@@ -410,4 +410,93 @@ test("T2: a failed token renewal does not hold back a due post while the sign-in
   await runThreadsCron(env());
   assert.equal((await getThreadsJob(db, p.id))!.status, "published");
   assert.ok((await threadsConnection(db))!.expires_at > now + 50 * 86400, "renewal succeeds on a later run");
+});
+
+// ---------------------------------------------------------------- T3: the approved account
+
+const OTHER = "17841400000000099";
+async function swapTo(id: string) {
+  await disconnectThreads(db);
+  accountId = id;
+  await connect();
+}
+
+test("T3: a job is bound to the approved account; after A to B it stops without sending anything", async () => {
+  await connect();
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.account_id, USER);
+  assert.equal(job.account_username, "gsgrimoire");
+  await swapTo(OTHER);
+  calls = [];
+  await processThreadsBatch(env());
+  assert.equal(calls.filter((c) => c.path.startsWith("/v1.0/")).length, 0, "no call to either account's Threads API");
+  const failed = (await getThreadsJob(db, p.id))!;
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.ambiguous, false, "nothing was sent, so this is not unclear");
+  assert.match(failed.error!, /approved for Threads account @gsgrimoire, but a different Threads account is connected/);
+  // Retrying while B is connected fails the same way; it never publishes to B.
+  assert.equal(await retryThreadsJob(env(), p.id, "gsgrimoire"), true);
+  await processThreadsBatch(env());
+  assert.equal(graphPosts(`${OTHER}/threads`).length, 0);
+  assert.equal((await getThreadsJob(db, p.id))!.status, "failed");
+});
+
+test("T3: reconnecting the same account lets the approved job go out", async () => {
+  await connect();
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  await swapTo(OTHER);
+  await processThreadsBatch(env());
+  await swapTo(USER);
+  assert.equal(await retryThreadsJob(env(), p.id, "gsgrimoire"), true);
+  await processThreadsBatch(env());
+  await processThreadsBatch(env());
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.status, "published");
+  assert.ok(graphPosts(`/v1.0/${USER}/threads_publish`).length === 1);
+});
+
+test("T3: an account change while media is being prepared stops before the final send", async () => {
+  await connect();
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  await processThreadsBatch(env());
+  assert.equal((await getThreadsJob(db, p.id))!.status, "processing", "the container exists on account A");
+  await swapTo(OTHER);
+  calls = [];
+  await processThreadsBatch(env());
+  assert.equal(graphPosts("/threads_publish").length, 0, "never published");
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false);
+  assert.match(job.error!, /prepared media stays unpublished/);
+});
+
+test("T3: a reconnect during a run cannot switch the account the run sends with", async () => {
+  await connect();
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  await processThreadsBatch(env());
+  const g = gate();
+  holdPublish = g.hold;
+  const run = processThreadsBatch(env());
+  await g.reached;
+  // B is connected while A's final send is in flight.
+  await disconnectThreads(db);
+  accountId = OTHER;
+  await connect();
+  g.release();
+  await run;
+  const sends = graphPosts("/threads_publish");
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].path, `/v1.0/${USER}/threads_publish`, "sent for the approved account");
+  assert.equal(sends[0].params.get("access_token"), "long-lived-test-token");
+  assert.equal((await getThreadsJob(db, p.id))!.status, "published");
+});
+
+test("T3: approval records the account connected at the moment the job is queued", async () => {
+  await connect();
+  const p = await draft({ caption: "Into the cave", media: "none" });
+  await db.prepare("UPDATE threads_accounts SET user_id = ?").bind(OTHER).run();
+  // The plan sees a connection, but the fence binds the queued job to the account read at that moment.
+  const job = await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(), "gsgrimoire");
+  assert.equal(job.account_id, OTHER);
 });

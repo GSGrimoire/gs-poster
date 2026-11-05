@@ -133,7 +133,8 @@ export const THREADS_JOBS_DDL = `CREATE TABLE IF NOT EXISTS threads_jobs (
   post_id TEXT PRIMARY KEY, status TEXT NOT NULL, kind TEXT NOT NULL, due_at TEXT NOT NULL, text TEXT NOT NULL,
   frame TEXT, items TEXT NOT NULL DEFAULT '[]', children TEXT NOT NULL DEFAULT '[]', container_id TEXT,
   processing_since TEXT, media_id TEXT, permalink TEXT, error TEXT, ambiguous INTEGER NOT NULL DEFAULT 0,
-  lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL)`;
+  lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+  account_id TEXT NOT NULL, account_username TEXT NOT NULL DEFAULT '')`;
 /** Job states that are under way: their time and their post are fixed. */
 const IG_STARTED = "('preparing','processing','sending')";
 /** An approved Instagram job that may still publish (or whose result is unclear):

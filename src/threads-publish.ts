@@ -38,6 +38,8 @@ export interface ThreadsJob {
   frame: InstagramFrame | null; items: ThreadsItem[]; children: string[]; container_id: string | null;
   processing_since: string | null; media_id: string | null; permalink: string | null; error: string | null;
   ambiguous: boolean; lease_until: string | null; created_by: string; updated_at: string;
+  /** The Threads account the owner approved this job for. It never publishes anywhere else. */
+  account_id: string; account_username: string;
 }
 interface Row extends Omit<ThreadsJob, "items" | "children" | "ambiguous"> { items: string; children: string; ambiguous: number }
 const fromRow = (r: Row): ThreadsJob => ({ ...r, items: JSON.parse(r.items || "[]"), children: JSON.parse(r.children || "[]"), ambiguous: r.ambiguous === 1 });
@@ -89,15 +91,15 @@ export function threadsItems(post: Pick<Post, "images" | "instagram" | "instagra
 }
 
 export type ThreadsPlan =
-  | { ok: true; kind: ThreadsKind; count: number; text: string }
+  | { ok: true; kind: ThreadsKind; count: number; text: string; account: string }
   | { ok: false; offered: boolean; reason: string };
 
 /** Read-only: can this approval queue Threads, and what would it post? */
 export async function threadsReleasePlan(env: Env, post: Post, job: ThreadsJob | null): Promise<ThreadsPlan> {
   const th = post.threads;
   if (!th) return { ok: false, offered: false, reason: "Threads is not selected for this post." };
-  if (!threadsConfigured(env) || !(await threadsConnection(env.DB)))
-    return { ok: false, offered: false, reason: "Threads is not connected yet. Connect it in Threads settings." };
+  const conn = threadsConfigured(env) ? await threadsConnection(env.DB) : null;
+  if (!conn) return { ok: false, offered: false, reason: "Threads is not connected yet. Connect it in Threads settings." };
   if (job && job.status !== "cancelled") return { ok: false, offered: true, reason: job.status === "published"
     ? "This post is already on Threads. Make a new draft to post it again."
     : "Threads already has an approved job for this post. Cancel it in the Threads card first." };
@@ -111,7 +113,7 @@ export async function threadsReleasePlan(env: Env, post: Post, job: ThreadsJob |
   problems.push(...checkMessage(th.caption, { hasImages: items.length > 0 }).errors.map((e) => e.replace(/\.$/, "")));
   if (problems.length) return { ok: false, offered: true, reason: "Fix in the Threads card and save first: " + problems.join("; ") + "." };
   const kind: ThreadsKind = !items.length ? "TEXT" : items.length === 1 ? "IMAGE" : "CAROUSEL";
-  return { ok: true, kind, count: items.length, text: th.caption };
+  return { ok: true, kind, count: items.length, text: th.caption, account: conn.username || conn.user_id };
 }
 
 /** Called only from the PIN-gated approval, fenced on the version the owner reviewed. */
@@ -122,19 +124,24 @@ export async function queueThreadsOnApproval(env: Env, postId: string, expectedV
   const plan = await threadsReleasePlan(env, post, await getThreadsJob(env.DB, postId));
   if (!plan.ok) throw new Error(plan.reason);
   const { frame, items } = threadsItems(post, post.threads!.media);
+  // The approval is for the account connected now; record it so a later
+  // account change can never redirect this post without a fresh approval.
+  const conn = (await threadsConnection(env.DB))!;
   const now = new Date().toISOString();
-  const res = await env.DB.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, frame, items, created_by, updated_at)
-    SELECT ?, 'scheduled', ?, ?, ?, ?, ?, ?, ? FROM posts
+  const res = await env.DB.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, frame, items, created_by, updated_at, account_id, account_username)
+    SELECT ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ? FROM posts
       WHERE id = ? AND updated_at = ? AND status = 'draft' AND approved_at IS NULL
         AND EXISTS (SELECT 1 FROM threads_targets t WHERE t.post_id = posts.id AND t.status = 'draft')
+        AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = ?)
     ON CONFLICT(post_id) DO UPDATE SET status = 'scheduled', kind = excluded.kind, due_at = excluded.due_at, text = excluded.text,
       frame = excluded.frame, items = excluded.items, children = '[]', container_id = NULL, processing_since = NULL,
       media_id = NULL, permalink = NULL, error = NULL, ambiguous = 0, lease_until = NULL, created_by = excluded.created_by,
-      updated_at = excluded.updated_at
+      updated_at = excluded.updated_at, account_id = excluded.account_id, account_username = excluded.account_username
     WHERE threads_jobs.status = 'cancelled'`)
-    .bind(postId, plan.kind, dueAt.toISOString(), post.threads!.caption, frame, JSON.stringify(items), actor, now, postId, expectedVersion).run();
+    .bind(postId, plan.kind, dueAt.toISOString(), post.threads!.caption, frame, JSON.stringify(items), actor, now,
+      conn.user_id, conn.username, postId, expectedVersion, conn.user_id).run();
   if ((res.meta.changes ?? 0) !== 1) throw new Error("Threads could not be queued: the draft changed or a job already exists. Reload.");
-  await audit(env.DB, actor, "threads-queued", postId, plan.kind + " at " + dueAt.toISOString());
+  await audit(env.DB, actor, "threads-queued", postId, plan.kind + " at " + dueAt.toISOString() + " for @" + (conn.username || conn.user_id));
   return (await getThreadsJob(env.DB, postId))!;
 }
 
@@ -220,8 +227,10 @@ export async function serveThreadsMedia(req: Request, env: Env): Promise<Respons
 
 // ---------------------------------------------------------------- Graph calls
 
-async function graph(env: Env, method: "GET" | "POST", path: string, params: Record<string, string>): Promise<Record<string, unknown>> {
-  const { token } = await threadsAccessToken(env);
+/** One Threads call with the credentials read once for the whole run. */
+type Creds = { token: string; userId: string };
+async function graph(creds: Creds, method: "GET" | "POST", path: string, params: Record<string, string>): Promise<Record<string, unknown>> {
+  const { token } = creds;
   const q = new URLSearchParams({ ...params, access_token: token });
   const res = method === "GET"
     ? await fetch(`${THREADS_GRAPH}/v1.0/${path}?${q}`, { redirect: "manual" })
@@ -267,8 +276,8 @@ async function write(db: D1Database, job: ThreadsJob, sets: Record<string, unkno
   return (res.meta.changes ?? 0) === 1;
 }
 
-async function container(env: Env, userId: string, fields: Record<string, string>): Promise<string> {
-  const res = await graph(env, "POST", `${userId}/threads`, fields);
+async function container(creds: Creds, fields: Record<string, string>): Promise<string> {
+  const res = await graph(creds, "POST", `${creds.userId}/threads`, fields);
   if (typeof res.id !== "string" && typeof res.id !== "number") throw new Error("Threads accepted the media but returned no container id.");
   return String(res.id);
 }
@@ -285,13 +294,20 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
   let sent = false;
   let remoteId: string | null = null;
   try {
-    const { userId } = await threadsAccessToken(env);
+    // Read the sign-in once for this run and use only it, so a reconnect during
+    // the run cannot switch accounts mid-way. It must be the approved account.
+    const creds = await threadsAccessToken(env);
+    if (creds.userId !== job.account_id) {
+      const where = job.status === "processing" ? "Its prepared media stays unpublished. " : "";
+      return await fail(`This post was approved for Threads account @${job.account_username || job.account_id}, but a different Threads account is connected now. Nothing was sent. ${where}Reconnect @${job.account_username || job.account_id} and press Try Threads again, or cancel it and approve it again for the new account.`, false, ["preparing", "processing"]);
+    }
+    const userId = creds.userId;
     if (job.status === "preparing") {
       const children = [...job.children];
       if (job.kind === "CAROUSEL") {
         const stop = Math.min(job.items.length, children.length + THREADS_CHILDREN_PER_RUN);
         for (let i = children.length; i < stop; i++) {
-          children.push(await container(env, userId, { media_type: "IMAGE", image_url: await createGrant(env, job.post_id, i), is_carousel_item: "true" }));
+          children.push(await container(creds, { media_type: "IMAGE", image_url: await createGrant(env, job.post_id, i), is_carousel_item: "true" }));
           if (!(await write(env.DB, job, { children: JSON.stringify(children) }, ["preparing"])))
             throw new Error("Threads preparation lost its claim; nothing was published.");
         }
@@ -301,12 +317,12 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
       if (job.kind === "CAROUSEL") { fields.media_type = "CAROUSEL"; fields.children = children.join(","); }
       else if (job.kind === "IMAGE") { fields.media_type = "IMAGE"; fields.image_url = await createGrant(env, job.post_id, 0); }
       else fields.media_type = "TEXT";
-      const id = await container(env, userId, fields);
+      const id = await container(creds, fields);
       if (!(await write(env.DB, job, { status: "processing", container_id: id, processing_since: now.toISOString(), lease_until: null }, ["preparing"])))
         throw new Error("Threads preparation lost its claim; nothing was published.");
       return;
     }
-    const info = await graph(env, "GET", String(job.container_id), { fields: "status,error_message" });
+    const info = await graph(creds, "GET", String(job.container_id), { fields: "status,error_message" });
     const code = String(info.status ?? "");
     if (code === "ERROR" || code === "EXPIRED")
       return await fail(`Threads could not process the post (${code}${info.error_message ? ": " + String(info.error_message) : ""}). Nothing was published.`, false, ["processing"]);
@@ -323,7 +339,7 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
     sent = true;
     let mediaId: string;
     try {
-      const res = await graph(env, "POST", `${userId}/threads_publish`, { creation_id: String(job.container_id) });
+      const res = await graph(creds, "POST", `${userId}/threads_publish`, { creation_id: String(job.container_id) });
       if (!res.id) throw new Error("no post id returned");
       mediaId = String(res.id);
       remoteId = mediaId;
@@ -341,7 +357,7 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
         job.post_id, mediaId);
       return;
     }
-    const permalink = (await graph(env, "GET", mediaId, { fields: "permalink" }).catch(() => null))?.permalink ?? null;
+    const permalink = (await graph(creds, "GET", mediaId, { fields: "permalink" }).catch(() => null))?.permalink ?? null;
     await write(env.DB, job, { status: "published", permalink: permalink ? String(permalink) : null, error: null, lease_until: null }, ["sending"]);
     await env.DB.prepare("DELETE FROM threads_media_grants WHERE post_id = ?").bind(job.post_id).run();
     await audit(env.DB, "cron", "threads-published", job.post_id, mediaId);
@@ -375,7 +391,7 @@ export async function checkThreads(env: Env): Promise<{ ok: boolean; username?: 
   const conn = await threadsConnection(env.DB);
   if (!conn) return { ok: false, error: "Threads is not connected. Use Connect Threads in Threads settings." };
   try {
-    const me = await graph(env, "GET", "me", { fields: "username" });
+    const me = await graph(await threadsAccessToken(env), "GET", "me", { fields: "username" });
     return { ok: true, username: String(me.username ?? conn.username), expires_at: new Date(conn.expires_at * 1000).toISOString() };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -394,7 +410,8 @@ export function threadsJobCard(job: ThreadsJob | null, postId: string, csrf: str
       <input type="hidden" name="csrf" value="${esc(csrf)}">${extra}
       <label>Approval PIN<input name="pin" type="password" inputmode="numeric" autocomplete="off" required></label>
       <button type="submit">${esc(button)}</button></form>`;
-  const kind = job.kind === "CAROUSEL" ? job.items.length + "-photo carousel" : job.kind === "IMAGE" ? "photo post" : "text post";
+  const kind = (job.kind === "CAROUSEL" ? job.items.length + "-photo carousel" : job.kind === "IMAGE" ? "photo post" : "text post") +
+    " for @" + (job.account_username || job.account_id);
   return `<section class="ed-card th-job" aria-label="Threads publishing"><h3>Threads</h3>
     <p><strong>${esc(LABEL[job.status])}</strong> · ${esc(kind)}${job.status === "scheduled" ? " · " + esc(when(job.due_at)) : ""}</p>
     ${job.permalink ? `<p><a href="${esc(job.permalink)}" target="_blank" rel="noopener noreferrer">Open on Threads</a></p>` : ""}
