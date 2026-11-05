@@ -71,7 +71,7 @@ export interface Post {
   x_opened_at?: string | null;
 }
 
-interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky" | "instagram"> {
+export interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky" | "instagram"> {
   ig_caption?: string | null;
   ig_frame?: string | null;
   ig_items?: string | null;
@@ -94,7 +94,7 @@ interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled"
   bs_error: string | null;
 }
 
-const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
+export const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
  b.video AS bs_video, b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
  b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
  b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error,
@@ -217,7 +217,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   schemaReady = true;
 }
 
-function fromRow(r: Row): Post {
+export function fromRow(r: Row): Post {
   const bluesky: BlueskyTarget | null = r.bs_caption === null ? null : {
     caption: r.bs_caption, images: JSON.parse(r.bs_images || "[]"),
     video: r.bs_video ? JSON.parse(r.bs_video) : null,
