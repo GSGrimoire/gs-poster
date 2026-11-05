@@ -11,8 +11,9 @@
 import { BSKY_IMAGE_COUNT, BSKY_TEXT_LIMIT } from "./bluesky.ts";
 import { MAX_IMAGES } from "./validate.ts";
 import { INSTAGRAM_CAPTION_MAX, INSTAGRAM_HASHTAG_MAX, INSTAGRAM_MAX_ITEMS } from "./instagram.ts";
+import { THREADS_TEXT_MAX } from "./db.ts";
 
-export type PlatformId = "facebook" | "bluesky" | "tiktok" | "instagram";
+export type PlatformId = "facebook" | "bluesky" | "tiktok" | "instagram" | "threads";
 
 export interface AspectGuide {
   /** Width / height bounds a single photo shows uncropped in the feed. */
@@ -86,9 +87,17 @@ export const PLATFORMS: Record<PlatformId, PlatformRules> = {
     delivery: "Once Instagram is connected, approve it with your PIN and GS Poster posts it at the set time. Until then, download the prepared photos or the original Reel MP4 and post in Instagram yourself.",
     maxHashtags: INSTAGRAM_HASHTAG_MAX, framed: true,
   },
+  threads: {
+    id: "threads", label: "Threads",
+    caption: { photo: THREADS_TEXT_MAX, video: THREADS_TEXT_MAX, text: THREADS_TEXT_MAX },
+    graphemes: false, maxPhotos: 20, textOnly: true, mixPhotoVideo: false, altRequired: false,
+    aspect: { min: 0.1, max: 10, label: "up to 10:1",
+      outside: "Threads shows most shapes; very tall or wide photos are cropped in the feed." },
+    delivery: "Once Threads is connected, approve it with your PIN and GS Poster posts it at the set time, using the Instagram or Facebook photos you pick.",
+  },
 };
 
-export const PLATFORM_ORDER: PlatformId[] = ["facebook", "instagram", "bluesky", "tiktok"];
+export const PLATFORM_ORDER: PlatformId[] = ["facebook", "instagram", "threads", "bluesky", "tiktok"];
 
 /** Which caption limit applies for the media a target carries. */
 export function captionLimit(id: PlatformId, media: { photos: number; video: boolean }): number {

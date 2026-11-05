@@ -14,6 +14,8 @@ import { browserUploadPage } from "./chat-upload.ts";
 import { publishDueBluesky } from "./publish.ts";
 import { processFacebookUploadBatch } from "./facebook-queue.ts";
 import { processInstagramBatch } from "./instagram-publish.ts";
+import { processThreadsBatch } from "./threads-publish.ts";
+import { renewThreadsToken } from "./threads.ts";
 
 const providers = new Map<string, OAuthProvider<Env>>();
 
@@ -56,6 +58,8 @@ export default {
     catch { failed = true; console.error("Bluesky scheduled batch failed."); }
     try { await processInstagramBatch(env); }
     catch { failed = true; console.error("Instagram scheduled batch failed."); }
+    try { await renewThreadsToken(env); await processThreadsBatch(env); }
+    catch { failed = true; console.error("Threads scheduled batch failed."); }
     if (failed) throw new Error("One or more scheduled publication batches failed.");
   },
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response {
