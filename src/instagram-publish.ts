@@ -20,7 +20,7 @@
  * No Model Context Protocol tool calls anything in this file.
  */
 import type { Env } from "./env.ts";
-import { audit, getPost } from "./db.ts";
+import { audit, ensureSchema, getPost, INSTAGRAM_JOBS_DDL } from "./db.ts";
 import { graphGet, graphPost } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
@@ -42,6 +42,8 @@ export const INSTAGRAM_CLAIM_MS = 3 * 60_000;
  * keeps Instagram to at most six outside requests per minute, leaving room for
  * the Facebook queue and Bluesky inside the 50-request free-plan allowance. */
 export const INSTAGRAM_CHILDREN_PER_RUN = 5;
+/** How long the final send may run before its result is treated as unclear. */
+export const INSTAGRAM_SEND_LEASE_MS = 10 * 60_000;
 /** Give up waiting for Meta to process a container after this long. */
 export const INSTAGRAM_PROCESSING_LIMIT_MS = 2 * 3600_000;
 
@@ -88,27 +90,9 @@ export function instagramConfigured(env: Env): boolean {
 let schemaReady = false;
 export async function ensureInstagramJobs(db: D1Database): Promise<void> {
   if (schemaReady) return;
+  await ensureSchema(db);
   await db.batch([
-    db.prepare(`CREATE TABLE IF NOT EXISTS instagram_jobs (
-      post_id TEXT PRIMARY KEY,
-      status TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      due_at TEXT NOT NULL,
-      caption TEXT NOT NULL,
-      frame TEXT NOT NULL,
-      items TEXT NOT NULL DEFAULT '[]',
-      video TEXT,
-      children TEXT NOT NULL DEFAULT '[]',
-      container_id TEXT,
-      processing_since TEXT,
-      media_id TEXT,
-      permalink TEXT,
-      error TEXT,
-      ambiguous INTEGER NOT NULL DEFAULT 0,
-      lease_until TEXT,
-      created_by TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )`),
+    db.prepare(INSTAGRAM_JOBS_DDL),
     db.prepare("CREATE INDEX IF NOT EXISTS instagram_jobs_due ON instagram_jobs(status, due_at)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS instagram_media_grants (
       token_hash TEXT PRIMARY KEY,
@@ -233,13 +217,6 @@ export async function retryInstagramJob(env: Env, postId: string, actor: string)
   return true;
 }
 
-/** Keep a scheduled Instagram job on the same time as a moved Facebook/Bluesky schedule. */
-export async function moveScheduledInstagram(db: D1Database, postId: string, dueAt: string): Promise<void> {
-  await ensureInstagramJobs(db);
-  await db.prepare("UPDATE instagram_jobs SET due_at = ?, updated_at = ? WHERE post_id = ? AND status = 'scheduled'")
-    .bind(dueAt, new Date().toISOString(), postId).run();
-}
-
 /** Stop a pending (not yet started) Instagram job alongside its post's cancellation. */
 export async function cancelScheduledInstagram(db: D1Database, postId: string): Promise<boolean> {
   await ensureInstagramJobs(db);
@@ -304,7 +281,12 @@ export async function serveInstagramMedia(req: Request, env: Env): Promise<Respo
 async function claimDue(db: D1Database, now: Date): Promise<InstagramJob | null> {
   await ensureInstagramJobs(db);
   const iso = now.toISOString();
-  // A deleted post takes its unsent Instagram job with it. A job already past
+  // A final send that outlived its lease (Worker stopped, database failed)
+  // becomes an unclear result for the owner. It is never sent again.
+  await db.prepare(`UPDATE instagram_jobs SET status = 'failed', ambiguous = 1, lease_until = NULL, updated_at = ?,
+      error = 'The final Instagram publish request was interrupted before GS Poster recorded its answer. It may or may not be on Instagram. Check the GS Grimoire Instagram; nothing will be resent automatically.'
+    WHERE status = 'sending' AND (lease_until IS NULL OR lease_until < ?)`).bind(iso, iso).run();
+  // Legacy safety net: a post deleted before deletion was guarded takes its unsent job with it. A job already past
   // the sending barrier is left alone: it may exist on Instagram.
   await db.prepare(`UPDATE instagram_jobs SET status = 'cancelled', lease_until = NULL, updated_at = ?,
       error = 'The post was deleted before it reached Instagram. Nothing was sent.'
@@ -353,6 +335,7 @@ export async function processInstagramBatch(env: Env, now = new Date()): Promise
     await audit(env.DB, "cron", ambiguous ? "instagram-ambiguous" : "instagram-failed", job.post_id, message);
   };
   let sent = false;
+  let remoteId: string | null = null;
   try {
     if (job.status === "preparing") {
       const children = [...job.children];
@@ -392,21 +375,35 @@ export async function processInstagramBatch(env: Env, now = new Date()): Promise
       await write(env.DB, job, { lease_until: null }, ["processing"]);
       return;
     }
-    // One-way barrier: from here a lost answer may mean the post exists.
-    if (!(await write(env.DB, job, { status: "sending" }, ["processing"])))
+    // One-way barrier: from here a lost answer may mean the post exists. The
+    // send gets its own, longer lease; if it expires, the next cron run marks
+    // the job unclear for the owner instead of leaving it stuck in `sending`.
+    const sendLease = new Date(Date.now() + INSTAGRAM_SEND_LEASE_MS).toISOString();
+    if (!(await write(env.DB, job, { status: "sending", lease_until: sendLease }, ["processing"])))
       throw new Error("Instagram publication lost its claim before sending; nothing was published.");
+    job.lease_until = sendLease;
     sent = true;
     let mediaId: string;
     try {
       const res = await graphPost(env, `${env.IG_USER_ID}/media_publish`, new URLSearchParams({ creation_id: String(job.container_id) }));
       if (!res?.id) throw new Error("no media id returned");
       mediaId = String(res.id);
+      remoteId = mediaId;
     } catch (e) {
       return await fail("The final Instagram publish request did not confirm (" + (e instanceof Error ? e.message : String(e)) +
         "). It may or may not be on Instagram. Check the GS Grimoire Instagram before doing anything; nothing will be resent automatically.", true, ["sending"]);
     }
     // Record the remote id before anything else can fail.
-    await write(env.DB, job, { media_id: mediaId }, ["sending"]);
+    if (!(await write(env.DB, job, { media_id: mediaId }, ["sending"]))) {
+      // The send outlived its lease and was marked unclear. Record the real
+      // result only while the owner has not decided; never undo their decision.
+      const late = await env.DB.prepare(`UPDATE instagram_jobs SET status = 'published', media_id = ?, ambiguous = 0, error = NULL,
+          lease_until = NULL, updated_at = ? WHERE post_id = ? AND status = 'failed' AND ambiguous = 1 AND media_id IS NULL`)
+        .bind(mediaId, new Date().toISOString(), job.post_id).run();
+      await audit(env.DB, "cron", (late.meta.changes ?? 0) === 1 ? "instagram-published-late" : "instagram-late-result-after-owner-decision",
+        job.post_id, mediaId);
+      return;
+    }
     const permalink = (await graphGet(env, mediaId, { fields: "permalink" }).catch(() => null))?.permalink ?? null;
     await write(env.DB, job, { status: "published", permalink, error: null, lease_until: null }, ["sending"]);
     await env.DB.prepare("DELETE FROM instagram_media_grants WHERE post_id = ?").bind(job.post_id).run();
@@ -415,7 +412,11 @@ export async function processInstagramBatch(env: Env, now = new Date()): Promise
     const message = e instanceof Error ? e.message : String(e);
     // Before the barrier no post can exist yet. After it, any failure (even a
     // database one) is treated as unclear and is never resent automatically.
-    if (sent) await fail("Instagram may already have this post (" + message + "). Check the GS Grimoire Instagram; nothing will be resent automatically.", true, ["sending"]);
+    if (sent) {
+      // If Meta returned a post id but saving it failed, keep the id visible to the owner.
+      await fail((remoteId ? `Instagram returned post id ${remoteId}, but GS Poster could not record it (` : "Instagram may already have this post (") + message + "). Check the GS Grimoire Instagram; nothing will be resent automatically.", true, ["sending"])
+        .catch(() => undefined); // if this write also fails, the expired send lease surfaces it on the next run
+    }
     else await fail(message, false, ["preparing", "processing"]);
   }
 }

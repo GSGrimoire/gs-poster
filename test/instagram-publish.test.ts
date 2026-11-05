@@ -27,6 +27,7 @@ let status = "FINISHED";
 let publishFails = false;
 let containerFails = false;
 let holdContainer: (() => Promise<void>) | undefined;
+let holdPublish: (() => Promise<void>) | undefined;
 let nextId = 0;
 
 before(async () => {
@@ -41,7 +42,7 @@ after(async () => { await worker?.dispose(); });
 beforeEach(async () => {
   for (const t of ["instagram_jobs", "instagram_media_grants", "instagram_targets", "bluesky_targets", "posts", "audit"])
     await db.prepare(`DELETE FROM ${t}`).run();
-  calls = []; status = "FINISHED"; publishFails = false; containerFails = false; holdContainer = undefined; nextId = 0;
+  calls = []; status = "FINISHED"; publishFails = false; containerFails = false; holdContainer = undefined; holdPublish = undefined; nextId = 0;
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
     if (url.hostname === "raw.githubusercontent.com") return new Response(MP4);
@@ -57,6 +58,8 @@ beforeEach(async () => {
       return Response.json({ id: "container-" + ++nextId });
     }
     if (method === "POST" && path === `${IG_ID}/media_publish`) {
+      const pause = holdPublish; holdPublish = undefined;
+      if (pause) await pause();
       if (publishFails) throw new TypeError("network connection lost");
       return Response.json({ id: "ig-media-1" });
     }
@@ -85,6 +88,13 @@ async function draft(ig: InstagramDraft) {
 const CAROUSEL: InstagramDraft = { caption: "Into the cave #dnd", frame: "4:5", items: [defaultItem(IMG(1)), defaultItem(IMG(2)), defaultItem(IMG(3))] };
 const REEL: InstagramDraft = { caption: "Watch #dnd", frame: "4:5", items: [], video: VIDEO };
 const due = new Date(Date.now() - 1000);
+/** A pause for one mocked Meta call: `reached` resolves when the call is waiting, `release` lets it go on. */
+function gate() {
+  let release!: () => void, arrived!: () => void;
+  const reached = new Promise<void>((r) => { arrived = r; });
+  const open = new Promise<void>((r) => { release = r; });
+  return { hold: () => { arrived(); return open; }, reached, release: () => release() };
+}
 const mediaPosts = () => calls.filter((c) => c.method === "POST" && c.path.endsWith("/media"));
 const publishes = () => calls.filter((c) => c.path.endsWith("/media_publish"));
 
@@ -247,13 +257,12 @@ test("Reel processing errors fail without publishing, and a stalled one times ou
 test("two overlapping cron runs cannot both work on one job", async () => {
   const p = await draft(CAROUSEL);
   await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
-  let release!: () => void;
-  const gate = new Promise<void>((r) => { release = r; });
-  holdContainer = () => gate;
+  const g = gate();
+  holdContainer = g.hold;
   const first = processInstagramBatch(env());
-  await new Promise((r) => setTimeout(r, 50));
+  await g.reached;
   await processInstagramBatch(env());
-  release();
+  g.release();
   await first;
   assert.equal(mediaPosts().length, 4, "the second run found the job claimed and did nothing");
 });
@@ -329,14 +338,173 @@ test("moving the post in the calendar moves a waiting Instagram job too", async 
   assert.equal(calls.length, 0, "nothing goes out before the moved time");
 });
 
-test("deleting the draft before it goes out cancels its Instagram job", async () => {
-  const { deletePost } = await import("../src/db.ts");
+// ---------------------------------------------------------------- review #83: F1 deletion
+
+test("F1: the PIN-free draft deletion cannot remove a post with an approved Instagram job, in any state", async () => {
+  const { handleDeleteDraft } = await import("../src/mcp.ts");
+  const editor = env({ ALLOWED_GITHUB_LOGINS: "gsgrimoire" });
+  const body = (r: any) => JSON.parse(r.content[0].text);
+  // An unapproved draft can still be deleted.
+  const plain = await createPost(db, { message: "Plain.", images: [], created_by: "test", scheduled_at: null } as any);
+  assert.equal(body(await handleDeleteDraft(editor, "gsgrimoire", plain.id)).deleted, plain.id);
+  for (const state of ["scheduled", "preparing", "processing", "sending", "failed-ambiguous", "failed", "published"]) {
+    const p = await draft(CAROUSEL);
+    await queueInstagramOnApproval(env(), p.id, p.updated_at, new Date(Date.now() + 3600_000), "gsgrimoire");
+    const [status, ambiguous] = state === "failed-ambiguous" ? ["failed", 1] : [state, 0];
+    await db.prepare("UPDATE instagram_jobs SET status = ?, ambiguous = ? WHERE post_id = ?").bind(status, ambiguous, p.id).run();
+    const res = await handleDeleteDraft(editor, "gsgrimoire", p.id);
+    assert.equal((res as any).isError, true, state);
+    assert.match(JSON.stringify(res), /approved this post for Instagram/, state);
+    assert.ok(await getPost(db, p.id), "the post is kept: " + state);
+    assert.equal((await getInstagramJob(db, p.id))!.status, status, "the job is untouched: " + state);
+  }
+  // After the owner's PIN-gated cancel, the draft may go.
+  const c = await draft(CAROUSEL);
+  await queueInstagramOnApproval(env(), c.id, c.updated_at, new Date(Date.now() + 3600_000), "gsgrimoire");
+  assert.equal(await cancelInstagramJob(env(), c.id, "gsgrimoire"), true);
+  assert.equal(body(await handleDeleteDraft(editor, "gsgrimoire", c.id)).deleted, c.id);
+});
+
+test("F1: a cron claim and a deletion racing each other never leave a claimed job without its post", async () => {
+  const { handleDeleteDraft } = await import("../src/mcp.ts");
   const p = await draft(CAROUSEL);
   await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
-  assert.equal(await deletePost(db, p.id, ["draft"]), true);
+  const g = gate();
+  holdContainer = g.hold;
+  const run = processInstagramBatch(env());
+  await g.reached;
+  const res = await handleDeleteDraft(env({ ALLOWED_GITHUB_LOGINS: "gsgrimoire" }), "gsgrimoire", p.id);
+  assert.equal((res as any).isError, true);
+  g.release();
+  await run;
+  assert.ok(await getPost(db, p.id));
+  assert.equal((await getInstagramJob(db, p.id))!.status, "processing");
+});
+
+// ---------------------------------------------------------------- review #83: F2 calendar moves
+
+test("F2: a calendar move is refused, with nothing changed, once Instagram has started", async () => {
+  const { reschedulePost } = await import("../src/publish.ts");
+  const { updateCalendarTime } = await import("../src/db.ts");
+  const p = await draft(CAROUSEL);
+  const first = new Date(Date.now() + 3600_000);
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, first, "gsgrimoire");
+  // Cron claims the job just before the move.
+  await db.prepare("UPDATE instagram_jobs SET status = 'preparing' WHERE post_id = ?").bind(p.id).run();
+  const cur = (await getPost(db, p.id))!;
+  await assert.rejects(reschedulePost(env(), p.id, new Date(Date.now() + 2 * 86400_000), cur.updated_at, "gsgrimoire"),
+    /Instagram has started/);
+  // The same guard sits inside the transaction itself, for a claim that lands after any read.
+  assert.equal(await updateCalendarTime(db, p.id, new Date(Date.now() + 3 * 86400_000).toISOString(), cur.updated_at, false), false);
+  const after = (await getPost(db, p.id))!;
+  assert.equal(after.scheduled_at, cur.scheduled_at, "the post's time is unchanged");
+  assert.equal(after.updated_at, cur.updated_at);
+  assert.equal((await getInstagramJob(db, p.id))!.due_at, first.toISOString(), "the job's time is unchanged");
+});
+
+test("F2: an approved mixed schedule is refused before Facebook is touched once Instagram has started", async () => {
+  const { reschedulePost } = await import("../src/publish.ts");
+  const p = await draft(CAROUSEL);
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, new Date(Date.now() + 86400_000), "gsgrimoire");
+  const at = new Date(Date.now() + 86400_000).toISOString();
+  await db.prepare("UPDATE posts SET status = 'scheduled', approved_at = ?, scheduled_at = ?, fb_post_id = '123_456' WHERE id = ?")
+    .bind(new Date().toISOString(), at, p.id).run();
+  await db.prepare("UPDATE instagram_jobs SET status = 'processing' WHERE post_id = ?").bind(p.id).run();
+  const cur = (await getPost(db, p.id))!;
+  await assert.rejects(reschedulePost(env(), p.id, new Date(Date.now() + 2 * 86400_000), cur.updated_at, "gsgrimoire"),
+    /Instagram has started/);
+  assert.equal(calls.length, 0, "no Facebook call was made");
+  assert.equal((await getPost(db, p.id))!.scheduled_at, at);
+});
+
+test("F2: a waiting Instagram job moves in the same transaction as the post", async () => {
+  const { updateCalendarTime } = await import("../src/db.ts");
+  const p = await draft(CAROUSEL);
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, new Date(Date.now() + 3600_000), "gsgrimoire");
+  const later = new Date(Date.now() + 2 * 86400_000).toISOString();
+  // A stale version moves neither.
+  assert.equal(await updateCalendarTime(db, p.id, later, "2020-01-01T00:00:00.000Z", false), false);
+  assert.notEqual((await getInstagramJob(db, p.id))!.due_at, later);
+  assert.equal(await updateCalendarTime(db, p.id, later, (await getPost(db, p.id))!.updated_at, false), true);
+  assert.equal((await getInstagramJob(db, p.id))!.due_at, later);
+  assert.equal((await getPost(db, p.id))!.scheduled_at, later);
+});
+
+// ---------------------------------------------------------------- review #83: F3 interrupted sends
+
+async function readyToSend() {
+  const p = await draft({ ...CAROUSEL, items: [defaultItem(IMG(1))] });
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
   await processInstagramBatch(env());
-  assert.equal(calls.length, 0);
+  assert.equal((await getInstagramJob(db, p.id))!.status, "processing");
+  return p;
+}
+
+test("F3: a send interrupted right after the barrier becomes an unclear result for the owner, never a resend", async () => {
+  const p = await readyToSend();
+  await db.prepare("UPDATE instagram_jobs SET status = 'sending', lease_until = ? WHERE post_id = ?")
+    .bind(new Date(Date.now() - 1000).toISOString(), p.id).run();
+  await processInstagramBatch(env());
   const job = (await getInstagramJob(db, p.id))!;
-  assert.equal(job.status, "cancelled");
-  assert.match(job.error!, /deleted/);
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, true);
+  assert.match(job.error!, /interrupted/);
+  assert.equal(publishes().length, 0, "nothing was sent again");
+  assert.equal(await retryInstagramJob(env(), p.id, "gsgrimoire"), false);
+  assert.equal(await closeAmbiguousInstagramJob(env(), p.id, "gsgrimoire"), true);
+});
+
+test("F3: a send still inside its lease is left alone", async () => {
+  const p = await readyToSend();
+  await db.prepare("UPDATE instagram_jobs SET status = 'sending', lease_until = ? WHERE post_id = ?")
+    .bind(new Date(Date.now() + 600_000).toISOString(), p.id).run();
+  await processInstagramBatch(env());
+  assert.equal((await getInstagramJob(db, p.id))!.status, "sending");
+  assert.equal(publishes().length, 0);
+});
+
+test("F3: a late answer records the real post while the owner has not decided, and never undoes their decision", async () => {
+  for (const ownerClosesFirst of [false, true]) {
+    calls = [];
+    const p = await readyToSend();
+    const g = gate();
+    holdPublish = g.hold;
+    const slow = processInstagramBatch(env());
+    await g.reached;
+    // A later cron run finds the send lease expired and marks it unclear.
+    await processInstagramBatch(env(), new Date(Date.now() + 11 * 60_000));
+    assert.equal((await getInstagramJob(db, p.id))!.ambiguous, true);
+    if (ownerClosesFirst) assert.equal(await closeAmbiguousInstagramJob(env(), p.id, "gsgrimoire"), true);
+    g.release();
+    await slow;
+    const job = (await getInstagramJob(db, p.id))!;
+    if (ownerClosesFirst) {
+      assert.equal(job.status, "cancelled", "the owner's decision stands");
+      const log = await db.prepare("SELECT detail FROM audit WHERE post_id = ? AND action = 'instagram-late-result-after-owner-decision'").bind(p.id).first<{ detail: string }>();
+      assert.equal(log?.detail, "ig-media-1", "the late post id is kept in the activity log");
+    } else {
+      assert.equal(job.status, "published");
+      assert.equal(job.media_id, "ig-media-1");
+      assert.equal(job.ambiguous, false);
+    }
+    assert.equal(publishes().length, 1, "exactly one publish request");
+  }
+});
+
+test("F3: if saving the returned post id fails, the job is unclear and shows that id", async () => {
+  const p = await readyToSend();
+  const failing = new Proxy(db, { get(target, prop) {
+    if (prop === "prepare") return (sql: string) => {
+      if (/SET media_id = \?/.test(sql)) return { bind: () => ({ run: async () => { throw new Error("D1 write failed"); } }) };
+      return target.prepare(sql);
+    };
+    const v = (target as any)[prop];
+    return typeof v === "function" ? v.bind(target) : v;
+  } }) as D1Database;
+  await processInstagramBatch(env({ DB: failing }));
+  const job = (await getInstagramJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, true);
+  assert.match(job.error!, /returned post id ig-media-1/);
+  assert.equal(publishes().length, 1);
 });

@@ -45,3 +45,18 @@ There have been no real Meta calls. Real Instagram container processing, Meta fe
 - Check the `sending` barrier: no code path moves `sending` or ambiguous `failed` back to an automatic state.
 - Check the public media route can't serve anything except a frozen item of an active job.
 - An Instagram-only approval leaves the post itself a `draft` (like TikTok-only). The Instagram card shows the job; a second approval is refused while it exists.
+
+## Review round 1 (ChatGPT-2, head `5d7682f`): fixes
+
+- **F1, deletion.** `deletePost` now refuses, in the same `DELETE` statement, any post with an Instagram job that isn't `cancelled`: waiting, preparing, processing, sending, failed, unclear or published. That is the only post-deletion path (MCP `delete_draft`), and it now says Gus approved the post for Instagram. After the PIN-gated cancel, deletion works again. The `instagram_jobs` definition moved to `db.ts` (`INSTAGRAM_JOBS_DDL`, created by `ensureSchema`) so the guard always has its table.
+- **F2, calendar moves.** `updateCalendarTime` moves the post's time and a waiting job's `due_at` in one D1 batch. The post update refuses while the job is preparing, processing or sending, and the job update requires the post's new version. A cron claim lands either before (refused) or after (the job already has the new time). `reschedulePost` also refuses before any Facebook call once Instagram has started. The separate later `moveScheduledInstagram` write is removed.
+- **F3, interrupted sends.** The barrier now takes its own ten-minute send lease. Cron turns an expired `sending` into `failed` with `ambiguous = 1`, never resending it; the owner closes it with the PIN and "I checked Instagram". A late answer from Meta:
+  - while the job is still unclear, it records the real post (`published`, media id);
+  - after the owner has decided, it changes nothing and the media id is kept in the audit log.
+  - If saving a returned media id fails, the job becomes unclear and its error names the id.
+- **Tests added:**
+  - F1: `handleDeleteDraft` in every job state, unapproved deletion still allowed, deletion after cancel, and a delete racing a cron claim.
+  - F2: refusal with nothing changed (draft and approved mixed schedule, with no Facebook call), the in-transaction guard, and a stale version moving neither.
+  - F3: a crash right after the barrier, a send still inside its lease, a late answer before and after the owner's decision, and a failed media-id write.
+  - Production router: successful Instagram-only and mixed Facebook plus Instagram approvals, using private uploads in a local R2 bucket.
+- **Checks:** `npm run check` gave 371 passed, 0 failed, three runs in a row. The `wrangler` dry-run passes and `git diff --check` is clean.

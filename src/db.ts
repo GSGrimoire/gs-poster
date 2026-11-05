@@ -100,6 +100,18 @@ const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_images,
  FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id
  LEFT JOIN instagram_targets i ON p.id = i.post_id`;
 
+/**
+ * Approved Instagram jobs (see instagram-publish.ts). Defined here so post
+ * deletion and calendar moves can guard against them in the same transaction.
+ */
+export const INSTAGRAM_JOBS_DDL = `CREATE TABLE IF NOT EXISTS instagram_jobs (
+  post_id TEXT PRIMARY KEY, status TEXT NOT NULL, kind TEXT NOT NULL, due_at TEXT NOT NULL, caption TEXT NOT NULL,
+  frame TEXT NOT NULL, items TEXT NOT NULL DEFAULT '[]', video TEXT, children TEXT NOT NULL DEFAULT '[]',
+  container_id TEXT, processing_since TEXT, media_id TEXT, permalink TEXT, error TEXT,
+  ambiguous INTEGER NOT NULL DEFAULT 0, lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL)`;
+/** Instagram job states that are under way: their time and their post are fixed. */
+const IG_STARTED = "('preparing','processing','sending')";
+
 let schemaReady = false;
 
 export async function ensureSchema(db: D1Database): Promise<void> {
@@ -165,6 +177,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       video TEXT,
       status TEXT NOT NULL DEFAULT 'draft'
     )`),
+    db.prepare(INSTAGRAM_JOBS_DDL),
   ]);
   // Existing deployed D1 databases predate the optional video column.
   const columns = await db.prepare("PRAGMA table_info(bluesky_targets)").all<{name:string}>();
@@ -305,8 +318,15 @@ export async function updateCalendarTime(
     ? "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status = 'scheduled' AND approved_at IS NOT NULL" + guard
     : "UPDATE posts SET scheduled_at = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL";
   const args = approved && hasBluesky ? [when, now, id, version, id] : [when, now, id, version];
-  const r = await db.prepare(sql).bind(...args).run();
-  return (r.meta.changes ?? 0) === 1;
+  // One transaction: the post's time and a waiting Instagram job move together,
+  // and neither moves once Instagram has started. A cron claim either happens
+  // before (the guard refuses) or after (the job already has the new time).
+  const results = await db.batch([
+    db.prepare(sql + ` AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = posts.id AND j.status IN ${IG_STARTED})`).bind(...args),
+    db.prepare(`UPDATE instagram_jobs SET due_at = ?, updated_at = ? WHERE post_id = ? AND status = 'scheduled'
+      AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ?)`).bind(when, now, id, id, now),
+  ]);
+  return (results[0].meta.changes ?? 0) === 1;
 }
 
 /** Version-guarded caption edit; Facebook and Bluesky captions update in one D1 batch. */
@@ -754,8 +774,11 @@ export async function claimForPublish(db: D1Database, id: string, input: Approva
 
 export async function deletePost(db: D1Database, id: string, onlyIfStatus: PostStatus[]): Promise<boolean> {
   await ensureSchema(db);
+  // A PIN-approved Instagram job (waiting, under way, unclear or published)
+  // keeps its post. Only the owner's PIN-gated cancel releases it.
   const res = await db
-    .prepare(`DELETE FROM posts WHERE id = ? AND status IN (${onlyIfStatus.map(() => "?").join(", ")})`)
+    .prepare(`DELETE FROM posts WHERE id = ? AND status IN (${onlyIfStatus.map(() => "?").join(", ")})
+      AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = posts.id AND j.status <> 'cancelled')`)
     .bind(id, ...onlyIfStatus)
     .run();
   if ((res.meta.changes ?? 0) > 0) {

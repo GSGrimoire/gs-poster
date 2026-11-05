@@ -22,7 +22,7 @@ let script: string;
 
 async function boot(bindings: Record<string, string>) {
   const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, cf: false, script,
-    compatibilityDate: "2026-09-01", compatibilityFlags: ["nodejs_compat"], d1Databases: ["DB"],
+    compatibilityDate: "2026-09-01", compatibilityFlags: ["nodejs_compat"], d1Databases: ["DB"], r2Buckets: ["UPLOADS"],
     bindings: { COOKIE_SECRET: SECRET, ALLOWED_GITHUB_LOGINS: "gsgrimoire", APPROVE_PIN: PIN, TIMEZONE: "Europe/Copenhagen", ...bindings } }));
   const db = await mf.getD1Database("DB") as unknown as D1Database;
   await ensureSchema(db);
@@ -126,4 +126,60 @@ test("the public media path needs no session but refuses unknown links", async (
     assert.equal(res.status, 404, path);
     assert.equal(res.headers.get("x-robots-tag"), "noindex, nofollow");
   }
+});
+
+// ---------------------------------------------------------------- review #83: successful approvals
+
+// Private uploads in a local R2 bucket, so approval's media check needs no network.
+const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+async function privatePhotos(n: number) {
+  const bucket = await on.mf.getR2Bucket("UPLOADS");
+  const refs: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const id = crypto.randomUUID().replace(/-/g, "");
+    await bucket.put(`uploads/${id}.png`, PNG);
+    refs.push(`upload://${id}.png`);
+  }
+  return refs;
+}
+async function draftWith(refs: string[], facebook: boolean, scheduledAt: string | null) {
+  const p = await createPost(on.db, { message: "Cave.", label: "Cave", release: null, images: refs, video: null,
+    created_by: "test", scheduled_at: scheduledAt } as any);
+  assert.ok(await saveEditorDraft(on.db, p.id, p.updated_at, { ...editorDraft(p), facebook_enabled: facebook, scheduled_at: scheduledAt }, null,
+    { caption: "Into the cave #dnd", frame: "4:5", items: refs.map((r) => defaultItem(r)) }));
+  return (await getPost(on.db, p.id))!;
+}
+
+test("a signed-in approval with the PIN queues an Instagram-only post, and a second approval is refused", async () => {
+  const p = await draftWith(await privatePhotos(2), false, null);
+  const res = await post(on.mf, `/post/${p.id}/approve`, { expected_updated_at: p.updated_at, target_instagram: "1", confirm_instagram: "1", pin: PIN });
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /Instagram: approved, posts within a few minutes/);
+  const job = (await getInstagramJob(on.db, p.id))!;
+  assert.equal(job.status, "scheduled");
+  assert.equal(job.kind, "CAROUSEL");
+  assert.equal(job.items.length, 2);
+  assert.ok(Math.abs(Date.parse(job.due_at) - Date.now()) < 60_000, "no time means now");
+  const after = (await getPost(on.db, p.id))!;
+  assert.equal(after.status, "draft", "an Instagram-only approval leaves the post itself a draft");
+  const again = await post(on.mf, `/post/${p.id}/approve`, { expected_updated_at: after.updated_at, target_instagram: "1", confirm_instagram: "1", pin: PIN });
+  assert.equal(again.status, 400);
+  assert.match(await again.text(), /already has an approved job/);
+});
+
+test("one approval queues Instagram and the Facebook photo post together, on the same time", async () => {
+  const at = new Date(Date.now() + 2 * 86400_000);
+  at.setUTCSeconds(0, 0);
+  const p = await draftWith(await privatePhotos(2), true, at.toISOString());
+  const res = await post(on.mf, `/post/${p.id}/approve`, { expected_updated_at: p.updated_at,
+    target_facebook: "1", target_instagram: "1", confirm_instagram: "1", pin: PIN });
+  const html = await res.text();
+  assert.equal(res.status, 200, html.slice(0, 400));
+  assert.match(html, /Instagram: approved, posts at/);
+  const job = (await getInstagramJob(on.db, p.id))!;
+  assert.equal(job.status, "scheduled");
+  assert.equal(job.due_at, at.toISOString());
+  const after = (await getPost(on.db, p.id))!;
+  assert.ok(after.approved_at, "Facebook was claimed by the same approval");
+  assert.equal(after.status, "publishing", "Facebook photo posts go through the cron queue");
 });

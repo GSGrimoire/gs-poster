@@ -10,7 +10,7 @@ import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPos
 import { fetchVideo } from "./video.ts";
 import { fetchImage } from "./media.ts";
 import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload, ensureFacebookQueue } from "./facebook-queue.ts";
-import { cancelScheduledInstagram, getInstagramJob, moveScheduledInstagram } from "./instagram-publish.ts";
+import { cancelScheduledInstagram, getInstagramJob } from "./instagram-publish.ts";
 
 export interface ApproveInput extends ApprovalSnapshot {
   actor: string;
@@ -266,9 +266,9 @@ export async function reschedulePost(
   const nextIso = newTime.toISOString();
   if ((p.status === "draft" || p.status === "rejected") && !p.approved_at) {
     const saved = await updateCalendarTime(env.DB, id, nextIso, version, false);
-    if (!saved) throw new Error("Draft changed before rescheduling. Reload.");
-    // An Instagram-only approval leaves the post a draft; keep its job in step.
-    await moveScheduledInstagram(env.DB, id, nextIso);
+    if (!saved) throw new Error((await instagramStarted(env.DB, id))
+      ? "Instagram has started publishing this post, so its time can no longer be moved."
+      : "Draft changed before rescheduling. Reload.");
     await audit(env.DB, actor, "draft-rescheduled", id, nextIso);
     return;
   }
@@ -284,6 +284,11 @@ export async function reschedulePost(
   }
   if (p.facebook_enabled && !p.fb_post_id) {
     throw new Error("Facebook has no confirmed scheduled post ID; reconcile before changing the schedule.");
+  }
+  // Refuse before touching Facebook. The D1 write below re-checks this in the
+  // same transaction that moves a waiting Instagram job, so a race still fails safe.
+  if (await instagramStarted(env.DB, id)) {
+    throw new Error("Instagram has started publishing this post, so its time can no longer be moved.");
   }
   const before = Math.floor(Date.parse(p.scheduled_at) / 1000);
   const after = Math.floor(newTime.getTime() / 1000);
@@ -313,9 +318,12 @@ export async function reschedulePost(
     throw new Error(saveError ? "GS Poster could not save the schedule; Facebook was restored. Try again later." :
       "Post changed during rescheduling. Reload.");
   }
-  // An approved, not-yet-started Instagram job follows the moved schedule.
-  await moveScheduledInstagram(env.DB, id, nextIso);
   await audit(env.DB, actor, "scheduled-rescheduled", id, p.scheduled_at + " to " + nextIso);
+}
+
+async function instagramStarted(db: D1Database, id: string): Promise<boolean> {
+  const status = (await getInstagramJob(db, id))?.status;
+  return status === "preparing" || status === "processing" || status === "sending";
 }
 
 /** Change unreleased captions through the same human-authenticated, PIN-gated path. */

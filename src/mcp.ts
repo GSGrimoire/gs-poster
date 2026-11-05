@@ -7,7 +7,7 @@ import { getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import type { Env } from "./env.ts";
 import { missingSecrets } from "./env.ts";
-import { checkInstagram } from "./instagram-publish.ts";
+import { checkInstagram, getInstagramJob } from "./instagram-publish.ts";
 import { audit, createPost, deletePost, getPost, listPosts, saveEditorDraft, type Post, type PostStatus, type BlueskyDraft } from "./db.ts";
 import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
@@ -304,7 +304,12 @@ export async function handleUpdateDraft(
 export async function handleDeleteDraft(env:Env,login:string,id:string){
   if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
   const okDel=await deletePost(env.DB,id,["draft","rejected"]);
-  if(!okDel)return fail("Not deleted: no draft or rejected post with that id.");
+  if(!okDel){
+    // An approved Instagram job keeps its post; only Gus can cancel it, with his PIN.
+    const job=await getInstagramJob(env.DB,id).catch(()=>null);
+    if(job&&job.status!=="cancelled")return fail("Not deleted: Gus approved this post for Instagram. Only he can stop that, with his PIN, in the Instagram card on the review site.");
+    return fail("Not deleted: no draft or rejected post with that id.");
+  }
   await audit(env.DB,actor(),"deleted",id);
   return ok({deleted:id});
 }
