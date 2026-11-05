@@ -66,6 +66,10 @@ async function post(env: Env, path: string, body: URLSearchParams | FormData): P
   return parse(await fetch(`${base(env)}/${path}`, { method: "POST", body }));
 }
 
+/** The same Page-token Graph helpers, for the Instagram account linked to the Page. */
+export const graphGet = get;
+export const graphPost = post;
+
 /** Upload a photo without publishing it, so it can be attached to a feed post. */
 export async function uploadUnpublishedPhoto(env: Env, img: ImageBytes, forScheduledPost: boolean): Promise<string> {
   const { pageId } = need(env);

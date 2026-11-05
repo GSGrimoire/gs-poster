@@ -30,6 +30,9 @@ export interface Env {
   APPROVE_PIN?: string;
   FB_PAGE_ID?: string;
   FB_PAGE_TOKEN?: string;
+  /** Optional: the Instagram professional account linked to the Page. With
+   * FB_PAGE_TOKEN, it enables approved Instagram publishing from cron. */
+  IG_USER_ID?: string;
   /** Optional: when the Meta app has "Require app secret" on. */
   FB_APP_SECRET?: string;
   /** Bluesky service credentials, only kept in Cloudflare Worker secrets. */

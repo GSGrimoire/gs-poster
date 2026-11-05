@@ -16,6 +16,8 @@ import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction
 import { tiktokConnection } from "./tiktok.ts";
 import { tiktokOptionsPage, TIKTOK_DIRECT_POST_VISIBLE } from "./tiktok-options.ts";
 import { serveTikTokMedia } from "./tiktok-media.ts";
+import { cancelInstagramJob, closeAmbiguousInstagramJob, getInstagramJob, instagramFreezeProblem, instagramJobCard, instagramPending, instagramReleasePlan,
+  queueInstagramOnApproval, retryInstagramJob, serveInstagramMedia } from "./instagram-publish.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
 import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
@@ -92,6 +94,9 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     }});
   if (path === "/tiktok/callback") return tiktokCallback(req,env);
   if (path.startsWith("/tiktok/media/")) return serveTikTokMedia(req,env);
+  // Public by design: Meta fetches approved Instagram media through short-lived,
+  // hashed links that only work while their job is preparing or sending.
+  if (path.startsWith("/instagram/media/")) return serveInstagramMedia(req,env);
   if (path === "/robots.txt") return new Response(
     "User-agent: *\nAllow: /about\nAllow: /terms\nAllow: /privacy\nDisallow: /\n",
     {headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"public, max-age=3600"}});
@@ -135,7 +140,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|instagram-cancel|instagram-retry|instagram-close))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -465,7 +470,8 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   const patreon = bs?.patreon;
 
 
-  let actions = "";
+  const igJob = await getInstagramJob(env.DB, p.id);
+  let actions = instagramJobCard(igJob, p.id, csrf, (iso) => formatLocal(new Date(iso), env.TIMEZONE));
   const postVideo=ttMedia.video;
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && !tiktokConn) {
     actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
@@ -517,6 +523,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p), error: state.error, notice: state.notice,
       checksHtml: checkList, releaseProblems, mediaPanel: draftMediaPanel(p, csrf), tiktokCard: actions,
       tiktokPlan: tiktokReleasePlan(p, tiktokConn, tiktokTransfer),
+      instagramPlan: instagramReleasePlan(env, p, igJob),
       mediaLooksPending: p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release),
       createdLine: `Drafted by ${p.created_by ?? "?"} · ${formatLocal(new Date(p.created_at), env.TIMEZONE)} · ${p.id}`,
     });
@@ -698,7 +705,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
           `<p><a href="/instagram/${p.id}/video.mp4" download="instagram-${p.id}-reel.mp4">Download MP4 Reel</a></p>
           <p class="hint">Original MP4, not transcoded. Verify 9:16, H.264 and audio before posting.</p>`
           : p.instagram.items.map((_,i)=>`<a href="/instagram/${p.id}/${i}.jpg" download>Photo ${i+1}</a>`).join(" · ")}
-        <p class="hint">Nothing is published to Instagram from GS Poster.</p></section>` : ""}
+        <p class="hint">${igJob ? "Instagram publishing status is shown in the Instagram card." : "Not approved for Instagram: download and post it yourself, or approve it for Instagram from the draft."}</p></section>` : ""}
       ${bs ? `<section class="platform-preview" aria-label="Bluesky review">
         <h3>Bluesky</h3><p class="caption">${esc(bs.caption)}</p>
         ${bs.video?videoPreview("bluesky"):bsThumbs}
@@ -855,6 +862,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const parsed = parseEditorForm(form, current, env.TIMEZONE);
     if (parsed.errors.length || !parsed.next)
       return fail("Not saved: " + parsed.errors.join(" "), 400);
+    const frozen = instagramFreezeProblem(await getInstagramJob(env.DB, id), current, parsed.next);
+    if (frozen) return fail("Not saved: " + frozen, 409);
     const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null, parsed.instagram ?? null);
     if (!saved) return fail("This draft changed while saving. Your edits were not saved. Reload and edit again.", 409);
     await audit(env.DB, session.login, current.status === "rejected" ? "revised-rejected" : "edited", id, auto ? "web editor autosave" : "web editor")
@@ -864,7 +873,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
   if (action === "reject") {
     const ok = await rejectPost(env, id, String(form.get("reason") || "").slice(0, 500), session.login);
-    return ok ? redirect(`/post/${id}`) : postPage(env, session, id, { error: "Only drafts can be rejected." }, 409);
+    if (ok) return redirect(`/post/${id}`);
+    return postPage(env, session, id, { error: instagramPending(await getInstagramJob(env.DB, id))
+      ? "This post is approved for Instagram and may still publish, so it cannot be rejected. Cancel Instagram with your PIN in the Instagram card first."
+      : "Only drafts can be rejected." }, 409);
   }
   // All publication, cancellation and failed-target recovery require the PIN
   const whenRaw = String(form.get("when") ?? "").trim();
@@ -897,6 +909,24 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 
   try {
+    // Instagram job controls: each needs the PIN checked above. None sends anything.
+    if (action === "instagram-cancel") {
+      return await cancelInstagramJob(env, id, session.login)
+        ? postPage(env, session, id, { notice: "Instagram stopped. Nothing was sent to Instagram." })
+        : postPage(env, session, id, { error: "Instagram could not be stopped: it is publishing now, already finished, or its result is unclear. Reload." }, 409);
+    }
+    if (action === "instagram-retry") {
+      return await retryInstagramJob(env, id, session.login)
+        ? postPage(env, session, id, { notice: "Instagram will try again within a few minutes." })
+        : postPage(env, session, id, { error: "Only an Instagram attempt that failed before its final send can be retried." }, 409);
+    }
+    if (action === "instagram-close") {
+      if (form.get("confirmed_not_on_instagram") !== "1")
+        return postPage(env, session, id, { error: "Confirm you checked Instagram and the post is not there." }, 400);
+      return await closeAmbiguousInstagramJob(env, id, session.login)
+        ? postPage(env, session, id, { notice: "Instagram job closed. Nothing was sent. You can approve the draft for Instagram again." })
+        : postPage(env, session, id, { error: "This Instagram job has no unclear result to close. Reload." }, 409);
+    }
     if (action === "tiktok-send") {
       if(form.get("confirm_tiktok")!=="1")
         return postPage(env,session,id,{error:"Confirm TikTok transfer consent."},400);
@@ -1050,7 +1080,14 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (ttPlan && !ttPlan.ok) return postPage(env, session, id, { error: "TikTok: " + ttPlan.reason }, 400);
     if (tiktokSelected && form.get("confirm_tiktok") !== "1")
       return postPage(env, session, id, { error: "Confirm that TikTok gets the media now, in your inbox, and that you have the rights to it." }, 400);
-    if (!facebook && !blueskySelected && !tiktokSelected) return postPage(env, session, id, { error: "Choose at least one target." }, 400);
+    const instagramSelected = !!current.instagram && form.get("target_instagram") === "1";
+    if (instagramSelected) {
+      const igPlan = instagramReleasePlan(env, current, await getInstagramJob(env.DB, id));
+      if (!igPlan.ok) return postPage(env, session, id, { error: "Instagram: " + igPlan.reason }, 400);
+      if (form.get("confirm_instagram") !== "1")
+        return postPage(env, session, id, { error: "Confirm that this Instagram post may be published automatically." }, 400);
+    }
+    if (!facebook && !blueskySelected && !tiktokSelected && !instagramSelected) return postPage(env, session, id, { error: "Choose at least one target." }, 400);
     if (facebook && !current.images.length && !current.video && mediaLooksPending(current.label, current.release) &&
         form.get("publish_without_media") !== "1") {
       return postPage(env, session, id, { error: "This post's name says media is pending, but Facebook has no images or video. Attach the media, or tick \"Publish without media anyway\"." }, 400);
@@ -1071,7 +1108,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     // when the owner ticked the opt-in rollover box on THIS approval (#61); the
     // moved time is written by the same version-fenced claim below.
     // TikTok alone ignores the calendar time: the inbox transfer is immediate.
-    const saved: Date | null = current.scheduled_at && (facebook || blueskySelected) ? new Date(current.scheduled_at) : null;
+    const saved: Date | null = current.scheduled_at && (facebook || blueskySelected || instagramSelected) ? new Date(current.scheduled_at) : null;
     const lead = { facebook, photos: current.images.length };
     const decision = decideReleaseTime(saved, new Date(), lead, form.get("auto_rollover") === "1");
     if (!decision.ok) return postPage(env, session, id, {
@@ -1089,6 +1126,15 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         (error instanceof Error ? error.message : String(error))},400); }
     }
     // Human review only authorizes media that is actually readable now.
+    if (instagramSelected) {
+      try {
+        if (current.instagram!.video) await fetchVideo(env, current.instagram!.video);
+        else for (const item of current.instagram!.items) await fetchImage(env, item.url);
+      } catch (error) {
+        return postPage(env, session, id, { error: "Instagram media could not be loaded: " +
+          (error instanceof Error ? error.message : String(error)) }, 400);
+      }
+    }
     if (bluesky) {
       for (const image of bluesky.images) {
         try { await fetchImage(env, image.url); }
@@ -1121,6 +1167,16 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         outcomes.push({ ok: true, text: `TikTok: ${ttPlan.type === "VIDEO" ? "video" : ttPlan.count + "-photo carousel"} sent to your TikTok inbox now. Finish and publish it in the TikTok app.` });
       } catch (error) {
         outcomes.push({ ok: false, text: "TikTok: " + (error instanceof Error ? error.message : String(error)) + " See the TikTok card for the safe next step." });
+      }
+    }
+    // Instagram is queued, not sent: cron publishes it at the approved time.
+    // Queued before the Facebook/Bluesky claim, fenced on the same saved version.
+    if (instagramSelected) {
+      try {
+        const job = await queueInstagramOnApproval(env, id, current.updated_at, when ?? new Date(), session.login);
+        outcomes.push({ ok: true, text: `Instagram: approved, posts ${when ? "at " + formatLocal(new Date(job.due_at), env.TIMEZONE) : "within a few minutes"}. Its progress shows in the Instagram card.` });
+      } catch (error) {
+        outcomes.push({ ok: false, text: "Instagram: " + (error instanceof Error ? error.message : String(error)) });
       }
     }
     if (facebook || bluesky) {
