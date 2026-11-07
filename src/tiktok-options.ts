@@ -4,7 +4,7 @@ import type {Session} from "./session.ts";
 import {csrfToken} from "./session.ts";
 import {getPost,tiktokMedia} from "./db.ts";
 import {tiktokConnection,getTikTokCreatorOptions,type TikTokCreatorOptions} from "./tiktok.ts";
-import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
+import {canRetryTikTokTransfer,getTikTokInboxTransfer} from "./tiktok-inbox.ts";
 import {esc,html,page} from "./html.ts";
 import {TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
@@ -23,7 +23,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   if(!conn)return html(page("Connect TikTok",
     '<p><a href="/tiktok/settings">Connect TikTok first.</a></p>',{login:session.login}),{status:409});
   const existing=await getTikTokInboxTransfer(env.DB,postId);
-  if(existing&&existing.status!=="rejected"&&existing.status!=="cleared")
+  if(existing&&!canRetryTikTokTransfer(existing))
     return html(page("Existing transfer",
       '<p>A TikTok transfer already exists. Review it on the post page before sending again.</p>'+
       '<p><a href="/post/'+esc(postId)+'">Back to post</a></p>',

@@ -395,7 +395,13 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
   if (!post) throw new Error("Post not found.");
   const fbScheduled = post.status === "scheduled" && post.facebook_enabled && !!post.fb_post_id;
   const bsScheduled = post.bluesky?.status === "scheduled";
-  const igScheduled = (await getInstagramJob(env.DB, id))?.status === "scheduled";
+  const instagramJob = await getInstagramJob(env.DB, id);
+  const igScheduled = instagramJob?.status === "scheduled";
+  // Never cancel Facebook and present the combined schedule as cancelled while
+  // a separate Instagram send is already active or needs reconciliation.
+  if (instagramJob && !["scheduled", "cancelled", "published"].includes(instagramJob.status)) {
+    throw new Error("Instagram has started publishing or has an unresolved result. Check the Instagram card and reconcile or cancel that job with your PIN first. No schedules were cancelled.");
+  }
   if (!fbScheduled && !bsScheduled && !igScheduled) throw new Error("No scheduled target remains to cancel.");
 
   // Stop the Worker queue first, before any potentially slow Facebook API call.

@@ -159,8 +159,8 @@ test("TikTok-only status promotion is version-fenced and needs an existing durab
   assert.equal(await markTikTokInboxApproved(db,p.id,p.updated_at),false);
   assert.equal((await getPost(db,p.id))!.status,"draft");
   await db.prepare("INSERT INTO tiktok_inbox_transfers " +
-    "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by) VALUES (?,?,?,?,?,?,?)")
-    .bind(p.id,"needs_review",null,"[]",new Date().toISOString(),new Date().toISOString(),"test").run();
+    "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by,post_version) VALUES (?,?,?,?,?,?,?,?)")
+    .bind(p.id,"needs_review",null,"[]",new Date().toISOString(),new Date().toISOString(),"test",p.updated_at).run();
   assert.equal(await markTikTokInboxApproved(db,p.id,"2020-01-01T00:00:00.000Z"),false);
   assert.equal(await markTikTokInboxApproved(db,p.id,p.updated_at),true);
   assert.equal((await getPost(db,p.id))!.status,"scheduled");
@@ -174,8 +174,8 @@ test("only a confirmed creator publication moves a TikTok inbox post to Publishe
     tiktok_enabled:true,bluesky:null,scheduled_at:null});
   const now=new Date().toISOString();
   await db.prepare("INSERT INTO tiktok_inbox_transfers " +
-    "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by) VALUES (?,?,?,?,?,?,?)")
-    .bind(p.id,"processing","post-123","[]",now,now,"test").run();
+    "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by,post_version) VALUES (?,?,?,?,?,?,?,?)")
+    .bind(p.id,"processing","post-123","[]",now,now,"test",p.updated_at).run();
   assert.equal(await markTikTokInboxApproved(db,p.id,p.updated_at),true);
   assert.equal(await markTikTokCreatorPublished(db,p.id),false,
     "a transfer in progress is not a TikTok publication");
@@ -188,4 +188,38 @@ test("only a confirmed creator publication moves a TikTok inbox post to Publishe
   const html=await (await get("/history?q=Published%20on%20TikTok")).text();
   assert.match(html,/Published by creator on TikTok/);
   assert.match(html,/Published<\/span><span class="history-count">1<\/span>/);
+});
+
+test("legacy reconciliation leaves in-flight claims and transfers from older draft versions in Drafts",async()=>{
+  for(const [status,editAfterTransfer] of [["transferring",false],["processing",true]] as const){
+    const p=await createPost(db,{message:"Keep draft",label:"Keep draft",release:null,
+      images:[],video:null,created_by:"test",facebook_enabled:false,tiktok_enabled:true,
+      bluesky:null,scheduled_at:null});
+    await db.prepare("INSERT INTO tiktok_inbox_transfers " +
+      "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by) VALUES (?,?,?,?,?,?,?)")
+      .bind(p.id,status,null,"[]",p.updated_at,p.updated_at,"test").run();
+    if(editAfterTransfer) await db.prepare("UPDATE posts SET updated_at=? WHERE id=?")
+      .bind(new Date(Date.parse(p.updated_at)+1).toISOString(),p.id).run();
+    const before=await getPost(db,p.id);
+    await reconcileOldTikTokInboxDrafts(db);
+    assert.deepEqual(await getPost(db,p.id),before);
+  }
+});
+
+test("a mixed or unconfirmed scheduled record cannot be labelled TikTok Inbox or promoted to Published",async()=>{
+  for(const sibling of ["facebook","bluesky","instagram","none"] as const){
+    const p=await createPost(db,{message:"History "+sibling,label:"Guard "+sibling,release:null,
+      images:[],video:null,created_by:"test",facebook_enabled:sibling==="facebook",
+      tiktok_enabled:true,bluesky:null,scheduled_at:null});
+    await db.prepare("UPDATE posts SET status='scheduled', approved_at=? WHERE id=?").bind(p.updated_at,p.id).run();
+    if(sibling==="bluesky") await db.prepare("INSERT INTO bluesky_targets (post_id,caption) VALUES (?,?)").bind(p.id,p.message).run();
+    if(sibling==="instagram") await db.prepare("INSERT INTO instagram_targets (post_id,caption,frame) VALUES (?,?,'4:5')").bind(p.id,p.message).run();
+    if(sibling!=="none") await db.prepare("INSERT INTO tiktok_inbox_transfers " +
+      "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by) VALUES (?,?,?,?,?,?,?)")
+      .bind(p.id,"published_by_creator","tt123","[]",p.updated_at,p.updated_at,"test").run();
+    assert.equal(await markTikTokCreatorPublished(db,p.id),false,sibling);
+    const html=await (await get("/history?q="+encodeURIComponent("Guard "+sibling))).text();
+    assert.match(html,new RegExp("Guard "+sibling));
+    assert.doesNotMatch(html,/TikTok transfer, finish in app|Published by creator on TikTok/);
+  }
 });
