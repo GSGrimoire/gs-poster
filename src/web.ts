@@ -4,9 +4,11 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recentAudit, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { markTikTokInboxApproved, markTikTokCreatorPublished, reopenTikTokInboxDraft, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, getTikTokHistoryState, type HistoryPost, type Paged, type TikTokHistoryState } from "./history.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
+import { POSTER_FAVICON } from "./favicon.ts";
 import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
 import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
@@ -23,7 +25,7 @@ import { cancelThreadsJob, closeAmbiguousThreadsJob, getThreadsJob, queueThreads
 import { cancelInstagramJob, closeAmbiguousInstagramJob, getInstagramJob, instagramFreezeProblem, instagramJobCard, instagramPending, instagramReleasePlan,
   queueInstagramOnApproval, retryInstagramJob, serveInstagramMedia } from "./instagram-publish.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
-import { getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
+import { canRetryTikTokTransfer, getTikTokInboxTransfer, startTikTokInboxTransfer, refreshTikTokInboxTransfer, clearUnconfirmedTikTokTransfer } from "./tiktok-inbox.ts";
 import { DRAFT_MEDIA_JS, draftMediaPanel } from "./draft-media.ts";
 import { DRAFT_EDITOR_JS, parseEditorForm, postPhotos, renderDraftEditor } from "./draft-editor.ts";
 import { renderInstagram } from "./instagram.ts";
@@ -86,6 +88,11 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const path = url.pathname;
 
   if (path === "/health") return Response.json({ok:true});
+  if (path === "/favicon.svg" && (req.method === "GET" || req.method === "HEAD"))
+    return new Response(req.method === "HEAD" ? null : POSTER_FAVICON, { headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400",
+      "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'",
+    } });
   // Public legal/app-review URLs are deliberately outside the GitHub login wall.
   if (path === "/about" || path === "/terms" || path === "/privacy") {
     if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed",{status:405,headers:{"Allow":"GET, HEAD"}});
@@ -152,12 +159,13 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
     return Response.json({ iso: at.toISOString(), local: toLocalInput(at, env.TIMEZONE), text: formatLocal(at, env.TIMEZONE) },
       { headers: { "Cache-Control": "no-store" } });
   }
-  if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams.get("week"));
+  if ((path === "/" || path === "/calendar") && req.method === "GET") return dashboard(env, session, url.searchParams);
+  if (path === "/history" && req.method === "GET") return historyPage(env, session, url.searchParams);
   if (path === "/new" && (req.method === "GET" || req.method === "POST")) return newDraftPage(req,env,session);
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|instagram-cancel|instagram-retry|instagram-close|threads-cancel|threads-retry|threads-close|x-opened))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|tiktok-redraft|instagram-cancel|instagram-retry|instagram-close|threads-cancel|threads-retry|threads-close|x-opened))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -330,11 +338,14 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 
 // ---------------------------------------------------------------- approval site
 
-function statusChip(p: Post): string {
-  return `<span class="chip s-${esc(p.status)}">${esc(p.status)}</span>`;
+function statusChip(p: Post, tiktokState: TikTokHistoryState): string {
+  const label = tiktokState === "inbox" ? "TikTok Inbox" : p.status;
+  return `<span class="chip s-${esc(p.status)}">${esc(label)}</span>`;
 }
 
-function whenText(env: Env, p: Post): string {
+function whenText(env: Env, p: Post, tiktokState: TikTokHistoryState = null): string {
+  if (tiktokState === "inbox") return "TikTok transfer, finish in app";
+  if (tiktokState === "published") return "Published by creator on TikTok";
   if (p.scheduled_at) return formatLocal(new Date(p.scheduled_at), env.TIMEZONE);
   if (p.status === "published" && p.approved_at) return `posted ${formatLocal(new Date(p.approved_at), env.TIMEZONE)}`;
   return "posts on approval";
@@ -344,53 +355,132 @@ function shortTime(env: Env, iso: string): string {
   return new Intl.DateTimeFormat("en-GB", { timeZone: env.TIMEZONE, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 }
 
-function postCard(env: Env, p: Post): string {
-  const thumbs = p.images.length
-    ? `<div class="thumbs">${p.images.map((_, i) => `<img src="/media/${p.id}/${i}" alt="" loading="lazy">`).join("")}</div>`
+function postCard(env: Env, p: HistoryPost): string {
+  const tiktokOnly = p.tiktokHistoryState !== null;
+  const gallery = tiktokOnly ? tiktokMedia(p).images : p.images;
+  const source = tiktokOnly ? "?platform=tiktok" : "?platform=facebook";
+  const thumbs = gallery.length
+    ? `<div class="thumbs">${gallery.slice(0,6).map((_, i) => `<img src="/media/${p.id}/${i}${source}" alt="" loading="lazy">`).join("")}</div>`
     : "";
-  const live = p.permalink ? ` · <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
-  const bsky = p.bluesky?.permalink ? ` · <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
+  const live = p.permalink ? ` | <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
+  const bsky = p.bluesky?.permalink ? ` | <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
-    <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.tiktok_enabled?'<span class="chip">TikTok</span>':""}</div>
-    <p class="caption clip">${esc(p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
+    <div class="meta">${statusChip(p, p.tiktokHistoryState)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p, p.tiktokHistoryState))}</span>${p.tiktok_enabled?'<span class="chip">TikTok</span>':""}</div>
+    <p class="caption clip">${esc(tiktokOnly ? (p.tiktok_caption ?? p.message) : p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
     ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
 }
 
-async function dashboard(env: Env, session: Session, requestedWeek: string | null): Promise<Response> {
+
+/** Keep page numbers bounded; query parameters never enter database SQL. */
+function viewPage(params: URLSearchParams, key: string): number {
+  const raw = params.get(key) ?? "1";
+  return /^\d{1,6}$/.test(raw) ? Math.min(100_000, Math.max(1,Number(raw))) : 1;
+}
+function pager<T>(data: Paged<T>, params: URLSearchParams, key: string, path: string, anchor: string): string {
+  if (data.total <= 20) return "";
+  const link = (n: number, label: string, enabled: boolean) => {
+    if (!enabled) return '<span class="page-disabled">' + esc(label) + '</span>';
+    const p = new URLSearchParams(params);
+    p.set(key,String(n));
+    return '<a class="page-link" href="' + esc(path + "?" + p.toString() + "#" + anchor) + '">' + esc(label) + '</a>';
+  };
+  const range = Array.from(new Set([1, data.pages, data.page-1, data.page, data.page+1]))
+    .filter((n) => n >= 1 && n <= data.pages).sort((a,b) => a-b);
+  return '<nav class="pager" aria-label="' + esc(anchor + " pages") + '">' +
+    '<span>Showing ' + ((data.page-1)*20+1) + ' to ' + Math.min(data.page*20,data.total) +
+    ' of ' + data.total + '</span>' +
+    link(data.page-1,"Previous",data.page>1) +
+    range.map((n,i) => (i>0 && n-range[i-1]>1 ? '<span aria-hidden="true">…</span>' : '') +
+      (n === data.page ? '<strong aria-current="page">' + n + '</strong>' :
+        link(n,String(n),true))).join("") +
+    link(data.page+1,"Next",data.page<data.pages) + '</nav>';
+}
+function postSection(
+  env: Env, id: string, title: string, data: Paged<HistoryPost>, params: URLSearchParams,
+  path: string, key: string, empty: string,
+): string {
+  return '<details class="history-section" id="' + esc(id) + '" open>' +
+    '<summary><span>' + esc(title) + '</span><span class="history-count">' +
+    data.total + '</span></summary>' +
+    '<div class="history-section-body">' +
+    (data.items.length ? data.items.map((p) => postCard(env,p)).join("") :
+      '<p class="empty">' + esc(empty) + '</p>') +
+    pager(data,params,key,path,id) + '</div></details>';
+}
+
+async function dashboard(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
   await refreshScheduled(env).catch(() => undefined);
-  const posts = await listPosts(env.DB, { limit: 100 });
+  await reconcileOldTikTokInboxDrafts(env.DB);
   const currentDate = toLocalInput(new Date(), env.TIMEZONE).slice(0, 10);
   let start = weekStart(currentDate);
-  try { if (requestedWeek) start = weekStart(requestedWeek); } catch { /* invalid date: show current week */ }
+  try { if (params.get("week")) start = weekStart(params.get("week")!); }
+  catch { /* invalid week: show the current week */ }
   const range = weekRange(start, env.TIMEZONE);
-  const onCalendar = await listCalendarPosts(env.DB, range.from, range.to);
-  const calendar = renderCalendar(env, onCalendar, await csrfToken(env, session), start);
-  const drafts = posts.filter((p) => p.status === "draft").reverse();
-  const scheduled = posts.filter((p) => p.status === "scheduled").sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-  const other = posts.filter((p) => !["draft", "scheduled"].includes(p.status)).slice(0, 15);
+  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
+  const calendar = renderCalendar(env,calendarPosts,await csrfToken(env,session),start);
+  const draftSearch = normalizedSearch(params.get("q") ?? "");
+  const drafts = await searchPosts(env.DB,"drafts",draftSearch,viewPage(params,"drafts_page"));
   const missing = missingSecrets(env);
-  const log = await recentAudit(env.DB, 20);
+  const body =
+    (missing.length ? '<div class="notice err">Not fully set up. Missing secrets: ' +
+      missing.map(esc).join(", ") + '.</div>' : '') +
+    '<div class="hero"><div class="hero-kicker">GS Grimoire editorial planner</div>' +
+    '<h2>Drafts and the weekly planner</h2>' +
+    '<p>Review and approve your saved drafts. Scheduled posts, TikTok inbox transfers, published posts and activity are in History.</p></div>' +
+    '<div class="row" style="justify-content:space-between;align-items:center">' +
+    '<h2 style="margin:0">Weekly planner</h2><div class="inline-actions">' +
+    '<a class="btn" href="/history">View History</a>' +
+    '<a class="btn" href="/threads/settings">Threads connection</a>' +
+    '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
+    '<a class="btn" href="/new">New draft</a></div></div>' +
+    calendar +
+    '<form class="history-search" method="get" action="/" role="search">' +
+    '<label for="drafts-q">Search drafts</label>' +
+    '<input type="search" id="drafts-q" name="q" maxlength="120" placeholder="Search titles, captions or releases" value="' +
+    esc(draftSearch) + '"><button class="primary" type="submit">Search</button>' +
+    (draftSearch ? '<a class="btn" href="/">Clear</a>' : '') + '</form>' +
+    postSection(env,"drafts","Drafts",drafts,params,"/","drafts_page",
+      "No drafts match this search.") ;
+  return html(page("GS Poster",body,{login:session.login,wide:true}));
+}
 
-  const section = (title: string, list: Post[], empty: string) =>
-    `<h2>${esc(title)}</h2>${list.length ? list.map((p) => postCard(env, p)).join("") : `<p class="empty">${esc(empty)}</p>`}`;
-
-  const body = `
-    ${missing.length ? `<div class="notice err">Not fully set up. Missing secrets: ${missing.map(esc).join(", ")}.</div>` : ""}
-    <div class="hero" style="margin-bottom:15px">
-      <div class="hero-kicker">GS Grimoire · Editorial calendar</div>
-      <h2>One place for every story.</h2>
-      <p>Review drafts, schedule approved Facebook and Bluesky posts, and prepare TikTok videos or carousels for separate, explicit transfer.</p>
-    </div>
-    <div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Weekly planner</h2><div class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/tiktok/settings">TikTok connection</a><a class="btn" href="/threads/settings">Threads connection</a><a class="btn" href="/new">+ New draft</a></div></div>
-    ${calendar}
-    ${section(`Waiting for you (${drafts.length})`, drafts, "No drafts waiting for review.")}
-    ${section("Scheduled", scheduled, "Nothing scheduled.")}
-    ${section("Recent", other, "Nothing yet.")}
-    <h2>Activity</h2>
-    ${log.length ? `<table class="log">${log
-      .map((a) => `<tr><td class="ts">${esc(shortTime(env, a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}${a.post_id ? ` <a href="/post/${esc(a.post_id)}">${esc(a.post_id)}</a>` : ""}</td></tr>`)
-      .join("")}</table>` : `<p class="empty">No activity yet.</p>`}`;
-  return html(page("GS Poster", body, { login: session.login, wide: true }));
+async function historyPage(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
+  await reconcileOldTikTokInboxDrafts(env.DB);
+  const search = normalizedSearch(params.get("q") ?? "");
+  const [scheduled,published,other,activity] = await Promise.all([
+    searchPosts(env.DB,"scheduled",search,viewPage(params,"scheduled_page")),
+    searchPosts(env.DB,"published",search,viewPage(params,"published_page")),
+    searchPosts(env.DB,"other",search,viewPage(params,"other_page")),
+    searchActivity(env.DB,search,viewPage(params,"activity_page")),
+  ]);
+  const activityMarkup = '<details class="history-section" id="activity" open>' +
+    '<summary><span>Activity</span><span class="history-count">' + activity.total + '</span></summary>' +
+    '<div class="history-section-body">' +
+    (activity.items.length ? '<table class="log"><caption class="sr-only">Activity history</caption><tbody>' +
+      activity.items.map((a) => '<tr><td class="ts">' + esc(shortTime(env,a.ts)) +
+        '</td><td>' + esc(a.actor) + '</td><td>' + esc(a.action) +
+        (a.post_id ? ' <a href="/post/' + esc(a.post_id) + '">' + esc(a.post_id) + '</a>' : '') +
+        (a.detail ? '<span class="activity-detail">' + esc(a.detail) + '</span>' : '') +
+        '</td></tr>').join("") + '</tbody></table>' :
+      '<p class="empty">No matching activity.</p>') +
+    pager(activity,params,"activity_page","/history","activity") + '</div></details>';
+  const body =
+    '<div class="hero"><div class="hero-kicker">Post and transfer records</div>' +
+    '<h2>History</h2><p>Search all queued, inbox, published and completed records, plus the activity log. ' +
+    'TikTok inbox transfers are not automatically published.</p></div>' +
+    '<form class="history-search" method="get" action="/history" role="search">' +
+    '<label for="history-q">Search history</label>' +
+    '<input type="search" id="history-q" name="q" maxlength="120" placeholder="Search posts, captions, labels or activity" value="' +
+    esc(search) + '"><button class="primary" type="submit">Search</button>' +
+    (search ? '<a class="btn" href="/history">Clear</a>' : '') + '</form>' +
+    postSection(env,"scheduled","Scheduled / In Inbox",scheduled,params,"/history","scheduled_page",
+      "No scheduled or inbox posts match this search.") +
+    postSection(env,"published","Published",published,params,"/history","published_page",
+      "No published posts match this search.") +
+    postSection(env,"other","Failed / Cancelled",other,params,"/history","other_page",
+      "No failed or cancelled posts match this search.") +
+    activityMarkup;
+  return html(page("History",body,{login:session.login,wide:true}));
 }
 
 /** Only creates a draft. No PIN, Graph or publishing calls are permitted here. */
@@ -443,11 +533,13 @@ interface PageState {
 }
 
 async function postPage(env: Env, session: Session, id: string, state: PageState, status = 200): Promise<Response> {
+  await reconcileOldTikTokInboxDrafts(env.DB);
   const p = await getPost(env.DB, id);
   if (!p) return html(page("Not found", `<p class="empty">That post does not exist (it may have been deleted).</p><p><a href="/">Back</a></p>`, { login: session.login }), { status: 404 });
   const csrf = await csrfToken(env, session);
   const tiktokConn = await tiktokConnection(env.DB);
   const tiktokTransfer = await getTikTokInboxTransfer(env.DB,p.id);
+  const tiktokState = await getTikTokHistoryState(env.DB, p.id);
   const ttMedia=tiktokMedia(p);
   // A draft may keep an old cancelled job row until it is approved again; hide it.
   const fbQueue = p.images.length > BULK_FACEBOOK_THRESHOLD && p.approved_at && p.status !== "draft"
@@ -494,15 +586,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   let actions = instagramJobCard(igJob, p.id, csrf, localTime) + threadsJobCard(thJob, p.id, csrf, localTime);
   const postVideo=ttMedia.video;
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && !tiktokConn) {
-    actions += '<div class="step-card"><div class="eyebrow">TikTok · Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
+    actions += '<div class="step-card"><div class="eyebrow">TikTok | Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
   }
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
-    const ttRetry=tiktokTransfer?.status==="rejected"||tiktokTransfer?.status==="cleared";
+    const ttRetry=!!tiktokTransfer&&canRetryTikTokTransfer(tiktokTransfer);
     // Unapproved drafts send TikTok from the editor's release form (#61); the
     // separate options step stays for scheduled and published posts.
     const inEditor=["draft","rejected"].includes(p.status)&&!p.approved_at;
     if((!tiktokTransfer||ttRetry) && !inEditor && ["draft","scheduled","published"].includes(p.status)) actions += `<div class="step-card">
-      <div class="eyebrow">TikTok · ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
+      <div class="eyebrow">TikTok | ${ttRetry?"Fix the cause, then send again":"Ready for review"}</div>
       <h3 style="margin:8px 0">${TIKTOK_DIRECT_POST_VISIBLE?"Choose your TikTok publishing path":"Send to your TikTok inbox"}</h3>
       <p class="hint">Review the ${ttMedia.video?"video":"carousel"} before sending it to your TikTok inbox${TIKTOK_DIRECT_POST_VISIBLE?" or starting a private Direct Post test":""}. Sending needs your approval PIN. The calendar time does not trigger TikTok publication; you finish and publish in the TikTok app.</p>
       <p><a class="btn" href="/post/${p.id}/tiktok-options">${TIKTOK_DIRECT_POST_VISIBLE?"Review TikTok posting options":"Review and send to TikTok inbox"}</a></p>
@@ -514,6 +606,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <p class="hint">${tiktokTransfer.status==="rejected"?"TikTok refused this attempt and returned no publish ID. Fix the cause above, then use the TikTok posting options again.":
           tiktokTransfer.status==="cleared"?"You cleared this attempt after checking TikTok. GS Poster has no confirmation from TikTok. You can send it again; if a copy shows up on TikTok later, delete the duplicate there.":
           tiktokTransfer.status==="needs_review"?"The outcome is uncertain. Check TikTok before doing anything else.":
+          tiktokTransfer.status==="failed"?"TikTok reported this attempt failed. Review the error before trying again.":
           tiktokTransfer.post_mode==="DIRECT_POST"?"TikTok is processing a private Direct Post.":"Open TikTok to finish editing and publishing if this was an inbox transfer."}</p>
         ${tiktokTransfer.status==="needs_review"&&!tiktokTransfer.publish_id?`<form method="post" action="/post/${p.id}/tiktok-clear">
           ${hidden}<p class="hint">TikTok never returned a publish ID for this attempt. Check your TikTok inbox, drafts and profile first.</p>
@@ -528,6 +621,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       </div>`;
     }
   }
+  if (tiktokState === "inbox" && tiktokTransfer && (
+    tiktokTransfer.status === "rejected" || tiktokTransfer.status === "cleared" ||
+    (tiktokTransfer.status === "failed" && tiktokTransfer.remote_status === "FAILED")
+  )) {
+    actions += `<form method="post" action="/post/${p.id}/tiktok-redraft" class="card">
+      ${hidden}<label for="tiktok-redraft-pin">Approval PIN</label>
+      <input id="tiktok-redraft-pin" name="pin" type="password" required>
+      <button type="submit">Move TikTok post back to drafts</button></form>`;
+  }
   // Unapproved drafts get the one-page editor; the TikTok card goes in its rail.
   if (["draft", "rejected"].includes(p.status) && !p.approved_at) {
     const timeCheck = decideReleaseTime(p.scheduled_at ? new Date(p.scheduled_at) : null, new Date(),
@@ -540,13 +642,13 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       ...(timeProblem ? [timeProblem] : []),
     ];
     const editor = renderDraftEditor({
-      post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p), error: state.error, notice: state.notice,
+      post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p, tiktokState), error: state.error, notice: state.notice,
       checksHtml: checkList, releaseProblems, mediaPanel: draftMediaPanel(p, csrf), tiktokCard: actions, xCard,
       tiktokPlan: tiktokReleasePlan(p, tiktokConn, tiktokTransfer),
       instagramPlan: instagramReleasePlan(env, p, igJob),
       threadsPlan: await threadsReleasePlan(env, p, thJob),
       mediaLooksPending: p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release),
-      createdLine: `Drafted by ${p.created_by ?? "?"} · ${formatLocal(new Date(p.created_at), env.TIMEZONE)} · ${p.id}`,
+      createdLine: `Drafted by ${p.created_by ?? "?"} | ${formatLocal(new Date(p.created_at), env.TIMEZONE)} | ${p.id}`,
     });
     return html(page(p.label || "Draft", editor, { login: session.login, wide: true }), { status });
   }
@@ -616,15 +718,15 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <div class="row"><button class="primary" type="submit">Reopen as editable draft</button></div>
     </form>`;
   }
-  if (p.status === "scheduled" || p.bluesky?.status === "scheduled") {
+  if ((p.status === "scheduled" && tiktokState !== "inbox") || p.bluesky?.status === "scheduled") {
     actions += `<form method="post" action="/post/${p.id}/cancel" class="card">${hidden}
-      <p>Pending for <strong>${esc(whenText(env, p))}</strong>. Cancellation stops pending targets only, not already published posts.</p>
+      <p>Pending for <strong>${esc(whenText(env, p, tiktokState))}</strong>. Cancellation stops pending targets only, not already published posts.</p>
       <label for="cancel-pin">PIN</label>
       <input id="cancel-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
       <div class="row"><button class="danger">Cancel pending targets</button></div>
       </form>`;
   }
-  if (p.status === "scheduled" && p.scheduled_at) {
+  if (p.status === "scheduled" && tiktokState !== "inbox" && p.scheduled_at) {
     actions += `<form method="post" action="/post/${p.id}/reschedule" class="card">${hidden}
       <h2>Change release time</h2>
       <p class="hint">Moves the pending schedule without creating another post. Facebook and Bluesky are updated together when both are pending.</p>
@@ -633,7 +735,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label for="move-pin">Approval PIN</label><input id="move-pin" type="password" name="pin" required autocomplete="off">
       <div class="row"><button class="primary">Save new time</button></div></form>`;
   }
-  if (p.status === "scheduled") {
+  if (p.status === "scheduled" && tiktokState !== "inbox") {
     actions += `<form method="post" action="/post/${p.id}/edit-caption" class="card">${hidden}
       <h2>Edit unreleased captions</h2>
       <p class="hint">Save caption changes without publishing. Media and publishing targets are fixed after approval. An approved post will be updated on Facebook where supported.</p>
@@ -704,7 +806,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ${fbQueue ? `<div class="notice">Facebook photo upload: ${fbQueue.uploaded}/${fbQueue.total} photos. Status: ${esc(fbQueue.status)}.${fbQueue.error ? " " + esc(fbQueue.error) : ""}</div>` : ""}
     ${p.status === "rejected" && p.note ? `<div class="notice">Your note for the drafting assistant: ${esc(p.note)}</div>` : ""}
     <div class="card preview">
-      <div class="meta">${statusChip(p)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
+      <div class="meta">${statusChip(p, tiktokState)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p, tiktokState))}</span>${p.permalink ? `<a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : ""}
         ${p.bluesky?.permalink ? `<a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : ""}
         <span>${esc(p.facebook_enabled ? "Facebook" : "")} ${p.bluesky ? "Bluesky: " + esc(p.bluesky.status) : ""} ${p.tiktok_enabled ? "TikTok inbox (manual publishing)" : ""}</span></div>
       <style>.platform-preview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:14px}
@@ -715,17 +817,17 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       ${p.facebook_enabled ? `<section class="platform-preview" aria-label="Facebook review">
         <h3>Facebook</h3><p class="caption">${esc(p.message)}</p>
         ${p.video?videoPreview("facebook"):thumbs}
-        <p class="hint">${p.video?"Video":p.images.length+" images"} · separate Facebook approval</p></section>`:""}
+        <p class="hint">${p.video?"Video":p.images.length+" images"} | separate Facebook approval</p></section>`:""}
       ${p.tiktok_enabled ? `<section class="platform-preview" aria-label="TikTok review">
         <h3>TikTok</h3><p class="caption">${esc(p.tiktok_caption ?? p.message)}</p>
         ${ttMedia.video?videoPreview("tiktok"):ttThumbs}
-        <p class="hint">${ttMedia.video?"Video":ttMedia.images.length+" images"} · manual transfer only</p></section>`:""}
+        <p class="hint">${ttMedia.video?"Video":ttMedia.images.length+" images"} | manual transfer only</p></section>`:""}
       ${p.instagram ? `<section class="platform-preview" aria-label="Instagram preparation">
         <h3>Instagram (manual)</h3><p class="caption">${esc(p.instagram.caption)}</p>
         ${p.instagram.video ? videoPreview("instagram")+
           `<p><a href="/instagram/${p.id}/video.mp4" download="instagram-${p.id}-reel.mp4">Download MP4 Reel</a></p>
           <p class="hint">Original MP4, not transcoded. Verify 9:16, H.264 and audio before posting.</p>`
-          : p.instagram.items.map((_,i)=>`<a href="/instagram/${p.id}/${i}.jpg" download>Photo ${i+1}</a>`).join(" · ")}
+          : p.instagram.items.map((_,i)=>`<a href="/instagram/${p.id}/${i}.jpg" download>Photo ${i+1}</a>`).join(" | ")}
         <p class="hint">${igJob ? "Instagram publishing status is shown in the Instagram card." : "Not approved for Instagram: download and post it yourself, or approve it for Instagram from the draft."}</p></section>` : ""}
       ${bs ? `<section class="platform-preview" aria-label="Bluesky review">
         <h3>Bluesky</h3><p class="caption">${esc(bs.caption)}</p>
@@ -736,7 +838,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       </div>
       ${p.facebook_enabled && p.link && !p.images.length ? `<p class="meta">Link: ${esc(p.link)}</p>` : ""}
       ${checkList ? `<ul class="checks">${checkList}</ul>` : ""}
-      <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} · ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} · ${esc(p.id)}</p>
+      <p class="meta" style="margin-top:10px">Drafted by ${esc(p.created_by ?? "?")} | ${esc(formatLocal(new Date(p.created_at), env.TIMEZONE))} | ${esc(p.id)}</p>
     </div>
     ${xCard}
     ${draftMediaPanel(p, csrf)}
@@ -1009,9 +1111,18 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         aiGenerated:form.get("is_aigc")==="1",
       };
       const version=String(form.get("expected_updated_at")||"");
-      const result=mode==="MEDIA_UPLOAD"&&mediaType==="VIDEO"
-        ? await startTikTokInboxTransfer(env,id,version,session.login)
-        : await startTikTokContentTransfer(env,id,version,session.login,options);
+      let result;
+      try {
+        result=mode==="MEDIA_UPLOAD"&&mediaType==="VIDEO"
+          ? await startTikTokInboxTransfer(env,id,version,session.login)
+          : await startTikTokContentTransfer(env,id,version,session.login,options);
+      } catch (error) {
+        // An uncertain provider response may already have caused an inbox
+        // transfer. Preserve its owner-approved state and never auto-retry.
+        await markTikTokInboxApproved(env.DB,id,version).catch(() => false);
+        throw error;
+      }
+      await markTikTokInboxApproved(env.DB,id,version);
       return postPage(env,session,id,{notice:
         "TikTok "+result.media_type+" transfer started. "+
         (mode==="DIRECT_POST"?"This private post is processing.":"Complete publication in the TikTok app.")});
@@ -1019,7 +1130,13 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (action === "tiktok-upload") {
       if (form.get("confirm_tiktok") !== "1")
         return postPage(env,session,id,{error:"Confirm that TikTok publication is manual."},400);
-      await startTikTokInboxTransfer(env,id,String(form.get("expected_updated_at")||""),session.login);
+      const version=String(form.get("expected_updated_at")||"");
+      try { await startTikTokInboxTransfer(env,id,version,session.login); }
+      catch(error) {
+        await markTikTokInboxApproved(env.DB,id,version).catch(()=>false);
+        throw error;
+      }
+      await markTikTokInboxApproved(env.DB,id,version);
       return postPage(env,session,id,{notice:"Video transferred to TikTok. Open your TikTok inbox to complete publication."});
     }
     if (action === "tiktok-clear") {
@@ -1030,8 +1147,19 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         ? postPage(env,session,id,{notice:"TikTok attempt cleared on your confirmation. GS Poster sent nothing new. You can send it to TikTok again."})
         : postPage(env,session,id,{error:"This TikTok attempt cannot be cleared: it has a TikTok publish ID or is not awaiting review."},409);
     }
+    if (action === "tiktok-redraft") {
+      const restored = await reopenTikTokInboxDraft(env.DB, id, String(form.get("expected_updated_at") ?? ""));
+      if (!restored)
+        return postPage(env, session, id, { error: "Only a TikTok-only inbox post with a finished or cleared failed attempt can return to drafts. Reload and check the transfer status." }, 409);
+      await audit(env.DB, session.login, "tiktok-inbox-redrafted", id).catch(() => undefined);
+      return postPage(env, session, id, { notice: "Moved back to drafts. A new approval is needed to send it again." });
+    }
     if (action === "tiktok-status") {
       const checked=await refreshTikTokInboxTransfer(env,id,session.login);
+      if (checked.status === "published_by_creator") {
+        await reconcileOldTikTokInboxDrafts(env.DB);
+        await markTikTokCreatorPublished(env.DB,id);
+      }
       return postPage(env,session,id,{notice:"TikTok transfer: "+checked.status.replaceAll("_"," ")+
         (checked.post_mode==="DIRECT_POST"?". TikTok is processing your direct post.":". Complete publication inside TikTok if it is an inbox upload.")});
     }
@@ -1250,6 +1378,11 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         outcomes.push({ ok: false, text: "TikTok: " + (error instanceof Error ? error.message : String(error)) + " See the TikTok card for the safe next step." });
       }
     }
+    // A standalone TikTok record can leave Drafts after the transfer result
+    // is recorded. Enabled siblings keep their own approval state even when
+    // the owner chose to send only to TikTok on this submission.
+    if (ttPlan?.ok && !facebook && !blueskySelected && !instagramSelected && !threadsSelected)
+      await markTikTokInboxApproved(env.DB, id, current.updated_at);
     // Instagram is queued, not sent: cron publishes it at the approved time.
     // Queued before the Facebook/Bluesky claim, fenced on the same saved version.
     if (instagramSelected) {

@@ -288,7 +288,7 @@ function formatLine(id: PlatformId): string {
     r.altRequired ? "descriptions required" : "",
     r.maxHashtags ? `${r.maxHashtags} hashtags` : "",
     r.framed ? "JPEG photos or an MP4 Reel download" : `shows best at ${r.aspect.label}`,
-  ].filter(Boolean).join(" · ");
+  ].filter(Boolean).join(" | ");
 }
 
 function checkItems(t: TargetState): string {
@@ -334,8 +334,8 @@ export function renderDraftEditor(v: EditorView): string {
   const empty = '<p class="hint">Nothing yet.</p>';
   const when = p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), v.tz) : "";
   const releaseTargets = [
-    p.facebook_enabled ? `<label><input type="checkbox" name="target_facebook" value="1" checked> Facebook · ${p.video ? "video" : photos(p.images.length)}</label>` : "",
-    p.bluesky ? `<label><input type="checkbox" name="target_bluesky" value="1" checked> Bluesky · ${bs!.video ? "video" : photos(bs!.images.length)}</label>` : "",
+    p.facebook_enabled ? `<label><input type="checkbox" name="target_facebook" value="1" checked> Facebook | ${p.video ? "video" : photos(p.images.length)}</label>` : "",
+    p.bluesky ? `<label><input type="checkbox" name="target_bluesky" value="1" checked> Bluesky | ${bs!.video ? "video" : photos(bs!.images.length)}</label>` : "",
   ].join("");
   const ttPlan = v.tiktokPlan;
   const ttOk = ttPlan?.ok ? ttPlan : null;
@@ -346,7 +346,7 @@ export function renderDraftEditor(v: EditorView): string {
   const igBlock = igOk ? `
       <fieldset class="ig-release">
         <legend class="sr-only">Instagram</legend>
-        <label><input type="checkbox" name="target_instagram" value="1" checked data-ig-toggle> Instagram · ${igWhat}</label>
+        <label><input type="checkbox" name="target_instagram" value="1" checked data-ig-toggle> Instagram | ${igWhat}</label>
         <p class="hint">Caption: ${esc(igOk.caption.slice(0, 140))}${igOk.caption.length > 140 ? "..." : ""} (edit it in the Instagram card; it saves automatically)</p>
         <label><input type="checkbox" name="confirm_instagram" value="1" required data-ig-required> Post this to the GS Grimoire Instagram automatically ${p.scheduled_at ? "at " + esc(v.whenText) : "within a few minutes"}.</label>
       </fieldset>` : igPlan && !igPlan.ok && igPlan.offered ? `<p class="hint">Instagram: ${esc(igPlan.reason)}</p>` : "";
@@ -369,7 +369,7 @@ export function renderDraftEditor(v: EditorView): string {
   const ttBlock = ttOk ? `
       <fieldset class="tt-release">
         <legend class="sr-only">TikTok</legend>
-        <label class="tt-target"><input type="checkbox" name="target_tiktok" value="1" checked data-tt-toggle> ${ttOk.retry ? "Send again: " : ""}TikTok · ${ttOk.type === "VIDEO" ? "video" : ttOk.count + "-photo carousel"} to your inbox</label>
+        <label class="tt-target"><input type="checkbox" name="target_tiktok" value="1" checked data-tt-toggle> ${ttOk.retry ? "Send again: " : ""}TikTok | ${ttOk.type === "VIDEO" ? "video" : ttOk.count + "-photo carousel"} to your inbox</label>
         <div class="tt-details" data-tt-details>
           ${ttPreview}
           <p class="hint">${ttOk.type === "VIDEO"
@@ -608,7 +608,7 @@ export function renderDraftEditor(v: EditorView): string {
             data-pool="${esc(JSON.stringify(pool.map((url, i) => ({ url, src: `/media/${p.id}/${i}?platform=pool` }))))}"
             data-max="${INSTAGRAM_MAX_ITEMS}" data-max-zoom="${INSTAGRAM_MAX_ZOOM}" data-bgs="${esc(JSON.stringify(INSTAGRAM_BACKGROUNDS))}">
             ${igItems.map((it, n) => `<li class="ig-item"><img src="/media/${p.id}/${pool.indexOf(it.url)}?platform=pool" alt="Instagram photo ${n + 1}">
-              <span>${it.mode === "crop" ? "Cropped" : "Padded"} · <a href="/instagram/${p.id}/${n}.jpg" download>Download</a></span></li>`).join("")}
+              <span>${it.mode === "crop" ? "Cropped" : "Padded"} | <a href="/instagram/${p.id}/${n}.jpg" download>Download</a></span></li>`).join("")}
           </ol>
           ${pool.length ? `<details class="ig-picker" id="ig-picker"${igItems.length ? "" : " open"}><summary>Add photos from this post</summary>
             <div class="tiles ig-pool" id="ig-pool">${pool.map((url, i) => `<button type="button" class="ig-add" data-url="${esc(url)}"><img loading="lazy" src="/media/${p.id}/${i}?platform=pool" alt="Add photo ${i + 1}"><span>Add</span></button>`).join("")}</div>
@@ -617,7 +617,7 @@ export function renderDraftEditor(v: EditorView): string {
           ${on.instagram && igVideo && parseGitHubUrl(igVideo) ? `<div class="row"><button type="button" data-prepare-video="instagram">Prepare Instagram video privately</button></div>` : ""}
           <p class="hint" id="ig-unsaved" hidden>Save to download prepared Instagram media.</p>
           <p class="hint ig-downloads" id="ig-downloads"${igItems.length ? "" : " hidden"}>${esc(PLATFORMS.instagram.delivery)}
-            ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" · ")}</p>
+            ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" | ")}</p>
         </article>
         <article class="target" id="target-threads" data-platform="threads"${hide(on.threads)} aria-labelledby="tg-threads">
           <div class="target-head"><h4 id="tg-threads">Threads</h4><p class="format">${esc(formatLine("threads"))}</p></div>
@@ -1159,7 +1159,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       if (!dl) return;
       dl.querySelectorAll("a").forEach(a => a.remove());
       items.forEach((_, n) => {
-        if (n) dl.append(" · ");
+        if (n) dl.append(" | ");
         const a = el("a", { href: "/instagram/" + post + "/" + n + ".jpg", download: "instagram-" + post + "-" + (n + 1) + ".jpg" }, "Photo " + (n + 1));
         dl.append(a);
       });

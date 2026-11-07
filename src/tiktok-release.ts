@@ -12,7 +12,7 @@
 import type { Env } from "./env.ts";
 import { tiktokMedia, type Post } from "./db.ts";
 import { parseUploadRef } from "./upload.ts";
-import { startTikTokInboxTransfer, type TikTokInboxTransfer } from "./tiktok-inbox.ts";
+import { canRetryTikTokTransfer, startTikTokInboxTransfer, type TikTokInboxTransfer } from "./tiktok-inbox.ts";
 import { startTikTokContentTransfer } from "./tiktok-posting.ts";
 import { TIKTOK_CAPTION_PHOTO, TIKTOK_CAPTION_VIDEO, TIKTOK_PHOTO_MAX } from "./platforms.ts";
 
@@ -29,7 +29,7 @@ export function tiktokReleasePlan(
   p: Post, conn: { scopes: string } | null, transfer: TikTokInboxTransfer | null,
 ): TikTokReleasePlan {
   if (!p.tiktok_enabled) return { ok: false, offered: false, reason: "TikTok is not selected for this draft." };
-  const retry = transfer?.status === "rejected" || transfer?.status === "cleared";
+  const retry = !!transfer && canRetryTikTokTransfer(transfer);
   if (transfer && !retry)
     return { ok: false, offered: false, reason: `Already sent to TikTok (${transfer.status.replaceAll("_", " ")}). See the TikTok card.` };
   if (!conn) return { ok: false, offered: true, reason: "Connect TikTok first (TikTok settings)." };

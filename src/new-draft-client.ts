@@ -18,7 +18,7 @@ export const NEW_DRAFT_JS = String.raw`
   const selectedCount=name=>images.filter(item=>target(name)&&item.targets?.[name]?.checked).length;
   const mediaTargets=item=>["facebook","tiktok","bluesky"].filter(name=>target(name)&&item.targets?.[name]?.checked);
   const platformTotals=()=>["facebook","tiktok","bluesky"].filter(target).map(name=>
-    name[0].toUpperCase()+name.slice(1)+" "+selectedCount(name)+"/"+platformLimits[name]).join(" · ");
+    name[0].toUpperCase()+name.slice(1)+" "+selectedCount(name)+"/"+platformLimits[name]).join(" | ");
   function updateProgress(done,total) {
     const pct=total ? Math.round(done/total*100) : 0;
     summary("new-upload-progress").setAttribute("aria-valuenow",String(pct));
@@ -31,8 +31,8 @@ export const NEW_DRAFT_JS = String.raw`
     const count=images.length;
     const warning=["facebook","tiktok","bluesky"].some(name=>target(name)&&selectedCount(name)>platformLimits[name]);
     $("new-image-count").textContent=count?
-      count+" file"+(count!==1?"s":"")+" · "+platformTotals() :
-      "No images selected · choose destination(s) per image";
+      count+" file"+(count!==1?"s":"")+" | "+platformTotals() :
+      "No images selected | choose destination(s) per image";
     $("new-image-count").classList.toggle("media-error",warning);
     $("new-platform-counts").textContent=kind()==="images"?platformTotals():
       kind()==="video"?"The selected video will be attached only to chosen destinations":"Text-only";
@@ -40,7 +40,7 @@ export const NEW_DRAFT_JS = String.raw`
   function updateSummary() {
     const k=kind(),tt=target("tiktok"),bs=target("bluesky");
     const platforms=["facebook","bluesky","tiktok"].filter(target).map(x=>x==="facebook"?"Facebook":x==="bluesky"?"Bluesky":"TikTok");
-    summary("summary-platforms").textContent=platforms.length ? platforms.join(" · ") : "None selected";
+    summary("summary-platforms").textContent=platforms.length ? platforms.join(" | ") : "None selected";
     summary("summary-format").textContent=k==="images"?"Photos":k==="video"?"Video":"Text only";
     summary("summary-media").textContent=k==="images" ? images.length+" source images" :
       k==="video" ? (video ? video.name : "No video selected") : "Text only";

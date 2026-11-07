@@ -213,7 +213,7 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
       const url = imageTarget?'/media/'+p.id+'/0?thumb=1&platform='+imageTarget:null;
       const thumb = url ? '<img class="cal-thumb" src="' + esc(url) + '" alt="" loading="lazy">' : '';
       const tip = '<span class="cal-tooltip"><strong>' + esc(title) + '</strong><br>' + esc(p.status) +
-        ' · ' + esc(local.replace('T',' ')) + '<br>Created by ' + esc(p.created_by || "unknown") +
+        ' | ' + esc(local.replace('T',' ')) + '<br>Created by ' + esc(p.created_by || "unknown") +
         (p.tiktok_enabled?'<br><strong>TikTok requires an explicit transfer</strong>':'') +
         '<br>' + esc(caption.slice(0,200)) + '</span>';
       return '<a class="calendar-post" style="top:' + minute + 'px;left:calc(' + left +
