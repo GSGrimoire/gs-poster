@@ -57,7 +57,7 @@ before(async () => {
 });
 after(async () => { await worker?.dispose(); });
 beforeEach(async () => {
-  for (const t of ["threads_jobs", "threads_media_grants", "threads_targets", "threads_accounts", "threads_oauth_states",
+  for (const t of ["threads_jobs", "threads_media_grants", "threads_targets", "threads_accounts", "threads_oauth_states", "threads_revocation_events",
     "instagram_targets", "bluesky_targets", "posts", "audit"]) await db.prepare(`DELETE FROM ${t}`).run();
   calls = []; accountId = USER; status = "FINISHED"; publishFails = false; nextId = 0; holdPublish = undefined; renewFails = false; holdStatus = undefined;
   globalThis.fetch = async (input, init) => {
@@ -626,7 +626,7 @@ test("a disconnect after a run read its sign-in stops the job at the send barrie
   const job = (await getThreadsJob(db, p.id))!;
   assert.equal(job.status, "failed");
   assert.equal(job.ambiguous, false);
-  assert.match(job.error!, /was disconnected before the final send/);
+  assert.match(job.error!, /was disconnected or suspended before the final send/);
 });
 
 test("T5: a streamed callback body with no declared size is cut off after 8 KB, unread beyond that", async () => {
