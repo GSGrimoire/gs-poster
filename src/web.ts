@@ -915,7 +915,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     }
     const restored = await backToDraft(env, id, session.login, true, version);
     return restored ? redirect(`/post/${id}`) :
-      postPage(env, session, id, { error: "Cannot move this back to drafts: it changed since you opened it, has a Facebook result, or has an active or published Bluesky post. Reload and check." }, 409);
+      postPage(env, session, id, { error: instagramPending(await getInstagramJob(env.DB, id))
+        ? "This post still has a PIN-approved Instagram job. Check the Instagram card and stop or reconcile that job with your PIN before moving the Facebook failure back to drafts. Nothing has been cancelled automatically."
+        : "Cannot move this back to drafts: it changed since you opened it, has a Facebook result, or has an active or published Bluesky post. Reload and check." }, 409);
   }
   if (!env.APPROVE_PIN) return postPage(env, session, id, { error: "APPROVE_PIN is not set, so nothing can be approved yet." }, 503);
   if (await pinLocked(env.DB)) return postPage(env, session, id, { error: "Too many wrong PINs. Approvals are locked for up to an hour." }, 429);
@@ -1003,7 +1005,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       const restored=await restoreCancelledPost(env,id,version,session.login);
       return restored
         ? redirect("/post/"+id)
-        : postPage(env,session,id,{error:"The post changed, or it still has an active publishing target. Reload before trying again."},409);
+        : postPage(env,session,id,{error:instagramPending(await getInstagramJob(env.DB,id))
+          ? "Instagram still has an approved job for this post. Reconcile or cancel it with your PIN from the Instagram card before restoring the cancelled Facebook post. Nothing was changed."
+          : "The post changed, or it still has an active publishing target. Reload before trying again."},409);
     }
     if (action === "resume-facebook") {
       const resumed = await resumeFailedFacebookUploads(env, id, session.login);

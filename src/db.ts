@@ -373,7 +373,8 @@ export async function updateCalendarCaptions(
  * is no longer available: the old Page schedule must not be reactivated.
  *
  * A single D1 batch resets both targets. Stale forms and active/published
- * Bluesky targets cannot be reopened.
+ * Bluesky targets cannot be reopened. An unresolved Instagram job also
+ * prevents revoking the shared approval, in the same database operation.
  */
 export async function reopenCancelledDraft(
   db: D1Database, id: string, expectedVersion: string,
@@ -387,7 +388,7 @@ export async function reopenCancelledDraft(
   const results = await db.batch([
     db.prepare("UPDATE posts SET status='draft', approved_at=NULL, scheduled_at=NULL, " +
       "fb_post_id=NULL, permalink=NULL, error=NULL, note=NULL, updated_at=? " +
-      "WHERE id=? AND status='cancelled' AND updated_at=? AND " + safeBluesky)
+      "WHERE id=? AND status='cancelled' AND updated_at=? AND " + safeBluesky + " AND NOT " + igPending("posts"))
       .bind(now,id,expectedVersion),
     db.prepare("UPDATE bluesky_targets SET status='draft', error=NULL, uri=NULL, cid=NULL, " +
       "card_uri=NULL, permalink=NULL, started_at=NULL WHERE post_id=? " +
@@ -538,6 +539,8 @@ export async function updatePost(db: D1Database, id: string, patch: Patch, onlyI
  * Refuses posts with a recorded Facebook id, an approved post unless the
  * caller confirmed human reconciliation, and any Bluesky target that is
  * scheduled, publishing, published or carries a remote record.
+ * Refuses when an Instagram job is scheduled, in progress, or has an
+ * unresolved failure, without cancelling its job or changing the post.
  * With expectedVersion, the post must still be the version the editor saw.
  */
 export async function reopenFailedDraft(
@@ -555,6 +558,7 @@ export async function reopenFailedDraft(
         scheduled_at = CASE WHEN scheduled_at > ? THEN scheduled_at ELSE NULL END, updated_at = ?
       WHERE id = ? AND updated_at = ? AND status IN ('failed','rejected') AND fb_post_id IS NULL
         AND (approved_at IS NULL OR ? = 1)
+        AND NOT ${igPending("posts")}
         AND NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND
           (b.status IN ('scheduled','publishing','published') OR b.uri IS NOT NULL OR b.cid IS NOT NULL
            OR b.card_uri IS NOT NULL OR b.permalink IS NOT NULL))`)
