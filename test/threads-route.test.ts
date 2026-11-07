@@ -8,7 +8,7 @@ import { createHmac } from "node:crypto";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { createPost, ensureSchema, getPost } from "../src/db.ts";
-import { ensureThreadsSchema } from "../src/threads.ts";
+import { ensureThreadsSchema, threadsAccessToken } from "../src/threads.ts";
 import { ensureThreadsJobs, getThreadsJob } from "../src/threads-publish.ts";
 import { csrfToken, makeSession, SESSION_COOKIE, type Session } from "../src/session.ts";
 import type { Env } from "../src/env.ts";
@@ -223,9 +223,9 @@ test("T5: Meta's public callbacks refuse a declared oversize body and malformed 
   }
 });
 
-test("signed Threads callbacks cannot revoke a same-account reconnect within clock skew or the same second", async () => {
-  const account = () => db.prepare("SELECT connected_at, token_cipher FROM threads_accounts")
-    .first<{ connected_at: number; token_cipher: string }>();
+test("T4: both signed public callbacks fail closed for genuine early events and old same-account replays", async () => {
+  const account = () => db.prepare("SELECT connected_at, token_cipher, suspended_at, suspended_kind, suspended_issued_at FROM threads_accounts")
+    .first<{ connected_at: number; token_cipher: string; suspended_at: number | null; suspended_kind: string | null; suspended_issued_at: number | null }>();
   const signedCallback = (path: string, issuedAt: number) => {
     const payload = Buffer.from(JSON.stringify({
       algorithm: "HMAC-SHA256", user_id: ACCOUNT_ID, issued_at: issuedAt,
@@ -235,9 +235,7 @@ test("signed Threads callbacks cannot revoke a same-account reconnect within clo
       method: "POST", body: new URLSearchParams({ signed_request: sig + "." + payload }),
     });
   };
-  for (const path of ["/threads/deauthorize", "/threads/delete"]) {
-    assert.equal((await post("/threads/disconnect", { pin: PIN, confirm: "yes" })).status, 303);
-    assert.equal(await account(), null);
+  const connectViaRouter = async () => {
     const s = await session();
     const start = await mf.dispatchFetch(ORIGIN + "/threads/connect", {
       method: "POST",
@@ -253,23 +251,60 @@ test("signed Threads callbacks cannot revoke a same-account reconnect within clo
     assert.equal(connected.status, 303);
     const current = (await account())!;
     assert.ok(current.token_cipher);
-    // Simulate an earlier authorization's event, including the maximum
-    // positive provider clock skew at the instant before a reconnect.
-    for (const offset of [-600, -60, 0, 299, 300]) {
-      const res = await signedCallback(path, current.connected_at + offset);
-      assert.equal(res.status, 200, path + " offset " + offset);
-      assert.deepEqual(await account(), current, "old event leaves the newer authorization intact");
+    assert.equal(current.suspended_at, null);
+    return current;
+  };
+  const recover = async () => {
+    assert.equal((await post("/threads/disconnect", { pin: PIN, confirm: "yes" })).status, 303);
+    assert.equal(await account(), null);
+    return connectViaRouter();
+  };
+  const protectedToken = () => threadsAccessToken({ DB: db, THREADS_APP_ID: "123456789",
+    THREADS_APP_SECRET: APP_SECRET, COOKIE_SECRET: SECRET } as Env);
+  for (const path of ["/threads/deauthorize", "/threads/delete"]) {
+    // Real callback issued during the first 0-300 seconds of authorization.
+    for (const offset of [0, 30, 299, 300]) {
+      const current = await recover();
+      const response = await signedCallback(path, current.connected_at + offset);
+      assert.equal(response.status, 200, path + " early offset " + offset);
+      if (path.endsWith("/delete"))
+        assert.match((await response.json() as { confirmation_code: string }).confirmation_code, /^[A-Za-z0-9_-]{16}$/);
+      assert.ok((await account())!.suspended_at != null, "the early callback persists a suspension");
+      await assert.rejects(protectedToken(), /suspended/);
+      assert.match(await (await get("/threads/settings")).text(), /Posting suspended/);
+      assert.equal((await post("/threads/connect", { pin: PIN })).status, 400,
+        "only the PIN-gated disconnect and new OAuth flow can clear the hold");
     }
 
-    // Move the current authorization back in the fixture so a fresh signed
-    // event can be unambiguously newer without a five-minute test wait.
-    await db.prepare("UPDATE threads_accounts SET connected_at = connected_at - 301").run();
-    const valid = await signedCallback(path, current.connected_at);
-    assert.equal(valid.status, 200);
-    if (path.endsWith("/delete"))
-      assert.match((await valid.json() as { confirmation_code: string }).confirmation_code, /^[A-Za-z0-9_-]{16}$/);
-    assert.equal(await account(), null, "a current-generation callback removes the stored authorization");
+    // Same-account A disconnect/reconnect in the same second, then replay A's
+    // old signed event. The database timestamp is set equal for determinism.
+    const old = await recover();
+    const fresh = await recover();
+    await db.prepare("UPDATE threads_accounts SET connected_at = ?").bind(old.connected_at).run();
+    assert.equal((await account())!.connected_at, old.connected_at);
+    const replay = await signedCallback(path, old.connected_at);
+    assert.equal(replay.status, 200);
+    assert.ok((await account())!.suspended_at != null, "old event cannot leave a newer sign-in publishable");
+    await assert.rejects(protectedToken(), /suspended/);
+
+    // Replaying the identical signed request after an authorized PIN recovery
+    // must also block again, even though its event digest is already recorded.
+    await recover();
+    assert.equal((await signedCallback(path, old.connected_at)).status, 200);
+    assert.ok((await account())!.suspended_at != null, "deduplication does not bypass the posting fence");
+
+    // An unambiguously later callback is also fail-closed.
+    const later = await recover();
+    await db.prepare("UPDATE threads_accounts SET connected_at = connected_at - 601").run();
+    assert.equal((await signedCallback(path, later.connected_at)).status, 200);
+    assert.ok((await account())!.suspended_at != null);
+    const count = await db.prepare("SELECT COUNT(*) AS n FROM threads_revocation_events WHERE kind = ?")
+      .bind(path.endsWith("/delete") ? "delete" : "deauthorize").first<{ n: number }>();
+    assert.ok((count?.n ?? 0) >= 1, "signed event evidence is durable");
+    assert.equal((await post("/threads/disconnect", { pin: "111111", confirm: "yes" })).status, 403);
+    assert.ok((await account())!.suspended_at != null, "wrong PIN cannot clear the suspension");
   }
+  await recover();
 });
 
 test("Facebook recovery and cancellation preserve active Threads jobs", async () => {

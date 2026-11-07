@@ -50,8 +50,8 @@ export async function threadsSettings(env: Env, session: Session, notice = ""): 
   const status = !threadsConfigured(env)
     ? `<div class="notice">Threads is not set up yet: add the <code>THREADS_APP_ID</code> and <code>THREADS_APP_SECRET</code> Worker secrets in Cloudflare.</div>`
     : conn
-      ? `<div class="card"><h3>Connected as @${esc(conn.username || conn.user_id)}</h3>
-          <p class="hint">Sign-in valid until ${esc(formatLocal(new Date(conn.expires_at * 1000), env.TIMEZONE))}. GS Poster renews it automatically about two weeks before then.</p>
+      ? `<div class="card"><h3>${conn.suspended_at == null ? "Connected as" : "Posting suspended for"} @${esc(conn.username || conn.user_id)}</h3>
+          ${conn.suspended_at != null ? `<div class="notice err" role="alert">A signed Threads account deauthorization or deletion callback suspended this authorization. No scheduled Threads post can be sent with this sign-in. To recover, disconnect below with your approval PIN, then connect and authorize Threads again. A replayed valid callback may require another reconnection.</div>` : `<p class="hint">Sign-in valid until ${esc(formatLocal(new Date(conn.expires_at * 1000), env.TIMEZONE))}. GS Poster renews it automatically about two weeks before then.</p>`}
           <form method="post" action="/threads/disconnect">
             <input type="hidden" name="csrf" value="${esc(csrf)}">
             <label><input type="checkbox" name="confirm" value="yes" required> Disconnect this Threads account and delete its stored sign-in</label>
@@ -67,7 +67,7 @@ export async function threadsSettings(env: Env, session: Session, notice = ""): 
           <p class="hint">Connecting posts nothing. Each Threads post still needs its own PIN approval.</p>
         </form>`;
   const notices: Record<string, string> = {
-    connected: '<div class="notice ok">Threads connected.</div>',
+    connected: '<div class="notice ok">Threads connected. Review any failed scheduled Threads jobs and retry them with your approval PIN.</div>',
     disconnected: '<div class="notice ok">Threads disconnected. Its stored sign-in was deleted. To remove the app on the Threads side too, open Threads Settings, Account, Website permissions.</div>',
   };
   return html(page("Threads settings", `<h2>Threads</h2>

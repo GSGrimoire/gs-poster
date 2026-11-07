@@ -115,6 +115,7 @@ export async function threadsReleasePlan(env: Env, post: Post, job: ThreadsJob |
   if (!th) return { ok: false, offered: false, reason: "Threads is not selected for this post." };
   const conn = threadsConfigured(env) ? await threadsConnection(env.DB) : null;
   if (!conn) return { ok: false, offered: false, reason: "Threads is not connected yet. Connect it in Threads settings." };
+  if (conn.suspended_at != null) return { ok: false, offered: true, reason: "Threads posting is suspended after a signed account callback. Disconnect and reconnect with your approval PIN in Threads settings before approving." };
   if (job && job.status !== "cancelled") return { ok: false, offered: true, reason: job.status === "published"
     ? "This post is already on Threads. Make a new draft to post it again."
     : "Threads already has an approved job for this post. Cancel it in the Threads card first." };
@@ -151,7 +152,7 @@ export async function queueThreadsOnApproval(env: Env, postId: string, expectedV
     SELECT ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM posts
       WHERE id = ? AND updated_at = ? AND status = 'draft' AND approved_at IS NULL
         AND EXISTS (SELECT 1 FROM threads_targets t WHERE t.post_id = posts.id AND t.status = 'draft')
-        AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = ?)
+        AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = ? AND a.suspended_at IS NULL)
     ON CONFLICT(post_id) DO UPDATE SET status = 'scheduled', kind = excluded.kind, due_at = excluded.due_at, text = excluded.text,
       frame = excluded.frame, items = excluded.items, children = '[]', container_id = NULL, processing_since = NULL,
       media_id = NULL, permalink = NULL, error = NULL, ambiguous = 0, lease_until = NULL, created_by = excluded.created_by,
@@ -217,7 +218,7 @@ async function createGrant(env: Env, job: ThreadsJob, index: number): Promise<st
     (token_hash, post_id, item_index, expires_at, generation)
     SELECT ?, post_id, ?, ?, generation FROM threads_jobs
     WHERE post_id = ? AND generation = ? AND status = 'preparing' AND lease_until = ?
-      AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = threads_jobs.account_id)`)
+      AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = threads_jobs.account_id AND a.suspended_at IS NULL)`)
     .bind(await sha256(token), index, Math.floor(Date.now() / 1000) + THREADS_LEASE_SECONDS,
       job.post_id, job.generation, job.lease_until).run();
   if (created.meta.changes !== 1) throw new Error("Threads preparation lost its claim; nothing was published.");
@@ -237,7 +238,7 @@ export async function serveThreadsMedia(req: Request, env: Env): Promise<Respons
     FROM threads_media_grants g
     JOIN threads_jobs j ON j.post_id = g.post_id AND j.generation = g.generation
     WHERE g.token_hash = ? AND g.expires_at > ? AND j.status IN ('preparing','processing','sending')
-      AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = j.account_id)`)
+      AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = j.account_id AND a.suspended_at IS NULL)`)
     .bind(await sha256(m[1]), Math.floor(Date.now() / 1000)).first<{ frame: InstagramFrame | null; item: string | null }>();
   if (!grant?.item) return notFound();
   const item: ThreadsItem = JSON.parse(grant.item);
@@ -372,16 +373,16 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
     }
     const sendLease = new Date(Date.now() + THREADS_SEND_LEASE_MS).toISOString();
     // The one-way barrier is only crossed while the approved account is still
-    // connected, checked in the same statement: a disconnect (or a switch to
-    // another account) since this run read its sign-in stops the send here.
+    // connected and unsuspended, checked in the same statement: a signed
+    // revocation, disconnect or switch since the initial read stops the send.
     const barrier = await env.DB.prepare(`UPDATE threads_jobs SET status = 'sending', lease_until = ?, updated_at = ?
       WHERE post_id = ? AND generation = ? AND lease_until = ? AND status = 'processing'
-        AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = threads_jobs.account_id)`)
+        AND EXISTS (SELECT 1 FROM threads_accounts a WHERE a.account_key = 'primary' AND a.user_id = threads_jobs.account_id AND a.suspended_at IS NULL)`)
       .bind(sendLease, new Date().toISOString(), job.post_id, job.generation, job.lease_until).run();
     if ((barrier.meta.changes ?? 0) !== 1) {
       const stillOurs = await env.DB.prepare("SELECT 1 AS x FROM threads_jobs WHERE post_id = ? AND generation = ? AND lease_until = ? AND status = 'processing'")
         .bind(job.post_id, job.generation, job.lease_until).first();
-      if (stillOurs) return await fail(`The approved Threads account @${job.account_username || job.account_id} was disconnected before the final send. Nothing was sent. Reconnect it and press Try Threads again, or cancel this post.`, false, ["processing"]);
+      if (stillOurs) return await fail(`The approved Threads account @${job.account_username || job.account_id} was disconnected or suspended before the final send. Nothing was sent. Reconnect it and press Try Threads again, or cancel this post.`, false, ["processing"]);
       throw new Error("Threads publication lost its claim before sending; nothing was published.");
     }
     job.lease_until = sendLease;

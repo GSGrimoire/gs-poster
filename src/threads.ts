@@ -11,9 +11,11 @@
  * - Renewal runs from cron under a lease, at least a day after issue and well
  *   before expiry, as Threads requires.
  * - Meta's uninstall and delete callbacks are verified with the app secret
- *   (signed_request) and only ever remove the stored connection.
+ *   (signed_request) and fail closed: even a replay may suspend the current
+ *   authorization, which requires owner PIN-gated reconnection.
  */
 import type { Env } from "./env.ts";
+import { audit } from "./db.ts";
 import type { Session } from "./session.ts";
 import { cookie, getCookie, randomToken, safeEqual, sha256 } from "./session.ts";
 
@@ -36,8 +38,12 @@ export interface ThreadsConnection {
   connected_by: string;
   expires_at: number;
   issued_at: number;
-  /** When the owner signed in (unchanged by renewal). Older Meta callbacks never act on it. */
+  /** When the owner signed in (unchanged by token renewal). */
   connected_at: number;
+  /** A verified provider callback suspended local posting. Null means authorized. */
+  suspended_at: number | null;
+  suspended_kind: string | null;
+  suspended_issued_at: number | null;
   updated_at: string;
 }
 interface Row extends ThreadsConnection { token_cipher: string; lease_id: string | null; lease_until: number | null }
@@ -78,13 +84,24 @@ export async function ensureThreadsSchema(db: D1Database): Promise<void> {
     db.prepare(`CREATE TABLE IF NOT EXISTS threads_accounts (account_key TEXT PRIMARY KEY CHECK(account_key='primary'),
       user_id TEXT NOT NULL, username TEXT NOT NULL, token_cipher TEXT NOT NULL, connected_by TEXT NOT NULL,
       expires_at INTEGER NOT NULL, issued_at INTEGER NOT NULL, updated_at TEXT NOT NULL, lease_id TEXT, lease_until INTEGER,
-      connected_at INTEGER NOT NULL)`),
+      connected_at INTEGER NOT NULL, suspended_at INTEGER, suspended_kind TEXT, suspended_issued_at INTEGER)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS threads_revocation_events (
+      event_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL,
+      issued_at INTEGER NOT NULL, received_at INTEGER NOT NULL)`),
   ]);
+  // Upgrade existing D1 accounts without dropping encrypted sign-ins.
+  const columns = await db.prepare("PRAGMA table_info(threads_accounts)").all<{ name: string }>();
+  for (const [name, type] of [["suspended_at", "INTEGER"], ["suspended_kind", "TEXT"], ["suspended_issued_at", "INTEGER"]]) {
+    if (!columns.results.some(column => column.name === name)) {
+      try { await db.prepare("ALTER TABLE threads_accounts ADD COLUMN " + name + " " + type).run(); }
+      catch (error) { if (!/duplicate column name/i.test(String(error))) throw error; }
+    }
+  }
 }
 
 export async function threadsConnection(db: D1Database): Promise<ThreadsConnection | null> {
   await ensureThreadsSchema(db);
-  return await db.prepare("SELECT user_id, username, connected_by, expires_at, issued_at, connected_at, updated_at FROM threads_accounts WHERE account_key = 'primary'")
+  return await db.prepare("SELECT user_id, username, connected_by, expires_at, issued_at, connected_at, suspended_at, suspended_kind, suspended_issued_at, updated_at FROM threads_accounts WHERE account_key = 'primary'")
     .first<ThreadsConnection>() ?? null;
 }
 
@@ -146,7 +163,8 @@ export async function finishThreadsConnection(env: Env, session: Session, req: R
       VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, unixepoch())
     ON CONFLICT(account_key) DO UPDATE SET username = excluded.username, token_cipher = excluded.token_cipher,
       connected_by = excluded.connected_by, expires_at = excluded.expires_at, issued_at = excluded.issued_at,
-      updated_at = excluded.updated_at, connected_at = excluded.connected_at, lease_id = NULL, lease_until = NULL
+      updated_at = excluded.updated_at, connected_at = excluded.connected_at, suspended_at = NULL,
+      suspended_kind = NULL, suspended_issued_at = NULL, lease_id = NULL, lease_until = NULL
     WHERE threads_accounts.user_id = excluded.user_id`)
     .bind(me.id, String(me.username ?? ""), await sealThreadsToken(env, long.access_token), session.login,
       now + long.expires_in, now, new Date().toISOString()).run();
@@ -161,6 +179,7 @@ export async function threadsAccessToken(env: Env): Promise<{ token: string; use
   await ensureThreadsSchema(env.DB);
   const row = await env.DB.prepare("SELECT * FROM threads_accounts WHERE account_key = 'primary'").first<Row>();
   if (!row) throw new Error("No Threads account is connected.");
+  if (row.suspended_at != null) throw new Error("Threads posting is suspended by a signed account callback. Disconnect and reconnect in Threads settings using your approval PIN.");
   if (row.expires_at <= unix() + 60) throw new Error("The Threads sign-in has expired. Connect Threads again in settings.");
   return { token: await unsealThreadsToken(env, row.token_cipher), userId: row.user_id };
 }
@@ -170,10 +189,10 @@ export async function renewThreadsToken(env: Env, now = unix()): Promise<"renewe
   if (!threadsConfigured(env)) return "not-needed";
   await ensureThreadsSchema(env.DB);
   const row = await env.DB.prepare("SELECT * FROM threads_accounts WHERE account_key = 'primary'").first<Row>();
-  if (!row || row.expires_at - now > RENEW_BEFORE || now - row.issued_at < RENEW_MIN_AGE || row.expires_at <= now) return "not-needed";
+  if (!row || row.suspended_at != null || row.expires_at - now > RENEW_BEFORE || now - row.issued_at < RENEW_MIN_AGE || row.expires_at <= now) return "not-needed";
   const lease = randomToken();
   const claim = await env.DB.prepare(`UPDATE threads_accounts SET lease_id = ?, lease_until = ?
-    WHERE account_key = 'primary' AND token_cipher = ? AND (lease_until IS NULL OR lease_until < ?)`)
+    WHERE account_key = 'primary' AND suspended_at IS NULL AND token_cipher = ? AND (lease_until IS NULL OR lease_until < ?)`)
     .bind(lease, now + 60, row.token_cipher, now).run();
   if (claim.meta.changes !== 1) return "busy";
   try {
@@ -182,7 +201,7 @@ export async function renewThreadsToken(env: Env, now = unix()): Promise<"renewe
       grant_type: "th_refresh_token", access_token: old }), { redirect: "manual" }), "Threads token renewal");
     if (typeof next.access_token !== "string" || typeof next.expires_in !== "number") throw new Error("Threads returned no renewed token.");
     await env.DB.prepare(`UPDATE threads_accounts SET token_cipher = ?, expires_at = ?, issued_at = ?, updated_at = ?, lease_id = NULL, lease_until = NULL
-      WHERE account_key = 'primary' AND lease_id = ? AND user_id = ?`)
+      WHERE account_key = 'primary' AND suspended_at IS NULL AND lease_id = ? AND user_id = ?`)
       .bind(await sealThreadsToken(env, next.access_token), now + next.expires_in, now, new Date().toISOString(), lease, row.user_id).run();
     return "renewed";
   } finally {
@@ -214,17 +233,23 @@ export async function verifySignedRequest(env: Env, signed: string): Promise<{ u
 }
 
 /**
- * Public POST /threads/deauthorize and /threads/delete. A valid signature for
- * the connected account removes its stored token. Nothing else is touched.
+ * Public POST /threads/deauthorize and /threads/delete. A valid, fresh signed
+ * event for the connected account suspends posting, including when it might
+ * have come from an earlier authorization. The provider does not supply a
+ * connection generation, so time-only replay filtering cannot be safe.
+ *
+ * The connection's suspension fields are a durable reconciliation marker;
+ * the separately stored event digest also records signed callback history.
+ * Reconnect requires the owner to PIN-disconnect and authorize again.
  */
 export async function threadsAccountCallback(req: Request, env: Env, kind: "deauthorize" | "delete"): Promise<Response> {
   const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { ...headers, Allow: "POST" } });
-  // Read at most CALLBACK_MAX_BYTES whatever Content-Length says, then parse
-  // Meta's form encoding ourselves: an oversized or endless body is cut off unread.
+  // Never trust Content-Length: bound the actual bytes before parsing.
   const body = await readBounded(req, CALLBACK_MAX_BYTES);
   if (body === null) return new Response("Too large", { status: 413, headers });
-  const data = await verifySignedRequest(env, new URLSearchParams(body).get("signed_request") ?? "");
+  const signed = new URLSearchParams(body).get("signed_request") ?? "";
+  const data = await verifySignedRequest(env, signed);
   if (!data?.user_id) return new Response("Invalid signed request", { status: 400, headers });
   const now = unix();
   const issued = data.issued_at;
@@ -232,16 +257,27 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
       issued < now - CALLBACK_MAX_AGE || issued > now + CALLBACK_SKEW)
     return new Response("Stale signed request", { status: 400, headers });
   await ensureThreadsSchema(env.DB);
-  // The provider signs a user ID and second-resolution time, with no local
-  // connection identifier. Even with the provider clock ahead by the allowed
-  // skew, the event must be strictly newer than the current authorization.
-  // Match at deletion time so a reconnect during this request is also safe.
-  await env.DB.prepare(`DELETE FROM threads_accounts
-    WHERE account_key = 'primary' AND user_id = ? AND connected_at < ?`)
-    .bind(String(data.user_id), issued - CALLBACK_SKEW).run();
+  const userId = String(data.user_id);
+  // A replay is still capable of forcing suspension after a new same-account
+  // authorization. This denial-of-service tradeoff is intentional: silently
+  // leaving a genuinely revoked token publishable is not acceptable.
+  // The event marker and suspension update commit in the same D1 transaction.
+  // A callback racing a reconnect either suspends the old connection before
+  // its PIN-authorized replacement, or suspends the replacement itself.
+  const results = await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO threads_revocation_events (event_hash, user_id, kind, issued_at, received_at)
+      VALUES (?, ?, ?, ?, ?)`).bind(await sha256(kind + ":" + signed), userId, kind, issued, now),
+    env.DB.prepare(`UPDATE threads_accounts SET suspended_at = ?, suspended_kind = ?, suspended_issued_at = ?,
+      lease_id = NULL, lease_until = NULL
+      WHERE account_key = 'primary' AND user_id = ? AND suspended_at IS NULL`).bind(now, kind, issued, userId),
+  ]);
+  if ((results[1].meta.changes ?? 0) === 1) {
+    await audit(env.DB, "threads-provider", "threads-account-suspended", null,
+      kind + " for account " + userId + " issued_at=" + issued).catch(() => undefined);
+  }
   if (kind === "deauthorize") return new Response("ok", { headers });
   // Meta expects a status URL and a confirmation code for data deletion.
-  const code = (await sha256(String(data.user_id) + ":" + String(data.issued_at ?? ""))).slice(0, 16);
+  const code = (await sha256(userId + ":" + issued)).slice(0, 16);
   return Response.json({ url: (env.PUBLIC_ORIGIN || "https://gs-poster.goofyspook.workers.dev").replace(/\/$/, "") + "/privacy", confirmation_code: code },
     { headers });
 }

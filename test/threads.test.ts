@@ -9,7 +9,7 @@ import { createPost, ensureSchema, getPost, saveEditorDraft, type EditorDraft, t
 import { defaultItem, type InstagramDraft } from "../src/instagram.ts";
 import {
   beginThreadsConnection, disconnectThreads, ensureThreadsSchema, finishThreadsConnection, renewThreadsToken,
-  sealThreadsToken, threadsAccountCallback, threadsConnection, unsealThreadsToken, verifySignedRequest, THREADS_STATE_COOKIE,
+  sealThreadsToken, threadsAccessToken, threadsAccountCallback, threadsConnection, unsealThreadsToken, verifySignedRequest, THREADS_STATE_COOKIE,
 } from "../src/threads.ts";
 import {
   cancelThreadsJob, closeAmbiguousThreadsJob, ensureThreadsJobs, getThreadsJob, processThreadsBatch, queueThreadsOnApproval,
@@ -164,21 +164,25 @@ test("renewal waits a day, then renews before expiry under a lease", async () =>
   assert.equal(row!.lease_id, null);
 });
 
-test("Meta's signed callbacks: a forged request changes nothing, a valid one removes only the stored sign-in", async () => {
+test("Meta's signed callbacks: a forged request changes nothing, a valid one suspends posting and records the event", async () => {
   await connect();
   assert.equal(await verifySignedRequest(env(), sign({ algorithm: "HMAC-SHA256", user_id: USER }, "wrong-secret")), null);
   const forged = await threadsAccountCallback(new Request("https://gs-poster.test/threads/deauthorize", { method: "POST",
     body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", user_id: USER }, "wrong-secret") }) }), env(), "deauthorize");
   assert.equal(forged.status, 400);
   assert.ok(await threadsConnection(db));
-  // The current authorization predates this event by more than the clock allowance.
-  await db.prepare("UPDATE threads_accounts SET connected_at = connected_at - 301").run();
+  // A genuine callback in the first second must not leave the token publishable.
   const del = await threadsAccountCallback(new Request("https://gs-poster.test/threads/delete", { method: "POST",
     body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", user_id: USER, issued_at: Math.floor(Date.now() / 1000) }) }) }), env(), "delete");
   assert.equal(del.status, 200);
   const body = await del.json() as { url: string; confirmation_code: string };
   assert.match(body.confirmation_code, /^[A-Za-z0-9_-]{16}$/);
-  assert.equal(await threadsConnection(db), null);
+  const held = await threadsConnection(db);
+  assert.equal(held?.suspended_kind, "delete");
+  assert.ok(held?.suspended_at != null);
+  await assert.rejects(threadsAccessToken(env()), /suspended/);
+  const events = await db.prepare("SELECT COUNT(*) AS n FROM threads_revocation_events").first<{ n: number }>();
+  assert.equal(events?.n, 1);
   const get = await threadsAccountCallback(new Request("https://gs-poster.test/threads/delete"), env(), "delete");
   assert.equal(get.status, 405);
 });
@@ -525,21 +529,74 @@ test("T4: an old or timeless signed callback is refused and cannot revoke a sign
   }
 });
 
-test("T4: replaying a callback from before a reconnect never revokes the newer sign-in", async () => {
+test("T4: a fresh signed event or replay after a same-second reconnect suspends posting", async () => {
   await connect();
-  const before = (await threadsConnection(db))!;
-  // An event from the owner's earlier connection, ten minutes before this one.
-  const oldEvent = { user_id: USER, issued_at: before.connected_at - 600 };
+  const first = (await threadsConnection(db))!;
+  // A valid callback from the old authorization must not be allowed to
+  // keep publishing authorized on a second, same-account sign-in.
+  const oldEvent = { user_id: USER, issued_at: first.connected_at };
+  await disconnectThreads(db);
+  await connect();
+  await db.prepare("UPDATE threads_accounts SET connected_at = ?").bind(first.connected_at).run();
   for (const kind of ["deauthorize", "delete"] as const) {
     const res = await callback(kind, oldEvent);
     assert.equal(res.status, 200, kind);
-    assert.ok(await threadsConnection(db), "the newer connection stays after a replayed " + kind);
+    assert.ok((await threadsConnection(db))!.suspended_at != null,
+      "replay leaves posting suspended, never silently authorized");
+    await assert.rejects(threadsAccessToken(env()), /suspended/);
+    if (kind === "deauthorize") {
+      await disconnectThreads(db);
+      await connect();
+      await db.prepare("UPDATE threads_accounts SET connected_at = ?").bind(first.connected_at).run();
+    }
   }
-  // A fresh event clearly after the current connection does remove it.
-  await db.prepare("UPDATE threads_accounts SET connected_at = connected_at - 301").run();
-  const res = await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) });
-  assert.equal(res.status, 200);
-  assert.equal(await threadsConnection(db), null);
+  const marker = await db.prepare("SELECT COUNT(*) AS n FROM threads_revocation_events").first<{ n: number }>();
+  assert.equal(marker?.n, 2);
+});
+
+test("T4: an early signed callback blocks scheduled Threads publication and requires a fresh connection", async () => {
+  await connect();
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  const connectedAt = (await threadsConnection(db))!.connected_at;
+  assert.equal((await callback("deauthorize", { user_id: USER, issued_at: connectedAt + 30 })).status, 200);
+  assert.ok((await threadsConnection(db))!.suspended_at != null);
+  await assert.rejects(threadsAccessToken(env()), /suspended/);
+  calls = [];
+  await processThreadsBatch(env());
+  assert.equal(graphPosts("/threads").length, 0, "no media container requested");
+  assert.equal(graphPosts("/threads_publish").length, 0, "no send to Meta");
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false, "the final send never started");
+  assert.match(job.error!, /suspended/);
+  assert.equal(await retryThreadsJob(env(), p.id, "gsgrimoire"), true);
+  await processThreadsBatch(env());
+  assert.equal(graphPosts("/threads").length, 0, "retries cannot bypass the hold");
+  await disconnectThreads(db);
+  await connect();
+  assert.equal((await threadsConnection(db))!.suspended_at, null, "new OAuth authorization clears the hold");
+  assert.equal(await retryThreadsJob(env(), p.id, "gsgrimoire"), true);
+  await processThreadsBatch(env());
+  await processThreadsBatch(env());
+  assert.equal(graphPosts("/threads_publish").length, 1, "only explicit retry after reconnection sends");
+});
+
+test("T4: callback during remote container processing stops at the atomic final-send barrier", async () => {
+  await connect();
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  await processThreadsBatch(env());
+  const gateStatus = gate();
+  holdStatus = gateStatus.hold;
+  const run = processThreadsBatch(env());
+  await gateStatus.reached;
+  assert.equal((await callback("delete", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) })).status, 200);
+  gateStatus.release();
+  await run;
+  assert.equal(graphPosts("/threads_publish").length, 0, "suspension before the barrier blocks the final send");
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false);
+  assert.match(job.error!, /suspended/);
 });
 
 test("renewal leaves the connection time alone, so a fresh callback still applies after it", async () => {
@@ -549,6 +606,8 @@ test("renewal leaves the connection time alone, so a fresh callback still applie
   await db.prepare("UPDATE threads_accounts SET issued_at = ?, expires_at = ?").bind(now - 50 * 86400, now + 10 * 86400).run();
   assert.equal(await renewThreadsToken(env()), "renewed");
   assert.equal((await threadsConnection(db))!.connected_at, before.connected_at);
+  await callback("deauthorize", { user_id: USER, issued_at: now });
+  assert.equal(await renewThreadsToken(env()), "not-needed", "a suspended token must never be refreshed");
 });
 
 test("a disconnect after a run read its sign-in stops the job at the send barrier, before anything is sent", async () => {
