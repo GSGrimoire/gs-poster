@@ -5,6 +5,7 @@ import type {Env} from "./env.ts";
 import {getPost,audit,tiktokMedia} from "./db.ts";
 import {fetchVideo,INITIAL_VIDEO_MAX_BYTES} from "./video.ts";
 import {tiktokAccessToken,tiktokConnection} from "./tiktok.ts";
+import {ensureTikTokMediaSchema} from "./tiktok-media.ts";
 
 export type TikTokInboxStatus = "transferring"|"transfer_complete"|"inbox_ready"|"processing"|"published_by_creator"|"failed"|"needs_review"|"rejected"|"cleared";
 
@@ -66,15 +67,38 @@ export function tiktokRejectionAdvice(code:string):string {
   return "TikTok refused the transfer ("+code+") and returned no publish ID. "+
     (advice[code]??"Check the TikTok developer app and account, then try again.");
 }
-/**
- * Claim SQL: a new row, or a fresh attempt over a refused or editor-cleared one.
- * Any other existing row (in flight, uncertain, or holding a publish_id) wins.
- */
-export const TIKTOK_CLAIM_CONFLICT=
-  " ON CONFLICT(post_id) DO UPDATE SET status='transferring',publish_id=NULL,media_ref=excluded.media_ref,"+
-  "created_at=excluded.created_at,updated_at=excluded.updated_at,sent_by=excluded.sent_by,error=NULL,"+
-  "remote_status=NULL,post_mode=excluded.post_mode,media_type=excluded.media_type "+
-  "WHERE tiktok_inbox_transfers.status IN ('rejected','cleared') AND tiktok_inbox_transfers.publish_id IS NULL";
+// These provider-confirmed failures can be fixed or retried by the owner.
+const retryableFailures = ["file_format_check_failed", "duration_check_failed", "frame_rate_check_failed",
+  "picture_size_check_failed", "internal", "video_pull_failed", "photo_pull_failed"];
+export function canRetryTikTokTransfer(transfer: TikTokInboxTransfer): boolean {
+  return ((transfer.status === "rejected" || transfer.status === "cleared") && !transfer.publish_id) ||
+    (transfer.status === "failed" && transfer.remote_status === "FAILED" && !!transfer.publish_id &&
+      retryableFailures.includes(transfer.failure_code ?? ""));
+}
+
+export async function claimTikTokTransfer(
+  db: D1Database, postId: string, expectedVersion: string, media: string, actor: string,
+  mode: "MEDIA_UPLOAD" | "DIRECT_POST", mediaType: "PHOTO" | "VIDEO",
+): Promise<string> {
+  const now = new Date().toISOString();
+  const claim = await db.prepare(`INSERT INTO tiktok_inbox_transfers
+    (post_id,status,publish_id,media_ref,created_at,updated_at,sent_by,error,remote_status,post_mode,media_type,post_version)
+    SELECT id,'transferring',NULL,?,?,?,?,NULL,NULL,?,?,updated_at FROM posts
+    WHERE id=? AND updated_at=? AND tiktok_enabled=1 AND status IN ('draft','scheduled','published')
+    ON CONFLICT(post_id) DO UPDATE SET status='transferring',publish_id=NULL,media_ref=excluded.media_ref,
+      created_at=excluded.created_at,updated_at=excluded.updated_at,sent_by=excluded.sent_by,error=NULL,
+      remote_status=NULL,post_mode=excluded.post_mode,media_type=excluded.media_type,
+      post_version=excluded.post_version,failure_code=NULL
+    WHERE (tiktok_inbox_transfers.status IN ('rejected','cleared') AND tiktok_inbox_transfers.publish_id IS NULL)
+       OR (tiktok_inbox_transfers.status='failed' AND tiktok_inbox_transfers.remote_status='FAILED'
+         AND tiktok_inbox_transfers.publish_id IS NOT NULL
+         AND tiktok_inbox_transfers.failure_code IN (${retryableFailures.map(() => "?").join(",")}))`)
+    .bind(media,now,now,actor,mode,mediaType,postId,expectedVersion,...retryableFailures).run();
+  if (claim.meta.changes !== 1)
+    throw new Error("This post changed or a TikTok transfer already exists. Reload and check its status before sending.");
+  return now;
+}
+
 /**
  * Record a definitive refusal for one attempt, fenced by its claim time.
  * Grants are deleted first in the same D1 transaction, while the row is still
@@ -84,6 +108,7 @@ export const TIKTOK_CLAIM_CONFLICT=
 export async function markTikTokRejected(
   db:D1Database,postId:string,attempt:string,code:string,actor:string,
 ):Promise<boolean> {
+  await ensureTikTokMediaSchema(db);
   const fence="EXISTS (SELECT 1 FROM tiktok_inbox_transfers WHERE post_id=? AND created_at=? "+
     "AND status='transferring' AND publish_id IS NULL)";
   const [, updated]=await db.batch([
@@ -113,6 +138,7 @@ export async function markTikTokUncertain(
  */
 export async function clearUnconfirmedTikTokTransfer(db:D1Database,postId:string,actor:string):Promise<boolean> {
   await ensureTikTokInboxSchema(db);
+  await ensureTikTokMediaSchema(db);
   const fence="EXISTS (SELECT 1 FROM tiktok_inbox_transfers WHERE post_id=? AND status='needs_review' AND publish_id IS NULL)";
   const [, updated]=await db.batch([
     db.prepare("DELETE FROM tiktok_media_grants WHERE post_id=? AND "+fence).bind(postId,postId),
@@ -130,6 +156,7 @@ export interface TikTokInboxTransfer {
   post_id:string;status:TikTokInboxStatus;publish_id:string|null;
   media_ref:string;created_at:string;updated_at:string;sent_by:string;error:string|null;
   remote_status:string|null;
+  post_version?:string|null; failure_code?:string|null;
   post_mode?: "MEDIA_UPLOAD"|"DIRECT_POST"; media_type?: "VIDEO"|"PHOTO";
 }
 const API="https://open.tiktokapis.com";
@@ -150,7 +177,7 @@ export async function ensureTikTokInboxSchema(db:D1Database):Promise<void> {
     "created_at TEXT NOT NULL,updated_at TEXT NOT NULL,sent_by TEXT NOT NULL,error TEXT,remote_status TEXT)"
   ).run();
   const columns=await db.prepare("PRAGMA table_info(tiktok_inbox_transfers)").all<{name:string}>();
-  for(const [col,definition] of [["post_mode","TEXT NOT NULL DEFAULT 'MEDIA_UPLOAD'"],["media_type","TEXT NOT NULL DEFAULT 'VIDEO'"]]) {
+  for(const [col,definition] of [["post_mode","TEXT NOT NULL DEFAULT 'MEDIA_UPLOAD'"],["media_type","TEXT NOT NULL DEFAULT 'VIDEO'"],["post_version","TEXT"],["failure_code","TEXT"]]) {
     if(!columns.results.some(x=>x.name===col)) {
       try{await db.prepare("ALTER TABLE tiktok_inbox_transfers ADD COLUMN "+col+" "+definition).run();}
       catch(error){if(!/duplicate column name/i.test(String(error)))throw error;}
@@ -191,15 +218,8 @@ export async function startTikTokInboxTransfer(
   const bytes=await fetchVideo(env,media);
   if(!bytes.length||bytes.length>INITIAL_VIDEO_MAX_BYTES)throw new Error("Video must be under 20 MB.");
   await ensureTikTokInboxSchema(env.DB);
-  // Claim before making the external call. Never automatically retry a potentially sent video.
-  const now=new Date().toISOString();
-  const claim=await env.DB.prepare(
-    "INSERT INTO tiktok_inbox_transfers "+
-    "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by,error,remote_status,post_mode,media_type) "+
-    "VALUES (?,'transferring',NULL,?,?,?,?,NULL,NULL,'MEDIA_UPLOAD','VIDEO')"+TIKTOK_CLAIM_CONFLICT
-  ).bind(postId,media,now,now,actor).run();
-  if(claim.meta.changes!==1)
-    throw new Error("A TikTok upload already exists for this post. Check its status before attempting another upload.");
+  // Claim the same saved version before the external call.
+  const now = await claimTikTokTransfer(env.DB, postId, expectedVersion, media, actor, "MEDIA_UPLOAD", "VIDEO");
   let stage="initialization";
   try {
     const access=await tiktokAccessToken(env,"video.upload");
@@ -221,8 +241,8 @@ export async function startTikTokInboxTransfer(
       throw new TikTokUncertain(data.publish_id);
     // Record publish_id BEFORE uploading bytes for subsequent status reconciliation.
     const saved=await env.DB.prepare(
-      "UPDATE tiktok_inbox_transfers SET publish_id=?,updated_at=? WHERE post_id=? AND status='transferring' AND publish_id IS NULL"
-    ).bind(data.publish_id,new Date().toISOString(),postId).run();
+      "UPDATE tiktok_inbox_transfers SET publish_id=?,updated_at=? WHERE post_id=? AND created_at=? AND status='transferring' AND publish_id IS NULL"
+    ).bind(data.publish_id,new Date().toISOString(),postId,now).run();
     if(saved.meta.changes!==1)throw new Error("Upload state changed before transfer.");
     stage="transfer";
     const result=await fetch(data.upload_url,{
@@ -264,11 +284,21 @@ export async function refreshTikTokInboxTransfer(env:Env,id:string,actor:string)
   const status:TikTokInboxStatus=remote==="SEND_TO_USER_INBOX"?"inbox_ready":
     remote==="PUBLISH_COMPLETE"?"published_by_creator":
     remote==="FAILED"?"failed":"processing";
-  // No retry or publish side effect. Record only status.
-  await env.DB.prepare(
-    "UPDATE tiktok_inbox_transfers SET status=?,remote_status=?,error=?,updated_at=? WHERE post_id=? AND publish_id=?"
-  ).bind(status,remote,remote==="FAILED"?"TikTok reported the video could not be processed.":null,
-    new Date().toISOString(),id,row.publish_id).run();
-  await audit(env.DB,actor,"tiktok-inbox-status-checked",id,remote).catch(()=>undefined);
+  // Do not regress a final result to processing when status checks overlap.
+  const failure = remote === "FAILED" ? safeTikTokCode(data.fail_reason) : null;
+  const checked = env.DB.prepare(`UPDATE tiktok_inbox_transfers SET status=?,remote_status=?,error=?,failure_code=?,updated_at=?
+    WHERE post_id=? AND publish_id=? AND status NOT IN ('published_by_creator','failed')`)
+    .bind(status,remote,failure ? "TikTok reported the transfer failed (" + failure + ")." : null,
+      failure,new Date().toISOString(),id,row.publish_id);
+  if (failure) {
+    await ensureTikTokMediaSchema(env.DB);
+    await env.DB.batch([checked, env.DB.prepare(`DELETE FROM tiktok_media_grants WHERE post_id=?
+      AND EXISTS (SELECT 1 FROM tiktok_inbox_transfers WHERE post_id=? AND publish_id=? AND status='failed')`)
+      .bind(id,id,row.publish_id)]);
+  } else {
+    await checked.run();
+  }
+  await audit(env.DB,actor,"tiktok-inbox-status-checked",id,
+    remote + (failure && safePublishId(row.publish_id) ? " (" + row.publish_id + ")" : "")).catch(()=>undefined);
   return (await getTikTokInboxTransfer(env.DB,id))!;
 }

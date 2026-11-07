@@ -77,7 +77,7 @@ export function renderXCard(p: Post, csrf: string, tz: string): string {
   const opened = !!p.x_opened_at;
   const status = opened ? `Opened ${esc(formatLocal(new Date(p.x_opened_at!), tz))}. This records the click, not that it was posted.` : "";
   return `<section class="step-card" aria-label="X" data-x-share data-post="${esc(p.id)}" data-csrf="${esc(csrf)}" data-link="${esc(p.link ?? "")}"${opened ? " data-x-opened" : ""}${x.empty && !opened ? " hidden" : ""}>
-    <div class="eyebrow">X · Manual posting</div>
+    <div class="eyebrow">X | Manual posting</div>
     ${opened ? `<p data-x-spent><button type="button" disabled>Opened in X</button></p>` : ""}
     <p data-x-link${x.empty ? " hidden" : ""}><a class="btn" href="${esc(x.href)}" target="_blank" rel="noopener noreferrer" data-x-open>${opened ? "Reopen in X" : "Open in X"}</a></p>
     <p class="hint" data-x-status${opened ? "" : " hidden"}>${status}</p>

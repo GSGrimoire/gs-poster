@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {build} from "esbuild";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {createPost,ensureSchema,getPost} from "../src/db.ts";
+import {markTikTokCreatorPublished} from "../src/history.ts";
 import {ensureFacebookQueue} from "../src/facebook-queue.ts";
 import {ensureTikTokSchema,sealTikTokTokens} from "../src/tiktok.ts";
 import {ensureTikTokInboxSchema} from "../src/tiktok-inbox.ts";
@@ -23,6 +24,8 @@ let mf:Miniflare,db:D1Database,r2:R2Bucket;
 const outbound:{method:string;url:string}[]=[];
 let tiktokMode:"ok"|"reject"|"network"="ok";
 let seq=0;
+let remoteTikTokStatus = "PUBLISH_COMPLETE";
+let holdTikTokRenewal: (() => Promise<void>) | undefined;
 
 before(async()=>{
   const out=await build({entryPoints:["test/fixtures/web-entry.ts"],bundle:true,format:"esm",
@@ -39,6 +42,13 @@ before(async()=>{
         const publish_id="v_pub_test_"+(++seq);
         return Response.json({data:u.pathname.includes("/inbox/video/")
           ?{publish_id,upload_url:"https://open-upload.tiktokapis.com/video/?upload_id=1&upload_token=test"}:{publish_id},error:{code:"ok"}});
+      }
+      if(u.hostname==="open.tiktokapis.com"&&u.pathname.endsWith("/status/fetch/"))
+        return Response.json({data:{status:remoteTikTokStatus,fail_reason:"picture_size_check_failed"},error:{code:"ok"}});
+      if(u.hostname==="open.tiktokapis.com"&&u.pathname.endsWith("/oauth/token/")){
+        await holdTikTokRenewal?.();
+        return Response.json({access_token:"fake-renewed-access",refresh_token:"fake-refresh",open_id:"creator",
+          scope:"user.info.basic,video.upload",expires_in:3600,refresh_expires_in:200000,token_type:"Bearer"});
       }
       if(u.hostname==="open-upload.tiktokapis.com"&&req.method==="PUT")return new Response(null,{status:201});
       return new Response("blocked in test",{status:599});
@@ -94,7 +104,7 @@ const transfer=(id:string)=>db.prepare("SELECT status,publish_id,media_type FROM
   .first<{status:string;publish_id:string|null;media_type:string}>();
 const tiktokCalls=()=>outbound.filter(r=>r.url.includes("tiktokapis.com"));
 const facebookCalls=()=>outbound.filter(r=>r.url.includes("facebook.com"));
-const reset=async()=>{outbound.length=0;tiktokMode="ok";await db.prepare("DELETE FROM pin_failures").run();};
+const reset=async()=>{outbound.length=0;tiktokMode="ok";remoteTikTokStatus="PUBLISH_COMPLETE";holdTikTokRenewal=undefined;await db.prepare("DELETE FROM pin_failures").run();};
 
 test("the editor's release form carries TikTok inline, with the send-now warning, and no options link",async()=>{
   await reset();await connectTikTok();
@@ -166,12 +176,16 @@ test("TikTok only: one PIN sends exactly one inbox transfer and publishes nothin
   const t=await transfer(p.id);
   assert.equal(t?.status,"processing");
   assert.equal(t?.media_type,"PHOTO");
-  assert.equal((await getPost(db,p.id))!.status,"draft","no Facebook or Bluesky target, so the post itself is not released");
+  const approved=(await getPost(db,p.id))!;
+  assert.equal(approved.status,"scheduled","a PIN-approved TikTok-only transfer moves out of Drafts");
+  assert.ok(approved.approved_at,"approval is recorded, even though TikTok publication remains manual");
+  assert.equal(approved.scheduled_at,null,"TikTok inbox is not a provider schedule");
+  assert.match(await page(p.id),/TikTok Inbox/);
   // A second click (same form) cannot send again.
   outbound.length=0;
   const again=await approve(p);
-  assert.equal(again.status,400);
-  assert.match(await again.text(),/Already sent to TikTok/);
+  assert.equal(again.status,409);
+  assert.match(await again.text(),/Only drafts can be approved/);
   assert.equal(tiktokCalls().length,0);
 });
 
@@ -184,6 +198,7 @@ test("TikTok video: the private MP4 goes to the inbox once",async()=>{
   assert.deepEqual(tiktokCalls().map(c=>c.method+" "+new URL(c.url).pathname),
     ["POST /v2/post/publish/inbox/video/init/","PUT /video/"]);
   assert.equal((await transfer(p.id))?.status,"transfer_complete");
+  assert.equal((await getPost(db,p.id))!.status,"scheduled");
 });
 
 test("Facebook scheduled + TikTok: TikTok now, Facebook queued, both reported, no Graph call",async()=>{
@@ -223,9 +238,10 @@ test("TikTok outcome unclear: recorded for review, and a later approval cannot r
   const r=await approve(p);
   assert.equal(r.status,502);
   assert.equal((await transfer(p.id))?.status,"needs_review");
+  assert.equal((await getPost(db,p.id))!.status,"scheduled","uncertain transfer remains in History for human reconciliation");
   tiktokMode="ok";outbound.length=0;
   const again=await approve(p);
-  assert.equal(again.status,400);
+  assert.equal(again.status,409);
   assert.equal(tiktokCalls().length,0);
 });
 
@@ -276,4 +292,121 @@ test("unticking TikTok releases Facebook alone and sends nothing to TikTok",asyn
   assert.equal(tiktokCalls().length,0);
   assert.equal(await transfer(p.id),null);
   assert.equal((await getPost(db,p.id))!.status,"publishing");
+});
+
+const legacySend = (p: {id:string;updated_at:string}, video = false) =>
+  send("/post/"+p.id+(video ? "/tiktok-upload" : "/tiktok-send"),{
+    expected_updated_at:p.updated_at,post_mode:"MEDIA_UPLOAD",media_type:"PHOTO",
+    tiktok_caption:MSG,tiktok_title:"Public goblin gallery",confirm_tiktok:"1",pin:PIN,
+  });
+const checkTikTokStatus = (p: {id:string}) => send("/post/"+p.id+"/tiktok-status",{pin:PIN});
+
+test("standalone legacy TikTok transfer leaves Drafts and requires provider confirmation to publish",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft({scheduledH:3});
+  const sent=await legacySend(p);
+  assert.equal(sent.status,200);
+  assert.match(await sent.text(),/TikTok Inbox/);
+  assert.equal((await getPost(db,p.id))!.scheduled_at,null);
+  assert.equal(await markTikTokCreatorPublished(db,p.id),false);
+  const checked=await checkTikTokStatus(p);
+  assert.equal(checked.status,200);
+  assert.match(await checked.text(),/Published by creator on TikTok/);
+  assert.equal((await getPost(db,p.id))!.status,"published");
+});
+
+test("separate TikTok photo and video transfers preserve every unapproved sibling and its schedule",async()=>{
+  await reset();await connectTikTok();
+  for(const sibling of ["facebook","bluesky","instagram"] as const){
+    for(const video of [false,true]){
+      const p=await ttDraft({facebook:sibling==="facebook",scheduledH:3,video});
+      if(sibling==="bluesky") await db.prepare(
+        "INSERT INTO bluesky_targets (post_id,caption) VALUES (?,?)").bind(p.id,MSG).run();
+      if(sibling==="instagram") await db.prepare(
+        "INSERT INTO instagram_targets (post_id,caption,frame) VALUES (?,?,'4:5')").bind(p.id,MSG).run();
+      const before=await getPost(db,p.id);
+      const sent=await legacySend(p,video);
+      assert.equal(sent.status,200,sibling);
+      assert.doesNotMatch(await sent.text(),/s-scheduled">TikTok Inbox/);
+      assert.ok((await transfer(p.id))?.publish_id);
+      assert.equal((await checkTikTokStatus(p)).status,200);
+      assert.equal((await transfer(p.id))?.status,"published_by_creator");
+      assert.deepEqual(await getPost(db,p.id),before,sibling+" keeps its draft and selected targets");
+    }
+  }
+  assert.equal(facebookCalls().length,0);
+});
+
+test("an uncertain separate TikTok transfer preserves a mixed draft and blocks a second transfer",async()=>{
+  await reset();await connectTikTok();tiktokMode="network";
+  for(const video of [false,true]){
+    const p=await ttDraft({facebook:true,scheduledH:3,video});
+    const first=await legacySend(p,video);
+    assert.equal(first.status,409);
+    assert.equal((await transfer(p.id))?.status,"needs_review");
+    assert.deepEqual(await getPost(db,p.id),p);
+    const calls=tiktokCalls().length;
+    assert.equal((await legacySend(p,video)).status,409);
+    assert.equal(tiktokCalls().length,calls);
+  }
+});
+
+test("choosing only TikTok on the inline approval leaves other enabled targets awaiting approval",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft({facebook:true,scheduledH:3});
+  assert.equal((await approve(p)).status,200);
+  assert.equal((await transfer(p.id))?.status,"processing");
+  assert.deepEqual(await getPost(db,p.id),p);
+  const later=await approve(p,{target_facebook:"1",target_tiktok:"0"});
+  assert.equal(later.status,200);
+  assert.equal((await getPost(db,p.id))!.status,"publishing");
+  assert.equal(tiktokCalls().length,1);
+});
+
+test("a terminal TikTok failure can return to drafts and an edited retry needs fresh approval",async()=>{
+  await reset();await connectTikTok();remoteTikTokStatus="FAILED";
+  const p=await ttDraft();
+  assert.equal((await approve(p)).status,200);
+  const originalTransfer=await transfer(p.id);
+  assert.equal((await checkTikTokStatus(p)).status,200);
+  assert.equal((await transfer(p.id))?.status,"failed");
+  const scheduled=(await getPost(db,p.id))!;
+  assert.match(await page(p.id),/Move TikTok post back to drafts/);
+  const recover=(version:string,pin=PIN)=>send("/post/"+p.id+"/tiktok-redraft",{expected_updated_at:version,pin});
+  assert.equal((await recover(scheduled.updated_at,"000000")).status,403);
+  assert.equal((await recover(p.updated_at)).status,409);
+  assert.equal((await recover(scheduled.updated_at)).status,200);
+  const draft=(await getPost(db,p.id))!;
+  assert.equal(draft.status,"draft");
+  assert.equal(draft.approved_at,null);
+  assert.equal((await transfer(p.id))?.publish_id,originalTransfer?.publish_id);
+  assert.equal((await send("/post/"+p.id+"/save",{expected_updated_at:draft.updated_at,p_tiktok:"1",
+    tiktok_title:"Corrected goblin gallery",message:MSG+" Edited."})).status,200);
+  const edited=(await getPost(db,p.id))!;
+  assert.equal((await approve(edited,{pin:"000000"})).status,403);
+  assert.equal(tiktokCalls().filter(call=>call.url.endsWith("/init/")).length,1);
+  assert.equal((await approve(edited)).status,200);
+  assert.notEqual((await transfer(p.id))?.publish_id,originalTransfer?.publish_id);
+  assert.equal(tiktokCalls().filter(call=>call.url.endsWith("/init/")).length,2);
+});
+
+test("a draft save during TikTok preflight prevents the stale transfer and cannot approve the new draft",async()=>{
+  await reset();await connectTikTok();
+  await db.prepare("UPDATE tiktok_accounts SET access_expires_at=0").run();
+  let arrived!: () => void, release!: () => void;
+  const reached=new Promise<void>(resolve=>{arrived=resolve;});
+  const pause=new Promise<void>(resolve=>{release=resolve;});
+  holdTikTokRenewal=async()=>{arrived();await pause;};
+  const p=await ttDraft();
+  const sending=legacySend(p);
+  try {
+    await reached;
+    assert.equal((await send("/post/"+p.id+"/save",{expected_updated_at:p.updated_at,p_tiktok:"1",
+      tiktok_title:"Edited title",message:MSG+" Edited."})).status,200);
+  } finally { release(); }
+  assert.equal((await sending).status,409);
+  assert.equal(tiktokCalls().filter(call=>call.url.endsWith("/init/")).length,0);
+  assert.equal(await transfer(p.id),null);
+  assert.equal((await getPost(db,p.id))!.status,"draft");
+  assert.match(await page(p.id),/Edited title/);
 });

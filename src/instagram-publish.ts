@@ -465,7 +465,7 @@ export function instagramJobCard(job: InstagramJob | null, postId: string, csrf:
       <button type="submit">${esc(button)}</button></form>`;
   const kind = job.kind === "REELS" ? "Reel" : job.kind === "CAROUSEL" ? job.items.length + "-photo carousel" : "photo";
   const lines = [
-    `<p><strong>${esc(LABEL[job.status])}</strong> · ${esc(kind)}${job.status === "scheduled" ? " · " + esc(when(job.due_at)) : ""}</p>`,
+    `<p><strong>${esc(LABEL[job.status])}</strong> | ${esc(kind)}${job.status === "scheduled" ? " | " + esc(when(job.due_at)) : ""}</p>`,
     job.permalink ? `<p><a href="${esc(job.permalink)}" target="_blank" rel="noopener noreferrer">Open on Instagram</a></p>` : "",
     job.error ? `<p class="err">${esc(job.error)}</p>` : "",
     instagramPending(job) ? `<p class="hint">This approved Instagram post is frozen. Editing the draft does not change it, and its time and the Instagram switch are locked. To change it, cancel it with your PIN and approve again.</p>` : "",

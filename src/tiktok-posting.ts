@@ -6,7 +6,7 @@ import type {Env} from "./env.ts";
 import {getPost,audit,tiktokMedia} from "./db.ts";
 import {tiktokAccessToken,getTikTokCreatorOptions} from "./tiktok.ts";
 import {createTikTokMediaGrant,ensureTikTokMediaSchema} from "./tiktok-media.ts";
-import {classifyTikTokInit,ensureTikTokInboxSchema,getTikTokInboxTransfer,markTikTokRejected,markTikTokUncertain,TikTokRejected,TikTokUncertain,TIKTOK_CLAIM_CONFLICT,type TikTokInboxTransfer} from "./tiktok-inbox.ts";
+import {classifyTikTokInit,ensureTikTokInboxSchema,getTikTokInboxTransfer,markTikTokRejected,markTikTokUncertain,TikTokRejected,TikTokUncertain,claimTikTokTransfer,type TikTokInboxTransfer} from "./tiktok-inbox.ts";
 import {parseUploadRef} from "./upload.ts";
 
 export type TikTokPostMode="MEDIA_UPLOAD"|"DIRECT_POST";
@@ -117,14 +117,7 @@ export async function startTikTokContentTransfer(
   await ensureTikTokMediaSchema(env.DB);
   // Atomic and irreversible claim BEFORE creating public share links or
   // calling TikTok prevents concurrent duplicate publishes.
-  const when=new Date().toISOString();
-  const inserted=await env.DB.prepare(
-    "INSERT INTO tiktok_inbox_transfers "+
-    "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by,error,remote_status,post_mode,media_type) "+
-    "VALUES (?,'transferring',NULL,?,?,?,?,NULL,NULL,?,?)"+TIKTOK_CLAIM_CONFLICT
-  ).bind(postId,JSON.stringify(refs),when,when,actor,options.mode,options.mediaType).run();
-  if(inserted.meta.changes!==1)
-    throw Error("A TikTok transfer already exists for this post; check its status before retrying.");
+  const when = await claimTikTokTransfer(env.DB, postId, expectedVersion, JSON.stringify(refs), actor, options.mode, options.mediaType);
   try {
     const urls:string[]=[];
     for(const ref of refs)urls.push(await createTikTokMediaGrant(env,postId,ref,
@@ -132,8 +125,8 @@ export async function startTikTokContentTransfer(
     const publishId=await contentInit(env,options,urls);
     await env.DB.prepare(
       "UPDATE tiktok_inbox_transfers SET publish_id=?,status='processing',updated_at=? "+
-      "WHERE post_id=? AND status='transferring' AND publish_id IS NULL"
-    ).bind(publishId,new Date().toISOString(),postId).run();
+      "WHERE post_id=? AND created_at=? AND status='transferring' AND publish_id IS NULL"
+    ).bind(publishId,new Date().toISOString(),postId,when).run();
     await audit(env.DB,actor,
       options.mode==="DIRECT_POST"?"tiktok-direct-post-started":"tiktok-carousel-upload-started",
       postId,options.mode+" "+options.mediaType+"; processing by TikTok").catch(()=>undefined);

@@ -112,20 +112,50 @@ label:has(> input[type="checkbox"]) input{margin:3px 0 0;flex-shrink:0;accent-co
 @media(max-width:830px){.workspace-grid{grid-template-columns:1fr}.workspace-rail{position:static}.app-nav a.nav-create{margin-left:0}}
 @media(max-width:600px){header{align-items:flex-start;flex-wrap:wrap}.app-nav{gap:4px}.app-nav a{padding:8px}.hero{padding:19px}.choice-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.row button,.row .btn{max-width:100%}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
+
+/* Compact, accessible, server-paginated post history. Native details work
+   without scripts, while the URL preserves the current search. */
+.history-section{margin:18px 0;border:1px solid var(--line);border-radius:14px;background:var(--panel);overflow:hidden}
+.history-section>summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:15px 18px;font:700 17px system-ui,sans-serif}
+.history-section>summary::-webkit-details-marker{display:none}
+.history-section>summary:before{content:"▸";font-size:16px;color:var(--accent2);margin-right:5px}
+.history-section[open]>summary:before{content:"▾"}
+.history-section>summary span:first-child{flex:1}
+.history-section[open]>summary{border-bottom:1px solid var(--line)}
+.history-count{font:650 13px system-ui,sans-serif;background:var(--surface2);border:1px solid var(--line);
+  padding:4px 10px;border-radius:99px;color:var(--text)}
+.history-section-body{padding:16px}
+.history-section-body>.card{margin-bottom:10px;box-shadow:none}
+.history-search{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:20px 0}
+.history-search label{flex-basis:100%;margin:0}
+.history-search input[type=search]{flex:1 1 280px;min-width:0;padding:12px;font:16px system-ui,sans-serif;border:1px solid var(--line);
+  color:var(--text);background:var(--panel);border-radius:9px}
+.history-search button{flex:0 0 auto}
+.pager{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:18px 0 2px;font:13px system-ui,sans-serif}
+.pager>span:first-child{color:var(--muted);margin-right:auto}
+.pager>a,.pager>strong,.page-disabled{border:1px solid var(--line);border-radius:8px;padding:7px 10px;text-decoration:none}
+.pager>strong{background:var(--accent);border-color:var(--accent);color:#fff}
+.page-disabled{opacity:.5}
+.activity-detail{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
+.sr-only{position:absolute;width:1px;height:1px;clip:rect(0,0,0,0);overflow:hidden;white-space:nowrap}
+@media(max-width:600px){.history-section>summary{padding:13px}.history-section-body{padding:10px}
+  .history-search button{flex:0 0 auto}.pager>span:first-child{flex-basis:100%}}
 `;
 
 export function page(title: string, body: string, opts: { login?: string; wide?: boolean; public?: boolean } = {}): string {
   const who = opts.login
-    ? `<span class="who">Signed in as ${esc(opts.login)} · <a href="/logout">sign out</a></span>`
+    ? `<span class="who">Signed in as ${esc(opts.login)} <a href="/logout">Sign out</a></span>`
     : "";
   const nav = opts.login ? `<nav class="app-nav" aria-label="Workspace navigation">
-    <a href="/" ${title === "GS Poster" ? 'aria-current="page"' : ""}>Planner</a>
+    <a href="/" ${title === "GS Poster" ? 'aria-current="page"' : ""}>Drafts</a>
+    <a href="/history" ${title === "History" ? 'aria-current="page"' : ""}>History</a>
     <a href="/tiktok/settings" ${title === "TikTok settings" ? 'aria-current="page"' : ""}>TikTok connection</a>
     <a href="/new" class="nav-create" ${title === "New draft" ? 'aria-current="page"' : ""}>+ New draft</a>
     </nav>` : "";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-${opts.public ? "" : '<meta name="robots" content="noindex,nofollow">'}<title>${esc(title)}</title><style>${CSS}</style></head>
+${opts.public ? "" : '<meta name="robots" content="noindex,nofollow">'}<title>${esc(title)}</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"><style>${CSS}</style></head>
 <body><div class="wrap${opts.wide ? " wide" : ""}"><header><h1><a href="${opts.public ? "/about" : "/"}">GS Poster</a></h1>${who}</header>${nav}<main id="main-content">${body}</main><footer style="border-top:1px solid var(--line);margin-top:28px;padding-top:12px;font:13px system-ui,sans-serif;display:flex;gap:16px;flex-wrap:wrap"><a href="/about">About</a><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a></footer></div></body></html>`;
 }
 
