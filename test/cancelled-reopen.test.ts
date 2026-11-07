@@ -2,7 +2,7 @@ import {before,after,test} from "node:test";
 import assert from "node:assert/strict";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {attachDraftVideo,claimForPublish,createPost,getPost,reopenCancelledDraft,setBlueskyStatus,updatePost} from "../src/db.ts";
-import {restoreCancelledPost} from "../src/publish.ts";
+import {cancelScheduled,restoreCancelledPost} from "../src/publish.ts";
 import {draftMediaPanel} from "../src/draft-media.ts";
 import type {Env} from "../src/env.ts";
 
@@ -141,4 +141,52 @@ test("replacing one platform preserves the other platform's video until selected
   const saved=(await getPost(db,p.id))!;
   assert.equal(saved.video,oldVideo);
   assert.equal(saved.bluesky?.video?.url,newVideo);
+});
+
+
+test("issue #85 sibling: cancelled Facebook recovery also preserves unresolved Instagram approval",async()=>{
+  for(const status of ["scheduled","preparing","processing","sending","failed"]){
+    for(const ambiguous of status==="failed" ? [0,1] : [0]){
+      const p=await cancelled();
+      const stamped=new Date().toISOString();
+      await db.prepare(`INSERT INTO instagram_jobs
+        (post_id,status,kind,due_at,caption,frame,items,created_by,updated_at,ambiguous)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .bind(p.id,status,"IMAGE",p.scheduled_at,"Frozen Instagram","4:5","[]","test",stamped,ambiguous).run();
+      assert.equal(await reopenCancelledDraft(db,p.id,p.updated_at),false,
+        status+" ambiguous="+ambiguous);
+      const after=(await getPost(db,p.id))!;
+      assert.equal(after.status,"cancelled");
+      assert.equal(after.approved_at,p.approved_at);
+      assert.equal(after.updated_at,p.updated_at);
+      const row=await db.prepare("SELECT status,ambiguous FROM instagram_jobs WHERE post_id=?")
+        .bind(p.id).first<{status:string;ambiguous:number}>();
+      assert.equal(row?.status,status);
+      assert.equal(row?.ambiguous,ambiguous);
+    }
+  }
+});
+
+test("issue #85 sibling: scheduled Facebook cancellation fails closed if Instagram has already started",async()=>{
+  for(const status of ["preparing","processing","sending","failed"]){
+    const p=await cancelled(false);
+    assert.equal(await updatePost(db,p.id,{status:"scheduled"},["cancelled"]),true);
+    const stamped=new Date().toISOString();
+    await db.prepare(`INSERT INTO instagram_jobs
+      (post_id,status,kind,due_at,caption,frame,items,created_by,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`)
+      .bind(p.id,status,"IMAGE",p.scheduled_at,"Frozen Instagram","4:5","[]","test",stamped).run();
+    const old=globalThis.fetch;
+    let calls=0;
+    globalThis.fetch=async()=>{calls++;throw new Error("Unexpected external Facebook call");};
+    try {
+      await assert.rejects(cancelScheduled(env,p.id,"test"),/Instagram has started publishing or has an unresolved result/);
+      assert.equal(calls,0,"Facebook must not be touched on partial cancellation");
+      const after=(await getPost(db,p.id))!;
+      assert.equal(after.status,"scheduled");
+      assert.ok(after.approved_at);
+      const job=await db.prepare("SELECT status FROM instagram_jobs WHERE post_id=?").bind(p.id).first<{status:string}>();
+      assert.equal(job?.status,status);
+    } finally { globalThis.fetch=old; }
+  }
 });

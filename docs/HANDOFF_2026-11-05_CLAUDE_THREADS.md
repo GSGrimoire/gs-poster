@@ -11,7 +11,7 @@
 - **Callback** (`/threads/callback`) needs the signed-in session. It refuses while the PIN is unset or locked, and consumes the state once. It exchanges the code (dropping Threads' trailing `#_`), then gets the 60-day token, then reads `/me`. Only one account is allowed; a different one is refused.
   - The token is stored only AES-GCM-encrypted. The key comes from HKDF over `COOKIE_SECRET`, with its own context string and additional authenticated data. Rotating `COOKIE_SECRET` means reconnecting Threads.
 - **Renewal:** cron renews the token under a lease once it is a day old and has less than 14 days left.
-- **Meta callbacks:** `POST /threads/deauthorize` and `/threads/delete` verify `signed_request` (HMAC-SHA256 with the app secret). They only remove the stored connection. Delete returns the `{url, confirmation_code}` that Meta requires.
+- **Meta callbacks:** `POST /threads/deauthorize` and `/threads/delete` verify `signed_request` (HMAC-SHA256 with the app secret). They only remove the stored connection. Delete returns the `{url, confirmation_code}` that Meta requires. A callback can revoke a connection only when its signed timestamp is strictly more than 300 seconds after that authorization. A callback during the ambiguous clock-skew window is acknowledged and leaves the token intact. The owner can disconnect in settings if revocation is needed during that window.
 - **Editor:** a Threads chip and card. The text is up to 500 characters. Photos are text only, the Instagram card's framed photos, or the Facebook photos (up to 20). It is saved in the same fenced transaction as the rest of the draft. The MCP `update_draft` tool gains an optional `threads` field, still prepare-only.
 - **Approval:** a Threads checkbox and consent tick, offered only while connected. The plan checks the text length, the house rules and the photo count, and refuses an Instagram Reel. Approval freezes the text and the exact photos (with Instagram crop or pad settings) into `threads_jobs`. Nothing is sent during approval.
 - **Cron publishing** (`processThreadsBatch`) is the same state machine as Instagram:
@@ -22,9 +22,9 @@
   - the one-way `sending` barrier;
   - `threads_publish` once.
   - An unclear result is never resent. A deleted draft cancels its unsent job. A disconnected account fails before anything is sent.
-- **Media:** `/threads/media/<token>.jpg` is public by design. Tokens are hashed, expire after six hours and only work while the job is active. Instagram-sourced photos are rendered with `renderInstagram`; Facebook photos are re-encoded as JPEG at up to 1440 px.
+- **Media:** `/threads/media/<token>.jpg` is public by design. Tokens are hashed, expire after six hours, and match only the active frozen job generation that issued them. Instagram-sourced photos are rendered with `renderInstagram`; Facebook photos are re-encoded as JPEG at up to 1440 px.
 - **PIN-gated controls:** cancel, retry before the barrier, and close an unclear result, which also needs "I checked the GS Grimoire Threads profile".
-- **Lifecycle:** the calendar move, cancelling a scheduled post and Facebook removal all move or stop a waiting Threads job.
+- **Lifecycle:** PIN-approved calendar moves and cancellation can move or stop a waiting Threads job. Background reconciliation of a missing Facebook post leaves Threads alone.
 - **Check:** `check_setup` reports `threads: { ok, username, expires_at | error }`.
 
 ## Tests
@@ -107,7 +107,7 @@ A cancelled or published job unlocks the draft. Tested in `test/threads.test.ts`
 
 ## Review round 3 (ChatGPT-2, head `71e4ca6`): T4, T5 and the send-barrier fence
 
-- **T4, signed callback replay:** `threads_accounts` gains `connected_at`. It's set when the owner signs in and left alone by renewal. A `signed_request` without `issued_at`, more than a day old or more than five minutes in the future is refused with 400. A valid one removes the connection only if it was issued no earlier than that connection (with five minutes of clock allowance), and the delete is fenced on that exact `connected_at`. An event for an earlier connection gets a 200 and changes nothing, so a delayed legitimate event is answered without revoking a newer sign-in.
+- **T4, signed callback replay:** `connected_at` is written with the account row and preserved by renewal. Callback deletion compares the signed issue time with the currently stored authorization in the same database statement. An event within the five-minute clock allowance of a newer sign-in cannot revoke that sign-in. That ambiguous callback is acknowledged without removing the token, even if the event was for the current sign-in.
 - **T5, body size:** the callbacks no longer call `formData()`. `readBounded` reads at most 8 KB from the stream whatever `Content-Length` says, cancels the rest, and the body is parsed as Meta's form encoding. A declared oversize body is refused before reading. Empty, malformed and multipart bodies have no valid `signed_request`, so they get 400.
 - **Disconnect during a run:** the irreversible `sending` transition now requires, in the same `UPDATE`, that the job's approved account is still the connected one. If the account was disconnected or switched since the run read its sign-in, the job fails before sending (not unclear). Remaining window: between that barrier commit and the `threads_publish` request itself, a disconnect doesn't stop the request. It still goes only to the approved account with that account's token, and the existing unclear-result handling applies.
 - **Tests:** stale, future and timeless callbacks refused; a replay from before a reconnect leaves the new sign-in; a fresh event still revokes; renewal keeps `connected_at`; an endless streamed body with no declared size is stopped after about 8 KB without revoking anything; declared oversize and malformed bodies are refused through the router; a disconnect while a run waits on the status check stops the job at the barrier.

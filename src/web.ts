@@ -19,7 +19,7 @@ import { serveTikTokMedia } from "./tiktok-media.ts";
 import { THREADS_CONNECT_JS, threadsCallback, threadsSettings, threadsSettingsAction } from "./threads-web.ts";
 import { threadsAccountCallback } from "./threads.ts";
 import { cancelThreadsJob, closeAmbiguousThreadsJob, getThreadsJob, queueThreadsOnApproval, retryThreadsJob,
-  serveThreadsMedia, threadsFreezeProblem, threadsItems, threadsJobCard, threadsPending, threadsReleasePlan } from "./threads-publish.ts";
+  serveThreadsMedia, threadsFreezeProblem, threadsItems, threadsJobCard, threadsPhotoDigest, threadsPending, threadsReleasePlan } from "./threads-publish.ts";
 import { cancelInstagramJob, closeAmbiguousInstagramJob, getInstagramJob, instagramFreezeProblem, instagramJobCard, instagramPending, instagramReleasePlan,
   queueInstagramOnApproval, retryInstagramJob, serveInstagramMedia } from "./instagram-publish.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
@@ -936,7 +936,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     }
     const restored = await backToDraft(env, id, session.login, true, version);
     return restored ? redirect(`/post/${id}`) :
-      postPage(env, session, id, { error: "Cannot move this back to drafts: it changed since you opened it, has a Facebook result, or has an active or published Bluesky post. Reload and check." }, 409);
+      postPage(env, session, id, { error: instagramPending(await getInstagramJob(env.DB, id))
+        ? "This post still has a PIN-approved Instagram job. Check the Instagram card and stop or reconcile that job with your PIN before moving the Facebook failure back to drafts. Nothing has been cancelled automatically."
+        : "Cannot move this back to drafts: it changed since you opened it, has a Facebook result, or has an active or published Bluesky post. Reload and check." }, 409);
   }
   if (!env.APPROVE_PIN) return postPage(env, session, id, { error: "APPROVE_PIN is not set, so nothing can be approved yet." }, 503);
   if (await pinLocked(env.DB)) return postPage(env, session, id, { error: "Too many wrong PINs. Approvals are locked for up to an hour." }, 429);
@@ -1041,7 +1043,9 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       const restored=await restoreCancelledPost(env,id,version,session.login);
       return restored
         ? redirect("/post/"+id)
-        : postPage(env,session,id,{error:"The post changed, or it still has an active publishing target. Reload before trying again."},409);
+        : postPage(env,session,id,{error:instagramPending(await getInstagramJob(env.DB,id))
+          ? "Instagram still has an approved job for this post. Reconcile or cancel it with your PIN from the Instagram card before restoring the cancelled Facebook post. Nothing was changed."
+          : "The post changed, or it still has an active publishing target. Reload before trying again."},409);
     }
     if (action === "resume-facebook") {
       const resumed = await resumeFailedFacebookUploads(env, id, session.login);
@@ -1143,9 +1147,12 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         return postPage(env, session, id, { error: "Confirm that this Instagram post may be published automatically." }, 400);
     }
     const threadsSelected = !!current.threads && form.get("target_threads") === "1";
+    const expectedThreadsAccount = String(form.get("expected_threads_account") ?? "");
     if (threadsSelected) {
       const thPlan = await threadsReleasePlan(env, current, await getThreadsJob(env.DB, id));
       if (!thPlan.ok) return postPage(env, session, id, { error: "Threads: " + thPlan.reason }, 400);
+      if (thPlan.accountId !== expectedThreadsAccount)
+        return postPage(env, session, id, { error: "The Threads account changed. Reload and review the connected account before approving." }, 409);
       if (form.get("confirm_threads") !== "1")
         return postPage(env, session, id, { error: "Confirm that this Threads post may be published automatically." }, 400);
     }
@@ -1197,9 +1204,13 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
           (error instanceof Error ? error.message : String(error)) }, 400);
       }
     }
+    const threadsPhotoDigests: string[] = [];
     if (threadsSelected) {
       try {
-        for (const item of threadsItems(current, current.threads!.media).items) await fetchImage(env, item.url);
+        for (const item of threadsItems(current, current.threads!.media).items) {
+          const image = await fetchImage(env, item.url);
+          threadsPhotoDigests.push(await threadsPhotoDigest(image.bytes));
+        }
       } catch (error) {
         return postPage(env, session, id, { error: "Threads photo could not be loaded: " +
           (error instanceof Error ? error.message : String(error)) }, 400);
@@ -1251,7 +1262,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     }
     if (threadsSelected) {
       try {
-        const job = await queueThreadsOnApproval(env, id, current.updated_at, when ?? new Date(), session.login);
+        const job = await queueThreadsOnApproval(env, id, current.updated_at, when ?? new Date(), session.login, expectedThreadsAccount, threadsPhotoDigests);
         outcomes.push({ ok: true, text: `Threads: approved, posts ${when ? "at " + formatLocal(new Date(job.due_at), env.TIMEZONE) : "within a few minutes"}. Its progress shows in the Threads card.` });
       } catch (error) {
         outcomes.push({ ok: false, text: "Threads: " + (error instanceof Error ? error.message : String(error)) });

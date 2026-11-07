@@ -4,6 +4,7 @@
 // No request leaves the test; every secret and PIN is a test value.
 import { before, after, test } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { createPost, ensureSchema, getPost } from "../src/db.ts";
@@ -14,6 +15,8 @@ import type { Env } from "../src/env.ts";
 
 const ORIGIN = "https://gs-poster.test";
 const SECRET = "threads-route-test-cookie-secret";
+const APP_SECRET = "test-only-threads-app-secret";
+const ACCOUNT_ID = "17841400000000077";
 const PIN = "864209"; // test-only value
 const signer = { COOKIE_SECRET: SECRET, ALLOWED_GITHUB_LOGINS: "gsgrimoire" } as Env;
 let mf: Miniflare, db: D1Database;
@@ -24,8 +27,21 @@ before(async () => {
     conditions: ["workerd", "worker", "browser"], mainFields: ["module", "main"], logLevel: "silent" });
   mf = new Miniflare(convertV4MiniflareOptions({ modules: true, cf: false, script: out.outputFiles[0].text,
     compatibilityDate: "2026-09-01", compatibilityFlags: ["nodejs_compat"], d1Databases: ["DB"],
+    outboundService: async (req: Request) => {
+      const url = new URL(req.url);
+      if (url.hostname === "graph.facebook.com" && url.pathname.endsWith("/failed-cancel-test-post") && req.method === "DELETE")
+        return Response.json({ error: { code: 1, message: "unconfirmed test delete" } }, { status: 503 });
+      if (url.hostname === "graph.facebook.com" && url.pathname.endsWith("/missing-test-post"))
+        return Response.json({ error: { code: 100, message: "missing test post" } }, { status: 404 });
+      assert.equal(url.hostname, "graph.threads.net");
+      if (url.pathname === "/oauth/access_token") return Response.json({ access_token: "test-short-token" });
+      if (url.pathname === "/access_token") return Response.json({ access_token: "test-long-token", expires_in: 60 * 86400 });
+      if (url.pathname === "/v1.0/me") return Response.json({ id: ACCOUNT_ID, username: "gsgrimoire" });
+      return new Response("Blocked in test", { status: 599 });
+    },
     bindings: { COOKIE_SECRET: SECRET, ALLOWED_GITHUB_LOGINS: "gsgrimoire", APPROVE_PIN: PIN, TIMEZONE: "Europe/Copenhagen",
-      THREADS_APP_ID: "123456789", THREADS_APP_SECRET: "test-only-threads-app-secret" } }));
+      THREADS_APP_ID: "123456789", THREADS_APP_SECRET: APP_SECRET,
+      FB_PAGE_ID: "12345", FB_PAGE_TOKEN: "test-only-facebook-token" } }));
   db = await mf.getD1Database("DB") as unknown as D1Database;
   await ensureSchema(db);
   await ensureThreadsSchema(db);
@@ -145,7 +161,16 @@ test("a signed-in approval with the PIN queues a Threads text post", async () =>
   const cur = (await getPost(db, p.id))!;
   const html = await (await get("/post/" + p.id)).text();
   assert.match(html, /name="target_threads" value="1" checked/);
-  const res = await post(`/post/${p.id}/approve`, { expected_updated_at: cur.updated_at, target_threads: "1", confirm_threads: "1", pin: PIN });
+  assert.match(html, new RegExp('name="expected_threads_account" value="' + ACCOUNT_ID + '"'));
+  const approve = (account: string) => post(`/post/${p.id}/approve`, {
+    expected_updated_at: cur.updated_at, target_threads: "1", confirm_threads: "1", pin: PIN,
+    expected_threads_account: account,
+  });
+  const changed = await approve("17841400000000099");
+  assert.equal(changed.status, 409);
+  assert.match(await changed.text(), /The Threads account changed/);
+  assert.equal(await getThreadsJob(db, p.id), null);
+  const res = await approve(ACCOUNT_ID);
   assert.equal(res.status, 200);
   assert.match(await res.text(), /Threads: approved, posts within a few minutes/);
   const job = (await getThreadsJob(db, p.id))!;
@@ -196,4 +221,106 @@ test("T5: Meta's public callbacks refuse a declared oversize body and malformed 
       headers: { "Content-Type": "multipart/form-data; boundary=boundary" } });
     assert.equal(res.status, 400, JSON.stringify(body));
   }
+});
+
+test("signed Threads callbacks cannot revoke a same-account reconnect within clock skew or the same second", async () => {
+  const account = () => db.prepare("SELECT connected_at, token_cipher FROM threads_accounts")
+    .first<{ connected_at: number; token_cipher: string }>();
+  const signedCallback = (path: string, issuedAt: number) => {
+    const payload = Buffer.from(JSON.stringify({
+      algorithm: "HMAC-SHA256", user_id: ACCOUNT_ID, issued_at: issuedAt,
+    })).toString("base64url");
+    const sig = createHmac("sha256", APP_SECRET).update(payload).digest("base64url");
+    return mf.dispatchFetch(ORIGIN + path, {
+      method: "POST", body: new URLSearchParams({ signed_request: sig + "." + payload }),
+    });
+  };
+  for (const path of ["/threads/deauthorize", "/threads/delete"]) {
+    assert.equal((await post("/threads/disconnect", { pin: PIN, confirm: "yes" })).status, 303);
+    assert.equal(await account(), null);
+    const s = await session();
+    const start = await mf.dispatchFetch(ORIGIN + "/threads/connect", {
+      method: "POST",
+      headers: { Origin: ORIGIN, "Content-Type": "application/x-www-form-urlencoded", Cookie: SESSION_COOKIE + "=" + s.raw },
+      body: new URLSearchParams({ csrf: s.csrf, pin: PIN }),
+    });
+    assert.equal(start.status, 200);
+    const stateCookie = start.headers.get("set-cookie")!.split(";")[0];
+    const state = stateCookie.split("=")[1];
+    const connected = await mf.dispatchFetch(ORIGIN + "/threads/callback?code=test-code&state=" + state, {
+      headers: { Cookie: SESSION_COOKIE + "=" + s.raw + "; " + stateCookie }, redirect: "manual",
+    });
+    assert.equal(connected.status, 303);
+    const current = (await account())!;
+    assert.ok(current.token_cipher);
+    // Simulate an earlier authorization's event, including the maximum
+    // positive provider clock skew at the instant before a reconnect.
+    for (const offset of [-600, -60, 0, 299, 300]) {
+      const res = await signedCallback(path, current.connected_at + offset);
+      assert.equal(res.status, 200, path + " offset " + offset);
+      assert.deepEqual(await account(), current, "old event leaves the newer authorization intact");
+    }
+
+    // Move the current authorization back in the fixture so a fresh signed
+    // event can be unambiguously newer without a five-minute test wait.
+    await db.prepare("UPDATE threads_accounts SET connected_at = connected_at - 301").run();
+    const valid = await signedCallback(path, current.connected_at);
+    assert.equal(valid.status, 200);
+    if (path.endsWith("/delete"))
+      assert.match((await valid.json() as { confirmation_code: string }).confirmation_code, /^[A-Za-z0-9_-]{16}$/);
+    assert.equal(await account(), null, "a current-generation callback removes the stored authorization");
+  }
+});
+
+test("Facebook recovery and cancellation preserve active Threads jobs", async () => {
+  for (const [status, action, jobStatus, fields] of [
+    ["failed", "redraft", "scheduled", { confirmed_no_facebook: "1" }],
+    ["cancelled", "restore-cancelled", "sending", { confirmed_cancelled: "1", pin: PIN }],
+    ["scheduled", "cancel", "sending", { pin: PIN }],
+  ] as const) {
+    const due = new Date(Date.now() + 3600_000).toISOString();
+    const p = await createPost(db, { message: "Cave.", label: "Cave", release: null, images: [], video: null,
+      created_by: "test", scheduled_at: due } as any);
+    await db.batch([
+      db.prepare("UPDATE posts SET status=?, approved_at=? WHERE id=?").bind(status, p.updated_at, p.id),
+      db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at, account_id)
+        VALUES (?, ?, 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?, ?)`).bind(p.id, jobStatus, due, p.updated_at, ACCOUNT_ID),
+    ]);
+    const before = await getPost(db, p.id);
+    const res = await post(`/post/${p.id}/${action}`, { ...fields, expected_updated_at: p.updated_at });
+    assert.equal(res.status, 409, action);
+    assert.deepEqual(await getPost(db, p.id), before, action + " preserves the post");
+    assert.equal((await getThreadsJob(db, p.id))!.status, jobStatus);
+    assert.equal((await getThreadsJob(db, p.id))!.due_at, due);
+  }
+});
+
+test("a planner read cannot cancel a Threads job when its Facebook sibling is missing", async () => {
+  const due = new Date(Date.now() - 3600_000).toISOString();
+  const p = await createPost(db, { message: "Cave.", label: "Cave", release: null, images: [], video: null,
+    created_by: "test", scheduled_at: due, facebook_enabled: true } as any);
+  await db.batch([
+    db.prepare("UPDATE posts SET status='scheduled', approved_at=?, fb_post_id='missing-test-post' WHERE id=?").bind(p.updated_at, p.id),
+    db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at, account_id)
+      VALUES (?, 'scheduled', 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?, ?)`).bind(p.id, due, p.updated_at, ACCOUNT_ID),
+  ]);
+  assert.equal((await get("/")).status, 200);
+  assert.equal((await getPost(db, p.id))!.status, "cancelled");
+  assert.equal((await getThreadsJob(db, p.id))!.status, "scheduled");
+});
+
+test("an unconfirmed Facebook cancellation cannot restart a stopped Threads job", async () => {
+  const due = new Date(Date.now() + 3600_000).toISOString();
+  const p = await createPost(db, { message: "Cave.", label: "Cave", release: null, images: [], video: null,
+    created_by: "test", scheduled_at: due, facebook_enabled: true } as any);
+  await db.batch([
+    db.prepare("UPDATE posts SET status='scheduled', approved_at=?, fb_post_id='failed-cancel-test-post' WHERE id=?").bind(p.updated_at, p.id),
+    db.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, items, created_by, updated_at, account_id)
+      VALUES (?, 'scheduled', 'TEXT', ?, 'Into the cave', '[]', 'gsgrimoire', ?, ?)`).bind(p.id, due, p.updated_at, ACCOUNT_ID),
+  ]);
+  const res = await post(`/post/${p.id}/cancel`, { pin: PIN });
+  assert.equal(res.status, 409);
+  assert.match(await res.text(), /Threads was stopped. Facebook cancellation could not be confirmed/);
+  assert.equal((await getPost(db, p.id))!.status, "scheduled");
+  assert.equal((await getThreadsJob(db, p.id))!.status, "cancelled");
 });

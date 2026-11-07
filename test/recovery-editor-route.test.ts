@@ -171,3 +171,65 @@ test("an active or published Bluesky target, or a Facebook id, still blocks redr
     assert.ok(after.approved_at);
   }
 });
+
+
+/** An approved Instagram job is independent of a Facebook failure, even when
+ * Facebook's record is restored to an ordinary draft. A redraft must not
+ * silently revoke the visible approval while that job can still publish. */
+test("issue #85: Facebook redraft is refused with every pending Instagram job state",async()=>{
+  for(const status of ["scheduled","preparing","processing","sending","failed"]){
+    for(const ambiguous of status==="failed" ? [0,1] : [0]){
+      const due=new Date(Date.now()+4*3600_000).toISOString();
+      const p=await createPost(db,{message:MSG,images:[],video:null,created_by:"test",
+        scheduled_at:due,facebook_enabled:true,tiktok_enabled:false,bluesky:null});
+      const approved=new Date().toISOString();
+      await db.prepare("UPDATE posts SET status='failed',approved_at=?,fb_post_id=NULL WHERE id=?")
+        .bind(approved,p.id).run();
+      await db.prepare(`INSERT INTO instagram_jobs
+        (post_id,status,kind,due_at,caption,frame,items,created_by,updated_at,ambiguous)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .bind(p.id,status,"IMAGE",due,"Approved Instagram photo","4:5","[]","GSGrimoire",approved,ambiguous).run();
+      const before=await now(p.id);
+      // This recovery deliberately does not supply a PIN, in accordance with
+      // the owner-approved no-send recovery rule.
+      const res=await post("/post/"+p.id+"/redraft",{
+        expected_updated_at:before.updated_at,confirmed_no_facebook:"1"});
+      assert.equal(res.status,409,status+" ambiguous="+ambiguous);
+      assert.match(await res.text(),/PIN-approved Instagram job/);
+      const after=await now(p.id);
+      assert.equal(after.status,"failed");
+      assert.equal(after.approved_at,approved,"approval has not been revoked");
+      assert.equal(after.scheduled_at,due,"schedule not silently cleared");
+      assert.equal(after.updated_at,before.updated_at,"version not advanced");
+      const job=await db.prepare("SELECT status,ambiguous,due_at FROM instagram_jobs WHERE post_id=?")
+        .bind(p.id).first<{status:string;ambiguous:number;due_at:string}>();
+      assert.equal(job?.status,status);
+      assert.equal(job?.ambiguous,ambiguous);
+      assert.equal(job?.due_at,due);
+    }
+  }
+});
+
+test("issue #85: once Instagram is cancelled, Facebook failure can be redrafted",async()=>{
+  const due=new Date(Date.now()+3600_000).toISOString();
+  const p=await createPost(db,{message:MSG,images:[],video:null,created_by:"test",
+    scheduled_at:due,facebook_enabled:true,tiktok_enabled:false,bluesky:null});
+  const approved=new Date().toISOString();
+  await db.prepare("UPDATE posts SET status='failed',approved_at=? WHERE id=?").bind(approved,p.id).run();
+  await db.prepare(`INSERT INTO instagram_jobs
+    (post_id,status,kind,due_at,caption,frame,items,created_by,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`)
+    .bind(p.id,"scheduled","IMAGE",due,"Frozen","4:5","[]","GSGrimoire",approved).run();
+  const before=await now(p.id);
+  assert.equal((await post("/post/"+p.id+"/redraft",{
+    expected_updated_at:before.updated_at,confirmed_no_facebook:"1"})).status,409);
+  // Simulate a separate authorized Instagram cancellation that completed first.
+  await db.prepare("UPDATE instagram_jobs SET status='cancelled' WHERE post_id=?").bind(p.id).run();
+  const res=await post("/post/"+p.id+"/redraft",{
+    expected_updated_at:before.updated_at,confirmed_no_facebook:"1"});
+  assert.equal(res.status,302);
+  const after=await now(p.id);
+  assert.equal(after.status,"draft");
+  assert.equal(after.approved_at,null);
+  assert.equal(after.scheduled_at,due,"future schedule survives ordinary recovery");
+});

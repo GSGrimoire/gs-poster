@@ -397,8 +397,18 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
   if (!post) throw new Error("Post not found.");
   const fbScheduled = post.status === "scheduled" && post.facebook_enabled && !!post.fb_post_id;
   const bsScheduled = post.bluesky?.status === "scheduled";
-  const igScheduled = (await getInstagramJob(env.DB, id))?.status === "scheduled";
-  const thScheduled = (await getThreadsJob(env.DB, id))?.status === "scheduled";
+  const instagramJob = await getInstagramJob(env.DB, id);
+  const igScheduled = instagramJob?.status === "scheduled";
+  // Never cancel Facebook and present the combined schedule as cancelled while
+  // a separate Instagram send is already active or needs reconciliation.
+  if (instagramJob && !["scheduled", "cancelled", "published"].includes(instagramJob.status)) {
+    throw new Error("Instagram has started publishing or has an unresolved result. Check the Instagram card and reconcile or cancel that job with your PIN first. No schedules were cancelled.");
+  }
+  const threadsJob = await getThreadsJob(env.DB, id);
+  const thScheduled = threadsJob?.status === "scheduled";
+  if (threadsJob && !["scheduled", "cancelled", "published"].includes(threadsJob.status)) {
+    throw new Error("Threads has started publishing or has an unresolved result. Reconcile or cancel it from the Threads card with your PIN first. No schedules were cancelled.");
+  }
   if (!fbScheduled && !bsScheduled && !igScheduled && !thScheduled) throw new Error("No scheduled target remains to cancel.");
 
   // Stop the Worker queue first, before any potentially slow Facebook API call.
@@ -424,7 +434,10 @@ export async function cancelScheduled(env: Env, id: string, actor: string): Prom
   } catch (e) {
     if (stoppedBluesky) await setBlueskyStatus(env.DB, id, { status: "scheduled" }, ["cancelled"]);
     if (stoppedInstagram) await env.DB.prepare("UPDATE instagram_jobs SET status = 'scheduled' WHERE post_id = ? AND status = 'cancelled'").bind(id).run();
-    if (stoppedThreads) await env.DB.prepare("UPDATE threads_jobs SET status = 'scheduled' WHERE post_id = ? AND status = 'cancelled'").bind(id).run();
+    if (stoppedThreads) {
+      await audit(env.DB, actor, "threads-cancelled", id, "combined cancellation; Facebook unconfirmed").catch(() => undefined);
+      throw new Error("Threads was stopped. Facebook cancellation could not be confirmed. Check the Facebook schedule before trying again.", { cause: e });
+    }
     throw e;
   }
   // A successful Facebook post or failed Facebook attempt keeps its own status
@@ -495,7 +508,6 @@ export async function refreshScheduled(env: Env): Promise<void> {
       if (!info) {
         if (p.bluesky?.status === "scheduled") await setBlueskyStatus(env.DB, p.id, { status: "cancelled" }, ["scheduled"]);
         await cancelScheduledInstagram(env.DB, p.id);
-        await cancelScheduledThreads(env.DB, p.id);
         await updatePost(env.DB, p.id, { status: "cancelled", note: "Removed on Facebook" }, ["scheduled"]);
       } else if (info.is_published) {
         await updatePost(env.DB, p.id, { status: "published", permalink: info.permalink_url ?? null }, ["scheduled"]);

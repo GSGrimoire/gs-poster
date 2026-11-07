@@ -142,15 +142,18 @@ export async function finishThreadsConnection(env: Env, session: Session, req: R
   const existing = await threadsConnection(env.DB);
   if (existing && existing.user_id !== me.id) throw new Error("Another Threads account is connected. Disconnect it first.");
   const now = unix();
-  await env.DB.prepare(`INSERT INTO threads_accounts (account_key, user_id, username, token_cipher, connected_by, expires_at, issued_at, updated_at, connected_at)
-      VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?)
+  const saved = await env.DB.prepare(`INSERT INTO threads_accounts (account_key, user_id, username, token_cipher, connected_by, expires_at, issued_at, updated_at, connected_at)
+      VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, unixepoch())
     ON CONFLICT(account_key) DO UPDATE SET username = excluded.username, token_cipher = excluded.token_cipher,
       connected_by = excluded.connected_by, expires_at = excluded.expires_at, issued_at = excluded.issued_at,
       updated_at = excluded.updated_at, connected_at = excluded.connected_at, lease_id = NULL, lease_until = NULL
     WHERE threads_accounts.user_id = excluded.user_id`)
     .bind(me.id, String(me.username ?? ""), await sealThreadsToken(env, long.access_token), session.login,
-      now + long.expires_in, now, new Date().toISOString(), now).run();
-  return (await threadsConnection(env.DB))!;
+      now + long.expires_in, now, new Date().toISOString()).run();
+  const connection = await threadsConnection(env.DB);
+  if (saved.meta.changes !== 1 || connection?.user_id !== me.id)
+    throw new Error("The Threads connection changed while signing in. Reload settings.");
+  return connection;
 }
 
 /** The decrypted token for one Graph call. Never returned to a page or tool. */
@@ -223,18 +226,19 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
   if (body === null) return new Response("Too large", { status: 413, headers });
   const data = await verifySignedRequest(env, new URLSearchParams(body).get("signed_request") ?? "");
   if (!data?.user_id) return new Response("Invalid signed request", { status: 400, headers });
-  // A signed request is only valid briefly. One older than a day, from the
-  // future, or without a time is refused, so a captured one cannot be replayed.
   const now = unix();
-  const issued = typeof data.issued_at === "number" ? data.issued_at : NaN;
-  if (!Number.isFinite(issued) || issued < now - CALLBACK_MAX_AGE || issued > now + CALLBACK_SKEW)
+  const issued = data.issued_at;
+  if (typeof issued !== "number" || !Number.isSafeInteger(issued) ||
+      issued < now - CALLBACK_MAX_AGE || issued > now + CALLBACK_SKEW)
     return new Response("Stale signed request", { status: 400, headers });
-  const conn = await threadsConnection(env.DB);
-  // It may only remove a connection that existed when it was issued: an event
-  // from before the owner (re)connected never revokes the newer sign-in.
-  if (conn && conn.user_id === String(data.user_id) && issued + CALLBACK_SKEW >= conn.connected_at)
-    await env.DB.prepare("DELETE FROM threads_accounts WHERE account_key = 'primary' AND user_id = ? AND connected_at = ?")
-      .bind(conn.user_id, conn.connected_at).run();
+  await ensureThreadsSchema(env.DB);
+  // The provider signs a user ID and second-resolution time, with no local
+  // connection identifier. Even with the provider clock ahead by the allowed
+  // skew, the event must be strictly newer than the current authorization.
+  // Match at deletion time so a reconnect during this request is also safe.
+  await env.DB.prepare(`DELETE FROM threads_accounts
+    WHERE account_key = 'primary' AND user_id = ? AND connected_at < ?`)
+    .bind(String(data.user_id), issued - CALLBACK_SKEW).run();
   if (kind === "deauthorize") return new Response("ok", { headers });
   // Meta expects a status URL and a confirmation code for data deletion.
   const code = (await sha256(String(data.user_id) + ":" + String(data.issued_at ?? ""))).slice(0, 16);

@@ -12,8 +12,8 @@ import {
   sealThreadsToken, threadsAccountCallback, threadsConnection, unsealThreadsToken, verifySignedRequest, THREADS_STATE_COOKIE,
 } from "../src/threads.ts";
 import {
-  closeAmbiguousThreadsJob, ensureThreadsJobs, getThreadsJob, processThreadsBatch, queueThreadsOnApproval,
-  retryThreadsJob, serveThreadsMedia, threadsReleasePlan,
+  cancelThreadsJob, closeAmbiguousThreadsJob, ensureThreadsJobs, getThreadsJob, processThreadsBatch, queueThreadsOnApproval,
+  retryThreadsJob, serveThreadsMedia, threadsPhotoDigest, threadsReleasePlan,
 } from "../src/threads-publish.ts";
 import type { Env } from "../src/env.ts";
 import type { Session } from "../src/session.ts";
@@ -171,6 +171,8 @@ test("Meta's signed callbacks: a forged request changes nothing, a valid one rem
     body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", user_id: USER }, "wrong-secret") }) }), env(), "deauthorize");
   assert.equal(forged.status, 400);
   assert.ok(await threadsConnection(db));
+  // The current authorization predates this event by more than the clock allowance.
+  await db.prepare("UPDATE threads_accounts SET connected_at = connected_at - 301").run();
   const del = await threadsAccountCallback(new Request("https://gs-poster.test/threads/delete", { method: "POST",
     body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", user_id: USER, issued_at: Math.floor(Date.now() / 1000) }) }) }), env(), "delete");
   assert.equal(del.status, 200);
@@ -186,11 +188,11 @@ test("the plan needs a connection and checks the text and photos", async () => {
   const off = await threadsReleasePlan(env(), p, null);
   assert.equal(off.ok === false && off.offered, false);
   await connect();
-  assert.deepEqual(await threadsReleasePlan(env(), p, null), { ok: true, kind: "TEXT", count: 0, text: "Into the cave #dnd", account: "gsgrimoire" });
+  assert.deepEqual(await threadsReleasePlan(env(), p, null), { ok: true, kind: "TEXT", count: 0, text: "Into the cave #dnd", account: "gsgrimoire", accountId: USER });
   const long = await draft({ caption: "x".repeat(501), media: "none" });
   assert.match((await threadsReleasePlan(env(), long, null) as { reason: string }).reason, /over 500/);
   const fb = await draft({ caption: "Photos", media: "facebook" });
-  assert.deepEqual(await threadsReleasePlan(env(), fb, null), { ok: true, kind: "CAROUSEL", count: 3, text: "Photos", account: "gsgrimoire" });
+  assert.deepEqual(await threadsReleasePlan(env(), fb, null), { ok: true, kind: "CAROUSEL", count: 3, text: "Photos", account: "gsgrimoire", accountId: USER });
   const reel = await draft({ caption: "Reel", media: "instagram" }, { caption: "r", frame: "4:5", items: [], video: IMG(9) });
   assert.match((await threadsReleasePlan(env(), reel, null) as { reason: string }).reason, /Reel/);
   const dash = await draft({ caption: "Into the cave — now", media: "none" });
@@ -200,7 +202,7 @@ test("the plan needs a connection and checks the text and photos", async () => {
 test("a text post publishes once after processing, and a carousel uses the frozen Instagram frames", async () => {
   await connect();
   const p = await draft({ caption: "Into the cave", media: "none" });
-  await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(Date.now() - 1000), "gsgrimoire");
+  await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(Date.now() - 1000), "gsgrimoire", USER, []);
   await processThreadsBatch(env());
   assert.equal(graphPosts("/threads")[0].params.get("media_type"), "TEXT");
   assert.equal(graphPosts("/threads")[0].params.get("text"), "Into the cave");
@@ -215,7 +217,7 @@ test("a text post publishes once after processing, and a carousel uses the froze
   calls = [];
   const ig: InstagramDraft = { caption: "IG", frame: "1:1", items: [defaultItem(IMG(1)), defaultItem(IMG(2), "pad")] };
   const q = await draft({ caption: "Two photos", media: "instagram" }, ig);
-  await queueThreadsOnApproval(env(), q.id, q.updated_at, new Date(Date.now() - 1000), "gsgrimoire");
+  await queueThreadsOnApproval(env(), q.id, q.updated_at, new Date(Date.now() - 1000), "gsgrimoire", USER, ["1".repeat(64), "2".repeat(64)]);
   const job = (await getThreadsJob(db, q.id))!;
   assert.equal(job.kind, "CAROUSEL");
   assert.equal(job.frame, "1:1");
@@ -234,7 +236,7 @@ test("a text post publishes once after processing, and a carousel uses the froze
 test("an unclear final send is never resent and needs the owner's check to close", async () => {
   await connect();
   const p = await draft({ caption: "Into the cave", media: "none" });
-  await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(Date.now() - 1000), "gsgrimoire");
+  await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(Date.now() - 1000), "gsgrimoire", USER, []);
   await processThreadsBatch(env());
   publishFails = true;
   await processThreadsBatch(env());
@@ -251,7 +253,7 @@ test("an unclear final send is never resent and needs the owner's check to close
 test("a disconnected account stops publishing before anything is sent", async () => {
   await connect();
   const p = await draft({ caption: "Into the cave", media: "none" });
-  await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(Date.now() - 1000), "gsgrimoire");
+  await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(Date.now() - 1000), "gsgrimoire", USER, []);
   await disconnectThreads(db);
   await processThreadsBatch(env());
   assert.equal(graphPosts("/threads").length, 0);
@@ -266,7 +268,7 @@ test("media links work only while their job is active", async () => {
   const p = await draft({ caption: "One photo", media: "facebook" });
   await db.prepare("UPDATE posts SET images = ? WHERE id = ?").bind(JSON.stringify([IMG(1)]), p.id).run();
   const q = (await getPost(db, p.id))!;
-  await queueThreadsOnApproval(env(), q.id, q.updated_at, new Date(Date.now() - 1000), "gsgrimoire");
+  await queueThreadsOnApproval(env(), q.id, q.updated_at, new Date(Date.now() - 1000), "gsgrimoire", USER, ["1".repeat(64)]);
   await processThreadsBatch(env());
   const link = graphPosts("/threads")[0].params.get("image_url")!;
   const head = await serveThreadsMedia(new Request("https://gs-poster.test" + new URL(link).pathname, { method: "HEAD" }), env());
@@ -283,7 +285,7 @@ test("media links work only while their job is active", async () => {
 
 const queued = async (th: ThreadsDraft = { caption: "Into the cave", media: "none" }, at = new Date(Date.now() - 1000)) => {
   const p = await draft(th);
-  await queueThreadsOnApproval(env(), p.id, p.updated_at, at, "gsgrimoire");
+  await queueThreadsOnApproval(env(), p.id, p.updated_at, at, "gsgrimoire", USER, []);
   return p;
 };
 
@@ -362,7 +364,7 @@ test("if saving the returned Threads post id fails, the job is unclear and shows
   await processThreadsBatch(env());
   const failing = new Proxy(db, { get(target, prop) {
     if (prop === "prepare") return (sql: string) => {
-      if (/SET media_id = \?/.test(sql)) return { bind: () => ({ run: async () => { throw new Error("D1 write failed"); } }) };
+      if (/SET status = \?, media_id = \?/.test(sql)) return { bind: () => ({ run: async () => { throw new Error("D1 write failed"); } }) };
       return target.prepare(sql);
     };
     const v = (target as any)[prop];
@@ -497,12 +499,14 @@ test("T3: a reconnect during a run cannot switch the account the run sends with"
   assert.equal((await getThreadsJob(db, p.id))!.status, "published");
 });
 
-test("T3: approval records the account connected at the moment the job is queued", async () => {
+test("T3: a stale account approval cannot queue a job for the replacement account", async () => {
   await connect();
   const p = await draft({ caption: "Into the cave", media: "none" });
   await db.prepare("UPDATE threads_accounts SET user_id = ?").bind(OTHER).run();
-  // The plan sees a connection, but the fence binds the queued job to the account read at that moment.
-  const job = await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(), "gsgrimoire");
+  await assert.rejects(queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(), "gsgrimoire", USER, []),
+    /The Threads account changed/);
+  assert.equal(await getThreadsJob(db, p.id), null);
+  const job = await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(), "gsgrimoire", OTHER, []);
   assert.equal(job.account_id, OTHER);
 });
 
@@ -531,7 +535,8 @@ test("T4: replaying a callback from before a reconnect never revokes the newer s
     assert.equal(res.status, 200, kind);
     assert.ok(await threadsConnection(db), "the newer connection stays after a replayed " + kind);
   }
-  // A fresh event for the current connection does remove it.
+  // A fresh event clearly after the current connection does remove it.
+  await db.prepare("UPDATE threads_accounts SET connected_at = connected_at - 301").run();
   const res = await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) });
   assert.equal(res.status, 200);
   assert.equal(await threadsConnection(db), null);
@@ -575,4 +580,72 @@ test("T5: a streamed callback body with no declared size is cut off after 8 KB, 
   assert.equal(res.status, 413);
   assert.ok(pulled <= 12, "stopped reading after about 8 KB, read " + pulled + " chunks");
   assert.ok(await threadsConnection(db), "nothing was revoked");
+});
+
+test("old Threads grants cannot serve replacement media and mutable photo bytes are checked", async () => {
+  await connect();
+  const p = await draft({ caption: "One photo", media: "facebook" });
+  const before = new Uint8Array([1, 2, 3]).buffer;
+  const digest = await threadsPhotoDigest(before);
+  const approve = async (source: string) => {
+    await db.prepare("UPDATE posts SET images = ? WHERE id = ?").bind(JSON.stringify([source]), p.id).run();
+    const saved = (await getPost(db, p.id))!;
+    return queueThreadsOnApproval(env(), p.id, saved.updated_at, new Date(Date.now() - 1000), "gsgrimoire", USER, [digest]);
+  };
+  const old = await approve(IMG(1));
+  await processThreadsBatch(env());
+  const oldLink = graphPosts("/threads").at(-1)!.params.get("image_url")!;
+  const oldGrant = (await db.prepare("SELECT * FROM threads_media_grants WHERE post_id = ?").bind(p.id)
+    .first<{ token_hash: string; item_index: number; expires_at: number; generation: string }>())!;
+  assert.equal(await cancelThreadsJob(env(), p.id, "gsgrimoire"), true);
+  const current = await approve(IMG(2));
+  assert.notEqual(current.generation, old.generation);
+  await processThreadsBatch(env());
+
+  // Simulate a stale grant surviving cleanup. The live generation must still fence it.
+  await db.prepare(`INSERT INTO threads_media_grants (token_hash, post_id, item_index, expires_at, generation)
+    VALUES (?, ?, ?, ?, ?)`).bind(oldGrant.token_hash, p.id, oldGrant.item_index, oldGrant.expires_at, oldGrant.generation).run();
+  assert.equal((await serveThreadsMedia(new Request(oldLink, { method: "HEAD" }), env())).status, 404);
+
+  const currentLink = graphPosts("/threads").at(-1)!.params.get("image_url")!;
+  const graphFetch = globalThis.fetch;
+  let source = before, renders = 0;
+  globalThis.fetch = async (input, init) => String(input) === IMG(2) ? new Response(source) : graphFetch(input, init);
+  const images = { input() {
+    renders++;
+    return { transform: () => ({ output: () => ({ response: () => new Response(before) }) }) };
+  } } as unknown as Env["IMAGES"];
+  assert.equal((await serveThreadsMedia(new Request(currentLink), env({ IMAGES: images }))).status, 200);
+  source = new Uint8Array([4, 5, 6]).buffer;
+  assert.equal((await serveThreadsMedia(new Request(currentLink), env({ IMAGES: images }))).status, 404);
+  assert.equal(renders, 1, "the changed photo is never rendered");
+  await disconnectThreads(db);
+  assert.equal((await serveThreadsMedia(new Request(currentLink, { method: "HEAD" }), env())).status, 404);
+});
+
+test("a late result from a closed Threads generation cannot finish the replacement attempt", async () => {
+  await connect();
+  const p = await queued();
+  await processThreadsBatch(env());
+  const hold = gate();
+  holdPublish = hold.hold;
+  const first = processThreadsBatch(env());
+  await hold.reached;
+  try {
+    await processThreadsBatch(env(), new Date(Date.now() + 11 * 60_000));
+    assert.equal(await closeAmbiguousThreadsJob(env(), p.id, "gsgrimoire"), true);
+    await queueThreadsOnApproval(env(), p.id, p.updated_at, new Date(Date.now() - 1000), "gsgrimoire", USER, []);
+    await processThreadsBatch(env());
+    publishFails = true;
+    await processThreadsBatch(env());
+    assert.equal((await getThreadsJob(db, p.id))!.ambiguous, true);
+  } finally {
+    publishFails = false;
+    hold.release();
+    await first;
+  }
+  const current = (await getThreadsJob(db, p.id))!;
+  assert.equal(current.status, "failed");
+  assert.equal(current.ambiguous, true);
+  assert.equal(current.media_id, null);
 });

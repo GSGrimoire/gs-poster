@@ -356,9 +356,10 @@ export function renderDraftEditor(v: EditorView): string {
   const thBlock = thOk ? `
       <fieldset class="th-release">
         <legend class="sr-only">Threads</legend>
+        <input type="hidden" name="expected_threads_account" value="${esc(thOk.accountId)}">
         <label><input type="checkbox" name="target_threads" value="1" checked data-th-toggle> Threads · ${thWhat} on @${esc(thOk.account)}</label>
         <p class="hint">Text: ${esc(thOk.text.slice(0, 140))}${thOk.text.length > 140 ? "..." : ""}</p>
-        <label><input type="checkbox" name="confirm_threads" value="1" required data-th-required> Post this to the GS Grimoire Threads profile automatically ${p.scheduled_at ? "at " + esc(v.whenText) : "within a few minutes"}.</label>
+        <label><input type="checkbox" name="confirm_threads" value="1" required data-th-required> Post this to @${esc(thOk.account)} on Threads automatically ${p.scheduled_at ? "at " + esc(v.whenText) : "within a few minutes"}.</label>
       </fieldset>` : thPlan && !thPlan.ok && thPlan.offered ? `<p class="hint">Threads: ${esc(thPlan.reason)}</p>` : "";
   const canRelease = fbBs || !!ttOk || !!igOk || !!thOk;
   const scheduledOthers = fbBs && p.scheduled_at;
