@@ -207,13 +207,14 @@ test("legacy reconciliation leaves in-flight claims and transfers from older dra
 });
 
 test("a mixed or unconfirmed scheduled record cannot be labelled TikTok Inbox or promoted to Published",async()=>{
-  for(const sibling of ["facebook","bluesky","instagram","none"] as const){
+  for(const sibling of ["facebook","bluesky","instagram","threads","none"] as const){
     const p=await createPost(db,{message:"History "+sibling,label:"Guard "+sibling,release:null,
       images:[],video:null,created_by:"test",facebook_enabled:sibling==="facebook",
       tiktok_enabled:true,bluesky:null,scheduled_at:null});
     await db.prepare("UPDATE posts SET status='scheduled', approved_at=? WHERE id=?").bind(p.updated_at,p.id).run();
     if(sibling==="bluesky") await db.prepare("INSERT INTO bluesky_targets (post_id,caption) VALUES (?,?)").bind(p.id,p.message).run();
     if(sibling==="instagram") await db.prepare("INSERT INTO instagram_targets (post_id,caption,frame) VALUES (?,?,'4:5')").bind(p.id,p.message).run();
+    if(sibling==="threads") await db.prepare("INSERT INTO threads_targets (post_id,caption,media) VALUES (?,?,'none')").bind(p.id,"Searchable Threads caption").run();
     if(sibling!=="none") await db.prepare("INSERT INTO tiktok_inbox_transfers " +
       "(post_id,status,publish_id,media_ref,created_at,updated_at,sent_by) VALUES (?,?,?,?,?,?,?)")
       .bind(p.id,"published_by_creator","tt123","[]",p.updated_at,p.updated_at,"test").run();
@@ -222,4 +223,5 @@ test("a mixed or unconfirmed scheduled record cannot be labelled TikTok Inbox or
     assert.match(html,new RegExp("Guard "+sibling));
     assert.doesNotMatch(html,/TikTok transfer, finish in app|Published by creator on TikTok/);
   }
+  assert.equal((await searchPosts(db,"scheduled","Searchable Threads caption")).total,1);
 });

@@ -317,13 +317,15 @@ test("standalone legacy TikTok transfer leaves Drafts and requires provider conf
 
 test("separate TikTok photo and video transfers preserve every unapproved sibling and its schedule",async()=>{
   await reset();await connectTikTok();
-  for(const sibling of ["facebook","bluesky","instagram"] as const){
+  for(const sibling of ["facebook","bluesky","instagram","threads"] as const){
     for(const video of [false,true]){
       const p=await ttDraft({facebook:sibling==="facebook",scheduledH:3,video});
       if(sibling==="bluesky") await db.prepare(
         "INSERT INTO bluesky_targets (post_id,caption) VALUES (?,?)").bind(p.id,MSG).run();
       if(sibling==="instagram") await db.prepare(
         "INSERT INTO instagram_targets (post_id,caption,frame) VALUES (?,?,'4:5')").bind(p.id,MSG).run();
+      if(sibling==="threads") await db.prepare(
+        "INSERT INTO threads_targets (post_id,caption,media) VALUES (?,?,'none')").bind(p.id,MSG).run();
       const before=await getPost(db,p.id);
       const sent=await legacySend(p,video);
       assert.equal(sent.status,200,sibling);
