@@ -18,6 +18,10 @@ import { TIKTOK_CONNECT_JS, tiktokCallback, tiktokSettings, tiktokSettingsAction
 import { tiktokConnection } from "./tiktok.ts";
 import { tiktokOptionsPage, TIKTOK_DIRECT_POST_VISIBLE } from "./tiktok-options.ts";
 import { serveTikTokMedia } from "./tiktok-media.ts";
+import { THREADS_CONNECT_JS, threadsCallback, threadsSettings, threadsSettingsAction } from "./threads-web.ts";
+import { threadsAccountCallback, threadsDeletionStatus } from "./threads.ts";
+import { cancelThreadsJob, closeAmbiguousThreadsJob, getThreadsJob, queueThreadsOnApproval, retryThreadsJob,
+  serveThreadsMedia, threadsFreezeProblem, threadsItems, threadsJobCard, threadsPhotoDigest, threadsPending, threadsReleasePlan } from "./threads-publish.ts";
 import { cancelInstagramJob, closeAmbiguousInstagramJob, getInstagramJob, instagramFreezeProblem, instagramJobCard, instagramPending, instagramReleasePlan,
   queueInstagramOnApproval, retryInstagramJob, serveInstagramMedia } from "./instagram-publish.ts";
 import { startTikTokContentTransfer,type TikTokPostOptions } from "./tiktok-posting.ts";
@@ -105,6 +109,13 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   // Public by design: Meta fetches approved Instagram media through short-lived,
   // hashed links that only work while their job is preparing or sending.
   if (path.startsWith("/instagram/media/")) return serveInstagramMedia(req,env);
+  // Threads: same kind of short-lived media links; Meta's signed account
+  // callbacks (verified with the app secret); the sign-in callback checks the session itself.
+  if (path.startsWith("/threads/media/")) return serveThreadsMedia(req,env);
+  if (path.startsWith("/threads/delete/status/")) return threadsDeletionStatus(req,env);
+  if (path === "/threads/deauthorize") return threadsAccountCallback(req,env,"deauthorize");
+  if (path === "/threads/delete") return threadsAccountCallback(req,env,"delete");
+  if (path === "/threads/callback") return threadsCallback(req,env);
   if (path === "/robots.txt") return new Response(
     "User-agent: *\nAllow: /about\nAllow: /terms\nAllow: /privacy\nDisallow: /\n",
     {headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"public, max-age=3600"}});
@@ -127,6 +138,11 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
       "Cache-Control":"no-store","X-Content-Type-Options":"nosniff"
     }});
   if (path === "/tiktok/settings" && req.method === "GET") return tiktokSettings(env,session,url.searchParams.get("notice")||"");
+  if (path === "/threads-connect.js" && req.method === "GET")
+    return new Response(THREADS_CONNECT_JS,{headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+  if (path === "/threads/settings" && req.method === "GET") return threadsSettings(env,session,url.searchParams.get("notice")||"");
+  if (/^\/threads\/(connect|disconnect)$/.test(path) && req.method === "POST")
+    return threadsSettingsAction(req,env,session,path.split("/").pop()!);
   if (/^\/tiktok\/(connect|disconnect|verify)$/.test(path) && req.method === "POST")
     return tiktokSettingsAction(req,env,session,path.split("/").pop()!);
 
@@ -150,7 +166,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|tiktok-redraft|instagram-cancel|instagram-retry|instagram-close|x-opened))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|tiktok-redraft|instagram-cancel|instagram-retry|instagram-close|threads-cancel|threads-retry|threads-close|x-opened))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -415,6 +431,7 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     '<div class="row" style="justify-content:space-between;align-items:center">' +
     '<h2 style="margin:0">Weekly planner</h2><div class="inline-actions">' +
     '<a class="btn" href="/history">View History</a>' +
+    '<a class="btn" href="/threads/settings">Threads connection</a>' +
     '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
     '<a class="btn" href="/new">New draft</a></div></div>' +
     calendar +
@@ -565,7 +582,9 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
 
 
   const igJob = await getInstagramJob(env.DB, p.id);
-  let actions = instagramJobCard(igJob, p.id, csrf, (iso) => formatLocal(new Date(iso), env.TIMEZONE));
+  const thJob = await getThreadsJob(env.DB, p.id);
+  const localTime = (iso: string) => formatLocal(new Date(iso), env.TIMEZONE);
+  let actions = instagramJobCard(igJob, p.id, csrf, localTime) + threadsJobCard(thJob, p.id, csrf, localTime);
   const postVideo=ttMedia.video;
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && !tiktokConn) {
     actions += '<div class="step-card"><div class="eyebrow">TikTok | Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
@@ -628,6 +647,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       checksHtml: checkList, releaseProblems, mediaPanel: draftMediaPanel(p, csrf), tiktokCard: actions, xCard,
       tiktokPlan: tiktokReleasePlan(p, tiktokConn, tiktokTransfer),
       instagramPlan: instagramReleasePlan(env, p, igJob),
+      threadsPlan: await threadsReleasePlan(env, p, thJob),
       mediaLooksPending: p.facebook_enabled && !p.images.length && !p.video && mediaLooksPending(p.label, p.release),
       createdLine: `Drafted by ${p.created_by ?? "?"} | ${formatLocal(new Date(p.created_at), env.TIMEZONE)} | ${p.id}`,
     });
@@ -980,9 +1000,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     const parsed = parseEditorForm(form, current, env.TIMEZONE);
     if (parsed.errors.length || !parsed.next)
       return fail("Not saved: " + parsed.errors.join(" "), 400);
-    const frozen = instagramFreezeProblem(await getInstagramJob(env.DB, id), current, parsed.next);
+    const frozen = instagramFreezeProblem(await getInstagramJob(env.DB, id), current, parsed.next)
+      ?? threadsFreezeProblem(await getThreadsJob(env.DB, id), current, parsed.next);
     if (frozen) return fail("Not saved: " + frozen, 409);
-    const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null, parsed.instagram ?? null);
+    const saved = await saveEditorDraft(env.DB, id, version, parsed.next, parsed.bluesky ?? null, parsed.instagram ?? null, parsed.threads ?? null);
     if (!saved) return fail("This draft changed while saving. Your edits were not saved. Reload and edit again.", 409);
     await audit(env.DB, session.login, current.status === "rejected" ? "revised-rejected" : "edited", id, auto ? "web editor autosave" : "web editor")
       .catch(() => undefined);
@@ -994,6 +1015,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (ok) return redirect(`/post/${id}`);
     return postPage(env, session, id, { error: instagramPending(await getInstagramJob(env.DB, id))
       ? "This post is approved for Instagram and may still publish, so it cannot be rejected. Cancel Instagram with your PIN in the Instagram card first."
+      : threadsPending(await getThreadsJob(env.DB, id))
+      ? "This post is approved for Threads and may still publish, so it cannot be rejected. Cancel Threads with your PIN in the Threads card first."
       : "Only drafts can be rejected." }, 409);
   }
   // All publication, cancellation and failed-target recovery require the PIN
@@ -1046,6 +1069,23 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       return await closeAmbiguousInstagramJob(env, id, session.login)
         ? postPage(env, session, id, { notice: "Instagram job closed. Nothing was sent. You can approve the draft for Instagram again." })
         : postPage(env, session, id, { error: "This Instagram job has no unclear result to close. Reload." }, 409);
+    }
+    if (action === "threads-cancel") {
+      return await cancelThreadsJob(env, id, session.login)
+        ? postPage(env, session, id, { notice: "Threads stopped. Nothing was sent to Threads." })
+        : postPage(env, session, id, { error: "Threads could not be stopped: it is publishing now, already finished, or its result is unclear. Reload." }, 409);
+    }
+    if (action === "threads-retry") {
+      return await retryThreadsJob(env, id, session.login)
+        ? postPage(env, session, id, { notice: "Threads will try again within a few minutes." })
+        : postPage(env, session, id, { error: "Only a Threads attempt that failed before its final send can be retried." }, 409);
+    }
+    if (action === "threads-close") {
+      if (form.get("confirmed_not_on_threads") !== "1")
+        return postPage(env, session, id, { error: "Confirm you checked Threads and the post is not there." }, 400);
+      return await closeAmbiguousThreadsJob(env, id, session.login)
+        ? postPage(env, session, id, { notice: "Threads job closed. Nothing was sent. You can approve the draft for Threads again." })
+        : postPage(env, session, id, { error: "This Threads job has no unclear result to close. Reload." }, 409);
     }
     if (action === "tiktok-send") {
       if(form.get("confirm_tiktok")!=="1")
@@ -1235,7 +1275,17 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       if (form.get("confirm_instagram") !== "1")
         return postPage(env, session, id, { error: "Confirm that this Instagram post may be published automatically." }, 400);
     }
-    if (!facebook && !blueskySelected && !tiktokSelected && !instagramSelected) return postPage(env, session, id, { error: "Choose at least one target." }, 400);
+    const threadsSelected = !!current.threads && form.get("target_threads") === "1";
+    const expectedThreadsAccount = String(form.get("expected_threads_account") ?? "");
+    if (threadsSelected) {
+      const thPlan = await threadsReleasePlan(env, current, await getThreadsJob(env.DB, id));
+      if (!thPlan.ok) return postPage(env, session, id, { error: "Threads: " + thPlan.reason }, 400);
+      if (thPlan.accountId !== expectedThreadsAccount)
+        return postPage(env, session, id, { error: "The Threads account changed. Reload and review the connected account before approving." }, 409);
+      if (form.get("confirm_threads") !== "1")
+        return postPage(env, session, id, { error: "Confirm that this Threads post may be published automatically." }, 400);
+    }
+    if (!facebook && !blueskySelected && !tiktokSelected && !instagramSelected && !threadsSelected) return postPage(env, session, id, { error: "Choose at least one target." }, 400);
     if (facebook && !current.images.length && !current.video && mediaLooksPending(current.label, current.release) &&
         form.get("publish_without_media") !== "1") {
       return postPage(env, session, id, { error: "This post's name says media is pending, but Facebook has no images or video. Attach the media, or tick \"Publish without media anyway\"." }, 400);
@@ -1256,7 +1306,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     // when the owner ticked the opt-in rollover box on THIS approval (#61); the
     // moved time is written by the same version-fenced claim below.
     // TikTok alone ignores the calendar time: the inbox transfer is immediate.
-    const saved: Date | null = current.scheduled_at && (facebook || blueskySelected || instagramSelected) ? new Date(current.scheduled_at) : null;
+    const saved: Date | null = current.scheduled_at && (facebook || blueskySelected || instagramSelected || threadsSelected) ? new Date(current.scheduled_at) : null;
     const lead = { facebook, photos: current.images.length };
     const decision = decideReleaseTime(saved, new Date(), lead, form.get("auto_rollover") === "1");
     if (!decision.ok) return postPage(env, session, id, {
@@ -1280,6 +1330,18 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         else for (const item of current.instagram!.items) await fetchImage(env, item.url);
       } catch (error) {
         return postPage(env, session, id, { error: "Instagram media could not be loaded: " +
+          (error instanceof Error ? error.message : String(error)) }, 400);
+      }
+    }
+    const threadsPhotoDigests: string[] = [];
+    if (threadsSelected) {
+      try {
+        for (const item of threadsItems(current, current.threads!.media).items) {
+          const image = await fetchImage(env, item.url);
+          threadsPhotoDigests.push(await threadsPhotoDigest(image.bytes));
+        }
+      } catch (error) {
+        return postPage(env, session, id, { error: "Threads photo could not be loaded: " +
           (error instanceof Error ? error.message : String(error)) }, 400);
       }
     }
@@ -1320,7 +1382,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     // A standalone TikTok record can leave Drafts after the transfer result
     // is recorded. Enabled siblings keep their own approval state even when
     // the owner chose to send only to TikTok on this submission.
-    if (ttPlan?.ok && !facebook && !blueskySelected && !instagramSelected)
+    if (ttPlan?.ok && !facebook && !blueskySelected && !instagramSelected && !threadsSelected)
       await markTikTokInboxApproved(env.DB, id, current.updated_at);
     // Instagram is queued, not sent: cron publishes it at the approved time.
     // Queued before the Facebook/Bluesky claim, fenced on the same saved version.
@@ -1330,6 +1392,14 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         outcomes.push({ ok: true, text: `Instagram: approved, posts ${when ? "at " + formatLocal(new Date(job.due_at), env.TIMEZONE) : "within a few minutes"}. Its progress shows in the Instagram card.` });
       } catch (error) {
         outcomes.push({ ok: false, text: "Instagram: " + (error instanceof Error ? error.message : String(error)) });
+      }
+    }
+    if (threadsSelected) {
+      try {
+        const job = await queueThreadsOnApproval(env, id, current.updated_at, when ?? new Date(), session.login, expectedThreadsAccount, threadsPhotoDigests);
+        outcomes.push({ ok: true, text: `Threads: approved, posts ${when ? "at " + formatLocal(new Date(job.due_at), env.TIMEZONE) : "within a few minutes"}. Its progress shows in the Threads card.` });
+      } catch (error) {
+        outcomes.push({ ok: false, text: "Threads: " + (error instanceof Error ? error.message : String(error)) });
       }
     }
     if (facebook || bluesky) {

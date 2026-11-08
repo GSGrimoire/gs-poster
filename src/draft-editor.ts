@@ -6,13 +6,14 @@
  */
 import { esc } from "./html.ts";
 import { renderEditorialReview } from "./preflight.ts";
-import { tiktokMedia, type BlueskyDraft, type EditorDraft, type Post } from "./db.ts";
+import { tiktokMedia, THREADS_MEDIA, THREADS_TEXT_MAX, type BlueskyDraft, type EditorDraft, type Post, type ThreadsDraft, type ThreadsMedia } from "./db.ts";
 import { BSKY_TEXT_LIMIT, textLength } from "./bluesky.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 import { captionLimit, checkTarget, PLATFORM_ORDER, PLATFORMS, platformRulesJson, FACEBOOK_CAPTION_MAX,
   type PlatformId, type TargetState } from "./platforms.ts";
 import type { TikTokReleasePlan } from "./tiktok-release.ts";
 import type { InstagramPlan } from "./instagram-publish.ts";
+import type { ThreadsPlan } from "./threads-publish.ts";
 import { parseGitHubUrl } from "./media.ts";
 import { countHashtags, defaultItem, INSTAGRAM_BACKGROUNDS, INSTAGRAM_CAPTION_MAX, INSTAGRAM_FRAMES, INSTAGRAM_MAX_ITEMS,
   INSTAGRAM_MAX_ZOOM, INSTAGRAM_PLAN_JS, instagramSaveErrors, readInstagramItems,
@@ -26,6 +27,7 @@ export interface EditorParse {
   next?: EditorDraft;
   bluesky?: BlueskyDraft | null;
   instagram?: InstagramDraft | null;
+  threads?: ThreadsDraft | null;
 }
 
 /** Every photo already on the post, in a stable order, for the Instagram picker. */
@@ -81,7 +83,8 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   const blueskyOn = form.get("p_bluesky") === "1";
   const tiktok = form.get("p_tiktok") === "1";
   const instagramOn = form.get("p_instagram") === "1";
-  if (!facebook && !blueskyOn && !tiktok && !instagramOn) errors.push("Choose at least one platform.");
+  const threadsOn = form.get("p_threads") === "1";
+  if (!facebook && !blueskyOn && !tiktok && !instagramOn && !threadsOn) errors.push("Choose at least one platform.");
 
   const message = text(form, "message", cur.message);
   if (message.length > FB_MAX) errors.push(`The Facebook caption is ${message.length} characters; Facebook allows ${FB_MAX}.`);
@@ -180,6 +183,17 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     }
   }
 
+  // Threads carries text plus, optionally, the Instagram or Facebook photos.
+  let threads: ThreadsDraft | null = null;
+  const savedThreads = cur.threads ?? cur.threads_paused ?? null;
+  if (threadsOn || savedThreads) {
+    const media = text(form, "th_media", savedThreads?.media ?? "none");
+    if (!(THREADS_MEDIA as readonly string[]).includes(media)) errors.push("Choose which photos Threads uses.");
+    threads = { caption: text(form, "th_caption", savedThreads?.caption ?? ""), media: media as ThreadsMedia };
+    if (threadsOn && threads.caption.length > THREADS_TEXT_MAX)
+      errors.push(`The Threads text is ${threads.caption.length} characters; Threads allows ${THREADS_TEXT_MAX}.`);
+  }
+
   let scheduledAt: string | null = cur.scheduled_at;
   const whenRaw = form.get("when");
   if (whenRaw !== null) {
@@ -195,9 +209,10 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     errors,
     bluesky,
     instagram,
+    threads,
     next: {
       message, tiktok_caption: tiktokCaption, tiktok_title: tiktokTitle || null,
-      bluesky_enabled: blueskyOn, instagram_enabled: instagramOn,
+      bluesky_enabled: blueskyOn, instagram_enabled: instagramOn, threads_enabled: threadsOn,
       images, tiktok_images: tiktokImages, video,
       tiktok_video: tiktokVideo, facebook_enabled: facebook, tiktok_enabled: tiktok,
       scheduled_at: scheduledAt, label: short(form, "label", cur.label), release: short(form, "release", cur.release),
@@ -221,6 +236,7 @@ export interface EditorView {
   tiktokPlan?: TikTokReleasePlan;
   /** Whether this approval can also queue Instagram, and what it would post. */
   instagramPlan?: InstagramPlan;
+  threadsPlan?: ThreadsPlan;
   mediaLooksPending: boolean;
   createdLine: string;
 }
@@ -242,6 +258,7 @@ function video(src: string, removeName: string, extra = ""): string {
 /** Saved state of each platform's target, for the first render of the checks. */
 export function targetStates(p: Post): Record<PlatformId, TargetState> {
   const bs = p.bluesky ?? p.bluesky_paused ?? null;
+  const th = p.threads ?? p.threads_paused ?? null;
   const tt = tiktokMedia(p);
   const ttShared = p.tiktok_images === null;
   return {
@@ -254,6 +271,9 @@ export function targetStates(p: Post): Record<PlatformId, TargetState> {
     tiktok: { id: "tiktok", captionLength: (p.tiktok_caption ?? p.message).length,
       photos: ttShared ? (p.video ? 0 : p.images.length) : tt.images.length,
       video: ttShared ? !!p.video : !!tt.video, missingAlt: 0 },
+    threads: { id: "threads", captionLength: th?.caption.length ?? 0,
+      photos: !th || th.media === "none" ? 0 : th.media === "instagram" ? ((p.instagram ?? p.instagram_paused)?.items.length ?? 0) : p.images.length,
+      video: false, missingAlt: 0 },
   };
 }
 
@@ -289,7 +309,8 @@ export function renderDraftEditor(v: EditorView): string {
   const ttShared = p.tiktok_images === null;
   const ttImportIndices = !ttShared && !tt.video ? tt.images.flatMap((url, i) => parseGitHubUrl(url) ? [i] : []) : [];
   const hide = (on: boolean) => (on ? "" : " hidden");
-  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!p.bluesky, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
+  const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!p.bluesky, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram, threads: !!p.threads };
+  const th = p.threads ?? p.threads_paused ?? null;
   const ig = p.instagram ?? p.instagram_paused ?? null;
   const pool = postPhotos(p);
   const igItems = ig?.items ?? [];
@@ -329,7 +350,18 @@ export function renderDraftEditor(v: EditorView): string {
         <p class="hint">Caption: ${esc(igOk.caption.slice(0, 140))}${igOk.caption.length > 140 ? "..." : ""} (edit it in the Instagram card; it saves automatically)</p>
         <label><input type="checkbox" name="confirm_instagram" value="1" required data-ig-required> Post this to the GS Grimoire Instagram automatically ${p.scheduled_at ? "at " + esc(v.whenText) : "within a few minutes"}.</label>
       </fieldset>` : igPlan && !igPlan.ok && igPlan.offered ? `<p class="hint">Instagram: ${esc(igPlan.reason)}</p>` : "";
-  const canRelease = fbBs || !!ttOk || !!igOk;
+  const thPlan = v.threadsPlan;
+  const thOk = thPlan?.ok ? thPlan : null;
+  const thWhat = thOk ? (thOk.kind === "CAROUSEL" ? thOk.count + "-photo carousel" : thOk.kind === "IMAGE" ? "photo post" : "text post") : "";
+  const thBlock = thOk ? `
+      <fieldset class="th-release">
+        <legend class="sr-only">Threads</legend>
+        <input type="hidden" name="expected_threads_account" value="${esc(thOk.accountId)}">
+        <label><input type="checkbox" name="target_threads" value="1" checked data-th-toggle> Threads · ${thWhat} on @${esc(thOk.account)}</label>
+        <p class="hint">Text: ${esc(thOk.text.slice(0, 140))}${thOk.text.length > 140 ? "..." : ""}</p>
+        <label><input type="checkbox" name="confirm_threads" value="1" required data-th-required> Post this to @${esc(thOk.account)} on Threads automatically ${p.scheduled_at ? "at " + esc(v.whenText) : "within a few minutes"}.</label>
+      </fieldset>` : thPlan && !thPlan.ok && thPlan.offered ? `<p class="hint">Threads: ${esc(thPlan.reason)}</p>` : "";
+  const canRelease = fbBs || !!ttOk || !!igOk || !!thOk;
   const scheduledOthers = fbBs && p.scheduled_at;
   const ttPreview = ttOk ? (ttOk.type === "VIDEO"
     ? `<video class="tt-video" controls playsinline preload="metadata" src="/video/${id}/tiktok"></video>`
@@ -350,16 +382,16 @@ export function renderDraftEditor(v: EditorView): string {
       </fieldset>` : ttPlan && !ttPlan.ok && ttPlan.offered ? `<p class="hint tt-blocked">TikTok: ${esc(ttPlan.reason)}</p>` : "";
   const effects = [
     ...(ttOk ? [`<li><strong>Now:</strong> TikTok inbox</li>`] : []),
-    ...(fbBs || igOk ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", p.bluesky ? "Bluesky" : "", igOk ? "Instagram" : ""].filter(Boolean).join(", ")}</li>`] : []),
+    ...(fbBs || igOk || thOk ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", p.bluesky ? "Bluesky" : "", igOk ? "Instagram" : "", thOk ? "Threads" : ""].filter(Boolean).join(", ")}</li>`] : []),
   ];
-  const targetCount = (fbBs ? 1 : 0) + (ttOk ? 1 : 0) + (igOk ? 1 : 0);
+  const targetCount = (fbBs ? 1 : 0) + (ttOk ? 1 : 0) + (igOk ? 1 : 0) + (thOk ? 1 : 0);
   const buttonText = targetCount > 1 ? "Approve selected targets" : ttOk ? "Approve and send to TikTok inbox" : p.scheduled_at ? "Approve and schedule" : "Approve and post now";
   const release = canRelease ? `
     <form method="post" action="/post/${id}/approve" class="release-card" id="release-form">
       <input type="hidden" name="csrf" value="${esc(v.csrf)}">
       <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
       <div class="eyebrow">Release</div>
-      <h3>${!fbBs && !igOk ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
+      <h3>${!fbBs && !igOk && !thOk ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
       ${releaseTargets}
       ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
@@ -368,6 +400,7 @@ export function renderDraftEditor(v: EditorView): string {
       <p class="hint">Off: if ${esc(v.whenText)} has become too close, approval is refused and you pick a new time. On: it moves to the earliest valid time and tells you the new time.</p>`
       : p.facebook_enabled && p.images.length ? `<p class="hint">Photo posts go through the upload queue and usually appear on Facebook within a few minutes.</p>` : ""}
       ${igBlock}
+      ${thBlock}
       ${ttBlock}
       ${effects.length > 1 ? `<ul class="effects" aria-label="What approving does">${effects.join("")}</ul>` : ""}
       <label for="release-pin">PIN</label>
@@ -523,6 +556,7 @@ export function renderDraftEditor(v: EditorView): string {
       <div class="platform-chips">
         ${chip("p_facebook", "Facebook", p.facebook_enabled)}
         ${chip("p_instagram", "Instagram", !!p.instagram)}
+        ${chip("p_threads", "Threads", !!p.threads)}
         ${chip("p_bluesky", "Bluesky", !!p.bluesky)}
         ${chip("p_tiktok", "TikTok", !!p.tiktok_enabled)}
       </div>
@@ -584,6 +618,22 @@ export function renderDraftEditor(v: EditorView): string {
           <p class="hint" id="ig-unsaved" hidden>Save to download prepared Instagram media.</p>
           <p class="hint ig-downloads" id="ig-downloads"${igItems.length ? "" : " hidden"}>${esc(PLATFORMS.instagram.delivery)}
             ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" | ")}</p>
+        </article>
+        <article class="target" id="target-threads" data-platform="threads"${hide(on.threads)} aria-labelledby="tg-threads">
+          <div class="target-head"><h4 id="tg-threads">Threads</h4><p class="format">${esc(formatLine("threads"))}</p></div>
+          <ul class="checks target-checks" data-checks="threads">${checkItems(states.threads)}</ul>
+          <div class="cap-row"><label for="ed-th" class="cap-label">Text</label>
+            <button type="button" class="copy-cap" data-copy-to="ed-th" data-copy-from="ed-message">Copy Facebook caption</button></div>
+          <textarea id="ed-th" name="th_caption" maxlength="${THREADS_TEXT_MAX}" data-max="${THREADS_TEXT_MAX}" data-caption="threads" placeholder="Up to 500 characters; one link is shown as a preview">${esc(th?.caption ?? "")}</textarea>
+          <div class="field-meter"></div>
+          <label for="ed-th-media" class="cap-label">Photos</label>
+          <select id="ed-th-media" name="th_media">
+            <option value="none"${!th || th.media === "none" ? " selected" : ""}>Text only</option>
+            <option value="instagram"${th?.media === "instagram" ? " selected" : ""}>The Instagram photos, as framed there</option>
+            <option value="facebook"${th?.media === "facebook" ? " selected" : ""}>The Facebook photos</option>
+          </select>
+          <p class="hint">Threads uses photos already on this post, up to 20. A Reel or video is not sent to Threads.</p>
+          <p class="hint">${esc(PLATFORMS.threads.delivery)}</p>
         </article>
         <article class="target" id="target-bluesky" data-platform="bluesky"${hide(on.bluesky)} aria-labelledby="tg-bluesky">
           <div class="target-head"><h4 id="tg-bluesky">Bluesky</h4><p class="format">${esc(formatLine("bluesky"))}</p></div>
@@ -1293,6 +1343,12 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     };
     ttToggle.addEventListener("change", sync);
     sync();
+  }
+  const thToggle = document.querySelector("[data-th-toggle]");
+  if (thToggle) {
+    const thSync = () => { document.querySelector("[data-th-required]").required = thToggle.checked; };
+    thToggle.addEventListener("change", thSync);
+    thSync();
   }
   // Instagram the same way: unticked means no automatic Instagram post.
   const igToggle = document.querySelector("[data-ig-toggle]");

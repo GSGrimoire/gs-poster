@@ -8,7 +8,8 @@ import { z } from "zod";
 import type { Env } from "./env.ts";
 import { missingSecrets } from "./env.ts";
 import { checkInstagram, getInstagramJob, instagramFreezeProblem } from "./instagram-publish.ts";
-import { audit, createPost, deletePost, getPost, listPosts, saveEditorDraft, type Post, type PostStatus, type BlueskyDraft } from "./db.ts";
+import { checkThreads, getThreadsJob, threadsFreezeProblem } from "./threads-publish.ts";
+import { audit, createPost, deletePost, getPost, listPosts, saveEditorDraft, type Post, type PostStatus, type BlueskyDraft, THREADS_MEDIA, THREADS_TEXT_MAX } from "./db.ts";
 import { checkPage, listPagePosts } from "./facebook.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { checkVideoUrl } from "./video.ts";
@@ -74,6 +75,7 @@ function view(env: Env, origin: string, p: Post) {
     bluesky: p.bluesky,
     bluesky_saved_while_disabled: p.bluesky_paused ?? null,
     /** Prepared here; only Gus's PIN approval on the review site can queue it for Instagram. */
+    threads: p.threads ? { ...p.threads, note: "Prepared only by this tool. It reaches Threads only if Gus approves it for Threads with his PIN on the review site." } : null,
     instagram: p.instagram ? { ...p.instagram, note: "Prepared only by this tool. It reaches Instagram only if Gus approves it for Instagram with his PIN on the review site (when Instagram is connected); otherwise he downloads the rendered media." } : null,
     instagram_saved_while_disabled: p.instagram_paused ?? null,
     link: p.link,
@@ -174,6 +176,10 @@ const updateDraftSchema = z.object({
             bg: z.enum(Object.keys(INSTAGRAM_BACKGROUNDS) as [InstagramBackground, ...InstagramBackground[]]).default("dark").describe("Pad background: dark (brand), black, white or parchment (brand)."),
           })).max(INSTAGRAM_MAX_ITEMS),
         }).nullable().optional().describe("Instagram feed carousel, PREPARED ONLY: this tool never sends anything to Instagram; only Gus's PIN approval on the review site can. Omit to leave selection as is; null disables Instagram while retaining its saved editing content."),
+        threads: z.object({
+          caption: z.string().max(THREADS_TEXT_MAX).describe("Threads text, up to 500 characters. One link shows as a preview."),
+          media: z.enum(THREADS_MEDIA).default("none").describe("none for a text post; instagram to reuse the Instagram card's framed photos; facebook to reuse the Facebook photos."),
+        }).nullable().optional().describe("Threads post, PREPARED ONLY: this tool never sends anything to Threads; only Gus's PIN approval on the review site can. Omit to leave it as is; null turns Threads off while keeping its text."),
         expected_updated_at: z.string().optional().describe("The updated_at you last read from get_post, list_posts or a previous save. If the draft has changed since, nothing is saved and you must fetch it again. Strongly recommended; when omitted, the version read at the start of this call is used."),
       });
 
@@ -183,7 +189,7 @@ const updateDraftSchema = z.object({
 export async function handleUpdateDraft(
   env:Env,origin:string,login:string,input:z.infer<typeof updateDraftSchema>,
 ){
-  const {id, message, tiktok_caption, tiktok_title, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky, instagram, expected_updated_at}=input;
+  const {id, message, tiktok_caption, tiktok_title, images,tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, bluesky, instagram, threads, expected_updated_at}=input;
       if(!isCurrentEditor(env,login))return fail("Editor access is no longer authorized.");
       const cur = await getPost(env.DB, id);
       if (!cur) return fail(`No post with id ${id}.`);
@@ -208,7 +214,10 @@ export async function handleUpdateDraft(
       const errors = [...checks.errors, ...("error" in time && time.error ? [time.error] : []), ...bsErrors];
       const instagramOn = instagram === undefined ? !!cur.instagram : instagram !== null;
       const igNext = instagram == null ? (cur.instagram ?? cur.instagram_paused ?? null) : instagram;
-      if (!fbNext && !blueskyOn && !cur.tiktok_enabled && !instagramOn) errors.push("Select at least one of Facebook, Bluesky, TikTok or Instagram.");
+      const threadsOn = threads === undefined ? !!cur.threads : threads !== null;
+      const thNext = threads == null ? (cur.threads ?? cur.threads_paused ?? null) : threads;
+      if (!fbNext && !blueskyOn && !cur.tiktok_enabled && !instagramOn && !threadsOn) errors.push("Select at least one of Facebook, Bluesky, TikTok, Instagram or Threads.");
+      if (threads) errors.push(...checkMessage(threads.caption, { hasImages: threads.media !== "none" }).errors.map((e) => "Threads text: " + e));
       const nextTTImages = tiktok_images === undefined
          ? (tiktok_video ? [] : cur.tiktok_enabled && cur.tiktok_images === null ? [...nextImages] : cur.tiktok_images)
          : tiktok_images === null && cur.tiktok_enabled ? [...nextImages] : tiktok_images;
@@ -249,6 +258,9 @@ export async function handleUpdateDraft(
       const frozen = instagramFreezeProblem(await getInstagramJob(env.DB, id), cur,
         { scheduled_at: time.when?.toISOString() ?? null, instagram_enabled: instagramOn });
       if (frozen) errors.push(frozen);
+      const thFrozen = threadsFreezeProblem(await getThreadsJob(env.DB, id), cur,
+        { scheduled_at: time.when?.toISOString() ?? null, threads_enabled: threadsOn });
+      if (thFrozen) errors.push(thFrozen);
       if (errors.length) return fail("Not saved. Fix these and try again.", { problems: errors, warnings: checks.warnings });
       // One fenced D1 transaction for the post row AND its Bluesky target (#63).
       // facebook_enabled is written to posts, which is what approval reads.
@@ -260,12 +272,12 @@ export async function handleUpdateDraft(
       try {
         version = await saveEditorDraft(env.DB, id, baseVersion, {
           message: nextMessage, tiktok_caption: nextTikTokCaption, tiktok_title: tiktok_title === undefined ? cur.tiktok_title ?? null : tiktok_title,
-          bluesky_enabled: blueskyOn, instagram_enabled: instagramOn,
+          bluesky_enabled: blueskyOn, instagram_enabled: instagramOn, threads_enabled: threadsOn,
           images: nextImages, tiktok_images: nextTTImages,
           video: nextVideo, tiktok_video: nextTTVideo,
           facebook_enabled: fbNext, tiktok_enabled: cur.tiktok_enabled === true,
           scheduled_at: nextScheduled, label: nextLabel, release: nextRelease, link: nextLink,
-        }, bsNext, igNext);
+        }, bsNext, igNext, thNext);
       } catch {
         // The commit may or may not have happened (lost response). Read back
         // rather than guess, and never retry blindly.
@@ -292,6 +304,7 @@ export async function handleUpdateDraft(
       if (saved.message !== nextMessage) mismatch.push("message");
        if (tiktok_title !== undefined && saved.tiktok_title !== tiktok_title) mismatch.push("tiktok_title");
       if (instagram !== undefined && JSON.stringify(saved.instagram) !== JSON.stringify(instagram)) mismatch.push("instagram");
+      if (threads !== undefined && JSON.stringify(saved.threads ?? null) !== JSON.stringify(threads)) mismatch.push("threads");
       if (mismatch.length) return fail("Saved draft does not match the request. Fetch it with get_post and check before review.", { fields: mismatch, post: view(env, origin, saved) });
       const auditOk = await audit(env.DB, actor(), cur.status === "rejected" ? "revised-rejected" : "edited", id).then(() => true, () => false);
       return ok({
@@ -312,6 +325,8 @@ export async function handleDeleteDraft(env:Env,login:string,id:string){
     // An approved Instagram job keeps its post; only Gus can cancel it, with his PIN.
     const job=await getInstagramJob(env.DB,id).catch(()=>null);
     if(job&&job.status!=="cancelled")return fail("Not deleted: Gus approved this post for Instagram. Only he can stop that, with his PIN, in the Instagram card on the review site.");
+    const th=await getThreadsJob(env.DB,id).catch(()=>null);
+    if(th&&th.status!=="cancelled")return fail("Not deleted: Gus approved this post for Threads. Only he can stop that, with his PIN, in the Threads card on the review site.");
     return fail("Not deleted: no draft or rejected post with that id.");
   }
   await audit(env.DB,actor(),"deleted",id);
@@ -685,7 +700,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     "check_setup",
     {
       title: "Check the connection",
-      description: "Report which settings are missing, whether the Facebook Page token works and whether the linked Instagram account is reachable. Use it first, or when something fails.",
+      description: "Report which settings are missing, whether the Facebook Page token works and whether the linked Instagram and Threads accounts are reachable. Use it first, or when something fails.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -731,6 +746,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         timezone: env.TIMEZONE,
         facebook,
         instagram: await checkInstagram(env),
+        threads: await checkThreads(env),
       });
     },
   );

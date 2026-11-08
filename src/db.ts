@@ -64,14 +64,29 @@ export interface Post {
   bluesky: BlueskyTarget | null;
   /** Retained editing data for a disabled target. Never published. */
   bluesky_paused?: BlueskyDraft | null;
-  /** Instagram feed target, prepared only: nothing sends it yet. */
+  /** Instagram feed target. Only a PIN approval can queue it (instagram-publish.ts). */
   instagram: InstagramDraft | null;
   instagram_paused?: InstagramDraft | null;
   /** When the owner first pressed Open in X. Nothing is sent to X by GS Poster. */
   x_opened_at?: string | null;
+  /** Threads target. Only a PIN approval can queue it (threads-publish.ts). */
+  threads?: ThreadsDraft | null;
+  threads_paused?: ThreadsDraft | null;
 }
 
-export interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky" | "instagram"> {
+/** Which of the post's photos a Threads post carries. Threads has no media of its own. */
+export const THREADS_MEDIA = ["none", "instagram", "facebook"] as const;
+export type ThreadsMedia = typeof THREADS_MEDIA[number];
+export const THREADS_TEXT_MAX = 500;
+export interface ThreadsDraft {
+  caption: string;
+  media: ThreadsMedia;
+}
+
+export interface Row extends Omit<Post, "images" | "tiktok_images" | "facebook_enabled" | "tiktok_enabled" | "bluesky" | "instagram" | "threads"> {
+  th_caption?: string | null;
+  th_media?: string | null;
+  th_status?: string | null;
   ig_caption?: string | null;
   ig_frame?: string | null;
   ig_items?: string | null;
@@ -98,9 +113,11 @@ export const POST_SELECT = `SELECT p.*, b.caption AS bs_caption, b.images AS bs_
  b.video AS bs_video, b.patreon AS bs_patreon, b.facebook_enabled AS bs_facebook_enabled,
  b.status AS bs_status, b.uri AS bs_uri, b.cid AS bs_cid,
  b.card_uri AS bs_card_uri, b.permalink AS bs_permalink, b.error AS bs_error,
- i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items, i.video AS ig_video, i.status AS ig_status
+ i.caption AS ig_caption, i.frame AS ig_frame, i.items AS ig_items, i.video AS ig_video, i.status AS ig_status,
+ t.caption AS th_caption, t.media AS th_media, t.status AS th_status
  FROM posts p LEFT JOIN bluesky_targets b ON p.id = b.post_id
- LEFT JOIN instagram_targets i ON p.id = i.post_id`;
+ LEFT JOIN instagram_targets i ON p.id = i.post_id
+ LEFT JOIN threads_targets t ON p.id = t.post_id`;
 
 /**
  * Approved Instagram jobs (see instagram-publish.ts). Defined here so post
@@ -111,13 +128,22 @@ export const INSTAGRAM_JOBS_DDL = `CREATE TABLE IF NOT EXISTS instagram_jobs (
   frame TEXT NOT NULL, items TEXT NOT NULL DEFAULT '[]', video TEXT, children TEXT NOT NULL DEFAULT '[]',
   container_id TEXT, processing_since TEXT, media_id TEXT, permalink TEXT, error TEXT,
   ambiguous INTEGER NOT NULL DEFAULT 0, lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL)`;
-/** Instagram job states that are under way: their time and their post are fixed. */
+/** Approved Threads jobs (threads-publish.ts), defined here for the same guards. */
+export const THREADS_JOBS_DDL = `CREATE TABLE IF NOT EXISTS threads_jobs (
+  post_id TEXT PRIMARY KEY, status TEXT NOT NULL, kind TEXT NOT NULL, due_at TEXT NOT NULL, text TEXT NOT NULL,
+  frame TEXT, items TEXT NOT NULL DEFAULT '[]', children TEXT NOT NULL DEFAULT '[]', container_id TEXT,
+  processing_since TEXT, media_id TEXT, permalink TEXT, error TEXT, ambiguous INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+  account_id TEXT NOT NULL, account_username TEXT NOT NULL DEFAULT '', generation TEXT NOT NULL DEFAULT '')`;
+/** Job states that are under way: their time and their post are fixed. */
 const IG_STARTED = "('preparing','processing','sending')";
 /** An approved Instagram job that may still publish (or whose result is unclear):
  * PIN-free edits may not change its time, switch Instagram off or reject the post. */
 const IG_PENDING = "('scheduled','preparing','processing','sending','failed')";
 const igPending = (alias: string) =>
   `EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = ${alias}.id AND j.status IN ${IG_PENDING})`;
+const thPending = (alias: string) =>
+  `EXISTS (SELECT 1 FROM threads_jobs t WHERE t.post_id = ${alias}.id AND t.status IN ${IG_PENDING})`;
 
 let schemaReady = false;
 
@@ -186,6 +212,14 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       status TEXT NOT NULL DEFAULT 'draft'
     )`),
     db.prepare(INSTAGRAM_JOBS_DDL),
+    db.prepare(THREADS_JOBS_DDL),
+    // Threads editing data; 'draft' means selected, 'disabled' keeps it paused.
+    db.prepare(`CREATE TABLE IF NOT EXISTS threads_targets (
+      post_id TEXT PRIMARY KEY,
+      caption TEXT NOT NULL,
+      media TEXT NOT NULL DEFAULT 'none',
+      status TEXT NOT NULL DEFAULT 'draft'
+    )`),
   ]);
   // Existing deployed D1 databases predate the optional video column.
   const columns = await db.prepare("PRAGMA table_info(bluesky_targets)").all<{name:string}>();
@@ -231,8 +265,12 @@ export function fromRow(r: Row): Post {
     items: JSON.parse(r.ig_items || "[]"),
     ...(r.ig_video ? { video: r.ig_video } : {}),
   };
+  const threads: ThreadsDraft | null = r.th_caption == null ? null : {
+    caption: r.th_caption, media: (THREADS_MEDIA as readonly string[]).includes(r.th_media ?? "") ? r.th_media as ThreadsMedia : "none",
+  };
+  const { th_caption: _c, th_media: _m, th_status: _s, ...rest } = r;
   return {
-    ...r,
+    ...rest,
     images: JSON.parse(r.images || "[]"),
     tiktok_images: r.tiktok_images==null ? null : JSON.parse(r.tiktok_images),
     tiktok_video: r.tiktok_video ?? null,
@@ -242,6 +280,8 @@ export function fromRow(r: Row): Post {
     bluesky_paused: r.bs_status === "disabled" ? bluesky : null,
     instagram: r.ig_status === "disabled" ? null : instagram,
     instagram_paused: r.ig_status === "disabled" ? instagram : null,
+    threads: r.th_status === "disabled" ? null : threads,
+    threads_paused: r.th_status === "disabled" ? threads : null,
   };
 }
 
@@ -330,8 +370,11 @@ export async function updateCalendarTime(
   // and neither moves once Instagram has started. A cron claim either happens
   // before (the guard refuses) or after (the job already has the new time).
   const results = await db.batch([
-    db.prepare(sql + ` AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = posts.id AND j.status IN ${IG_STARTED})`).bind(...args),
+    db.prepare(sql + ` AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = posts.id AND j.status IN ${IG_STARTED})`
+      + ` AND NOT EXISTS (SELECT 1 FROM threads_jobs t WHERE t.post_id = posts.id AND t.status IN ${IG_STARTED})`).bind(...args),
     db.prepare(`UPDATE instagram_jobs SET due_at = ?, updated_at = ? WHERE post_id = ? AND status = 'scheduled'
+      AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ?)`).bind(when, now, id, id, now),
+    db.prepare(`UPDATE threads_jobs SET due_at = ?, updated_at = ? WHERE post_id = ? AND status = 'scheduled'
       AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND updated_at = ?)`).bind(when, now, id, id, now),
   ]);
   return (results[0].meta.changes ?? 0) === 1;
@@ -373,7 +416,7 @@ export async function updateCalendarCaptions(
  * is no longer available: the old Page schedule must not be reactivated.
  *
  * A single D1 batch resets both targets. Stale forms and active/published
- * Bluesky targets cannot be reopened. An unresolved Instagram job also
+ * Bluesky targets cannot be reopened. An unresolved Instagram or Threads job
  * prevents revoking the shared approval, in the same database operation.
  */
 export async function reopenCancelledDraft(
@@ -388,7 +431,7 @@ export async function reopenCancelledDraft(
   const results = await db.batch([
     db.prepare("UPDATE posts SET status='draft', approved_at=NULL, scheduled_at=NULL, " +
       "fb_post_id=NULL, permalink=NULL, error=NULL, note=NULL, updated_at=? " +
-      "WHERE id=? AND status='cancelled' AND updated_at=? AND " + safeBluesky + " AND NOT " + igPending("posts"))
+      "WHERE id=? AND status='cancelled' AND updated_at=? AND " + safeBluesky + " AND NOT " + igPending("posts") + " AND NOT " + thPending("posts"))
       .bind(now,id,expectedVersion),
     db.prepare("UPDATE bluesky_targets SET status='draft', error=NULL, uri=NULL, cid=NULL, " +
       "card_uri=NULL, permalink=NULL, started_at=NULL WHERE post_id=? " +
@@ -539,7 +582,7 @@ export async function updatePost(db: D1Database, id: string, patch: Patch, onlyI
  * Refuses posts with a recorded Facebook id, an approved post unless the
  * caller confirmed human reconciliation, and any Bluesky target that is
  * scheduled, publishing, published or carries a remote record.
- * Refuses when an Instagram job is scheduled, in progress, or has an
+ * Refuses when an Instagram or Threads job is scheduled, in progress, or has an
  * unresolved failure, without cancelling its job or changing the post.
  * With expectedVersion, the post must still be the version the editor saw.
  */
@@ -558,7 +601,7 @@ export async function reopenFailedDraft(
         scheduled_at = CASE WHEN scheduled_at > ? THEN scheduled_at ELSE NULL END, updated_at = ?
       WHERE id = ? AND updated_at = ? AND status IN ('failed','rejected') AND fb_post_id IS NULL
         AND (approved_at IS NULL OR ? = 1)
-        AND NOT ${igPending("posts")}
+        AND NOT ${igPending("posts")} AND NOT ${thPending("posts")}
         AND NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id = posts.id AND
           (b.status IN ('scheduled','publishing','published') OR b.uri IS NOT NULL OR b.cid IS NOT NULL
            OR b.card_uri IS NOT NULL OR b.permalink IS NOT NULL))`)
@@ -580,6 +623,8 @@ export interface EditorDraft {
   tiktok_title: string | null;
   bluesky_enabled: boolean;
   instagram_enabled: boolean;
+  /** Undefined leaves Threads alone (older callers). */
+  threads_enabled?: boolean;
   images: string[];
   tiktok_images: string[] | null;
   video: string | null;
@@ -603,6 +648,8 @@ export async function saveEditorDraft(
   db: D1Database, id: string, expectedVersion: string, next: EditorDraft, bluesky: BlueskyDraft | null,
   /** Null only when the platform has never had saved editing data. */
   instagram?: InstagramDraft | null,
+  /** Same convention as Instagram: undefined leaves it alone, null removes it. */
+  threads?: ThreadsDraft | null,
 ): Promise<string | null> {
   await ensureSchema(db);
   if (!Number.isFinite(Date.parse(expectedVersion))) return null;
@@ -613,7 +660,8 @@ export async function saveEditorDraft(
         video = ?, tiktok_video = ?, facebook_enabled = ?, tiktok_enabled = ?, scheduled_at = ?, label = ?, release = ?,
         link = CASE WHEN ? = 1 THEN ? ELSE link END, updated_at = ?
       WHERE id = ? AND updated_at = ? AND status IN ('draft','rejected') AND approved_at IS NULL
-        AND ((scheduled_at IS ? AND ? = 1) OR NOT ${igPending("posts")})`)
+        AND ((scheduled_at IS ? AND ? = 1) OR NOT ${igPending("posts")})
+        AND ((scheduled_at IS ? AND ? = 1) OR NOT ${thPending("posts")})`)
       .bind(next.message, next.tiktok_caption, next.tiktok_title ?? null, JSON.stringify(next.images),
         next.tiktok_images === null ? null : JSON.stringify(next.tiktok_images),
         next.video, next.tiktok_video, next.facebook_enabled ? 1 : 0, next.tiktok_enabled ? 1 : 0,
@@ -621,7 +669,8 @@ export async function saveEditorDraft(
         next.link === undefined ? 0 : 1, next.link ?? null, version, id, expectedVersion,
         // With an approved Instagram job pending, the time and the Instagram
         // switch are frozen here; only the PIN-gated cancel or move changes them.
-        next.scheduled_at, next.instagram_enabled ? 1 : 0),
+        next.scheduled_at, next.instagram_enabled ? 1 : 0,
+        next.scheduled_at, next.threads_enabled === false ? 0 : 1),
     bluesky
       ? db.prepare(`INSERT INTO bluesky_targets (post_id, caption, images, video, patreon, facebook_enabled, status)
           SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${fenced}
@@ -641,6 +690,12 @@ export async function saveEditorDraft(
       (next.instagram_enabled ?? !!instagram) ? "draft" : "disabled", id, version));
   else if (instagram === null) statements.push(
     db.prepare(`DELETE FROM instagram_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version));
+  if (threads) statements.push(db.prepare(`INSERT INTO threads_targets (post_id, caption, media, status)
+      SELECT ?, ?, ?, ? WHERE ${fenced}
+      ON CONFLICT(post_id) DO UPDATE SET caption = excluded.caption, media = excluded.media, status = excluded.status`)
+    .bind(id, threads.caption, threads.media, (next.threads_enabled ?? !!threads) ? "draft" : "disabled", id, version));
+  else if (threads === null) statements.push(
+    db.prepare(`DELETE FROM threads_targets WHERE post_id = ? AND ${fenced}`).bind(id, id, version));
   const results = await db.batch(statements);
   return (results[0].meta.changes ?? 0) === 1 ? version : null;
 }
@@ -790,16 +845,18 @@ export async function claimForPublish(db: D1Database, id: string, input: Approva
 
 export async function deletePost(db: D1Database, id: string, onlyIfStatus: PostStatus[]): Promise<boolean> {
   await ensureSchema(db);
-  // A PIN-approved Instagram job (waiting, under way, unclear or published)
+  // A PIN-approved Instagram or Threads job (waiting, under way, unclear or published)
   // keeps its post. Only the owner's PIN-gated cancel releases it.
   const res = await db
     .prepare(`DELETE FROM posts WHERE id = ? AND status IN (${onlyIfStatus.map(() => "?").join(", ")})
-      AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = posts.id AND j.status <> 'cancelled')`)
+      AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id = posts.id AND j.status <> 'cancelled')
+      AND NOT EXISTS (SELECT 1 FROM threads_jobs t WHERE t.post_id = posts.id AND t.status <> 'cancelled')`)
     .bind(id, ...onlyIfStatus)
     .run();
   if ((res.meta.changes ?? 0) > 0) {
     await db.prepare("DELETE FROM bluesky_targets WHERE post_id = ?").bind(id).run();
     await db.prepare("DELETE FROM instagram_targets WHERE post_id = ?").bind(id).run();
+    await db.prepare("DELETE FROM threads_targets WHERE post_id = ?").bind(id).run();
     return true;
   }
   return false;
@@ -813,11 +870,11 @@ export async function audit(db: D1Database, actor: string, action: string, postI
     .run();
 }
 
-/** Reject a draft, unless an approved Instagram job for it may still publish. */
+/** Reject a draft, unless an approved Instagram or Threads job for it may still publish. */
 export async function rejectDraft(db: D1Database, id: string, note: string | null): Promise<boolean> {
   await ensureSchema(db);
   const res = await db.prepare(`UPDATE posts SET status = 'rejected', note = ?, updated_at = ?
-    WHERE id = ? AND status = 'draft' AND NOT ${igPending("posts")}`).bind(note, new Date().toISOString(), id).run();
+    WHERE id = ? AND status = 'draft' AND NOT ${igPending("posts")} AND NOT ${thPending("posts")}`).bind(note, new Date().toISOString(), id).run();
   return (res.meta.changes ?? 0) === 1;
 }
 
