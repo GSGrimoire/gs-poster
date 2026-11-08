@@ -379,6 +379,10 @@ test("T6: signed data deletion erases credentials and provider identifiers, and 
     assert.equal(j.lease_until,null);
   }
   assert.equal((await db.prepare("SELECT detail FROM audit WHERE action='threads-queued' AND post_id=?").bind(p.id).first<{detail:string|null}>())?.detail,null);
+  const connectionAudits = (await db.prepare("SELECT detail FROM audit WHERE action='threads-account-connected'")
+    .all<{detail:string|null}>()).results;
+  assert.ok(connectionAudits.length > 0, "the real OAuth flow created a profile-bearing audit entry");
+  assert.ok(connectionAudits.every(row => row.detail === null), "deletion also erases profile usernames from historical connection audits");
   const url = ORIGIN + new URL(receipt.url).pathname;
   const status = await mf.dispatchFetch(url);
   assert.equal(status.status,200);

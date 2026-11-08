@@ -300,7 +300,7 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
       // and remote errors from audit text for this deleted account.
       env.DB.prepare(`UPDATE audit SET detail = NULL WHERE
         (post_id IN (SELECT post_id FROM threads_jobs WHERE account_id = ?) AND action LIKE 'threads-%')
-        OR (actor = 'threads-provider' AND action = 'threads-account-suspended')`).bind(userId),
+        OR action IN ('threads-account-connected', 'threads-account-suspended', 'threads-renewal-failed')`).bind(userId),
       // An irreversible final send may have completed. Surface uncertainty,
       // but rotate the generation to reject any late in-flight database write.
       // User-authored draft text and dates are not imported Meta profile data.
