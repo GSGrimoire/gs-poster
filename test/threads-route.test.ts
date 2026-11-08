@@ -261,7 +261,7 @@ test("T4: both signed public callbacks fail closed for genuine early events and 
   };
   const protectedToken = () => threadsAccessToken({ DB: db, THREADS_APP_ID: "123456789",
     THREADS_APP_SECRET: APP_SECRET, COOKIE_SECRET: SECRET } as Env);
-  for (const path of ["/threads/deauthorize", "/threads/delete"]) {
+  for (const path of ["/threads/deauthorize"]) {
     // Real callback issued during the first 0-300 seconds of authorization.
     for (const offset of [0, 30, 299, 300]) {
       const current = await recover();
@@ -305,6 +305,92 @@ test("T4: both signed public callbacks fail closed for genuine early events and 
     assert.ok((await account())!.suspended_at != null, "wrong PIN cannot clear the suspension");
   }
   await recover();
+});
+
+
+test("T6: signed data deletion erases credentials and provider identifiers, and returns an idempotent public receipt", async () => {
+  // Exercise the production router and durable D1, including an in-flight send
+  // which must remain visibly unclear rather than be falsely called cancelled.
+  await post("/threads/disconnect", { pin: PIN, confirm: "yes" });
+  const s = await session();
+  const start = await mf.dispatchFetch(ORIGIN + "/threads/connect", {
+    method: "POST", headers: { Origin: ORIGIN, "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: SESSION_COOKIE + "=" + s.raw },
+    body: new URLSearchParams({ csrf: s.csrf, pin: PIN }),
+  });
+  assert.equal(start.status, 200);
+  const stateCookie = start.headers.get("set-cookie")!.split(";")[0];
+  const state = stateCookie.split("=")[1];
+  const connected = await mf.dispatchFetch(ORIGIN + "/threads/callback?code=test-code&state=" + state, {
+    headers: { Cookie: SESSION_COOKIE + "=" + s.raw + "; " + stateCookie },
+  });
+  assert.equal(connected.status, 303);
+  const account = await db.prepare("SELECT user_id, token_cipher FROM threads_accounts").first<{user_id:string;token_cipher:string}>();
+  assert.equal(account?.user_id, ACCOUNT_ID);
+  const now = new Date().toISOString(), due = new Date(Date.now() - 60000).toISOString();
+  const p = await createPost(db, { message:"Editorial draft retained", label:"test", release:null,
+    images:[], video:null, created_by:"test", scheduled_at:due } as any);
+  const q = await createPost(db, { message:"Other draft retained", label:"test", release:null,
+    images:[], video:null, created_by:"test", scheduled_at:due } as any);
+  await db.batch([
+    db.prepare(`INSERT INTO threads_jobs
+      (post_id,status,kind,due_at,text,items,created_by,updated_at,account_id,account_username,container_id,children,media_id,permalink,error,generation)
+      VALUES (?,'scheduled','TEXT',?,'Hello','[]','test',?,?,?,'remote-container','["remote-child"]','remote-post','https://www.threads.net/@test/post/1','remote error','old-generation')`)
+      .bind(p.id,due,now,ACCOUNT_ID,"gsgrimoire"),
+    db.prepare(`INSERT INTO threads_jobs
+      (post_id,status,kind,due_at,text,items,created_by,updated_at,account_id,account_username,container_id,generation,lease_until)
+      VALUES (?,'sending','TEXT',?,'Hello','[]','test',?,?,?,'inflight-container','inflight-generation',?)`)
+      .bind(q.id,due,now,ACCOUNT_ID,"gsgrimoire",new Date(Date.now()+300000).toISOString()),
+    db.prepare("INSERT INTO threads_media_grants (token_hash,post_id,item_index,expires_at,generation) VALUES ('grant-test',?,0,?,'old-generation')")
+      .bind(p.id,Math.floor(Date.now()/1000)+1000),
+    db.prepare("INSERT INTO threads_revocation_events (event_hash,user_id,kind,issued_at,received_at) VALUES ('event-test',?,'deauthorize',?,?)")
+      .bind(ACCOUNT_ID,Math.floor(Date.now()/1000),Math.floor(Date.now()/1000)),
+    db.prepare("INSERT INTO audit (ts,actor,action,post_id,detail) VALUES (?,'test','threads-queued',?,?)")
+      .bind(now,p.id,"provider account " + ACCOUNT_ID),
+  ]);
+  const payload = Buffer.from(JSON.stringify({algorithm:"HMAC-SHA256",user_id:ACCOUNT_ID,issued_at:Math.floor(Date.now()/1000)})).toString("base64url");
+  const signed = createHmac("sha256",APP_SECRET).update(payload).digest("base64url") + "." + payload;
+  const callback = (value:string) => mf.dispatchFetch(ORIGIN + "/threads/delete", {
+    method:"POST",body:new URLSearchParams({signed_request:value}),
+  });
+  assert.equal((await callback("forged." + payload)).status,400);
+  assert.equal((await db.prepare("SELECT token_cipher FROM threads_accounts").first<{token_cipher:string}>())?.token_cipher,account!.token_cipher);
+  const response = await callback(signed);
+  assert.equal(response.status,200);
+  const receipt = await response.json() as {url:string;confirmation_code:string};
+  assert.match(receipt.confirmation_code,/^[A-Za-z0-9_-]{32}$/);
+  assert.match(receipt.url,/\/threads\/delete\/status\/[A-Za-z0-9_-]{32}$/);
+  assert.equal(await db.prepare("SELECT * FROM threads_accounts").first(),null);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM threads_media_grants").first<{n:number}>())?.n,0);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM threads_revocation_events WHERE user_id=?").bind(ACCOUNT_ID).first<{n:number}>())?.n,0);
+  const cancelled = (await getThreadsJob(db,p.id))!;
+  assert.equal(cancelled.status,"cancelled","scheduled work was cancelled");
+  const unclear = (await getThreadsJob(db,q.id))!;
+  assert.equal(unclear.status,"failed");
+  assert.equal(unclear.ambiguous,true,"final send remains uncertain");
+  assert.notEqual(unclear.generation,"inflight-generation","late Workers cannot restore deleted metadata");
+  for (const j of [cancelled,unclear]) {
+    assert.equal(j.account_id,"");
+    assert.equal(j.account_username,"");
+    assert.equal(j.container_id,null);
+    assert.equal(j.media_id,null);
+    assert.equal(j.permalink,null);
+    assert.deepEqual(j.children,[]);
+    assert.equal(j.lease_until,null);
+  }
+  assert.equal((await db.prepare("SELECT detail FROM audit WHERE action='threads-queued' AND post_id=?").bind(p.id).first<{detail:string|null}>())?.detail,null);
+  const url = ORIGIN + new URL(receipt.url).pathname;
+  const status = await mf.dispatchFetch(url);
+  assert.equal(status.status,200);
+  assert.equal(status.headers.get("cache-control"),"no-store");
+  assert.match(await status.text(),/Threads data deletion completed/);
+  assert.equal((await mf.dispatchFetch(ORIGIN + "/threads/delete/status/" + "x".repeat(32))).status,404);
+  assert.equal((await mf.dispatchFetch(url,{method:"POST"})).status,405);
+  assert.match(await (await mf.dispatchFetch(ORIGIN + "/privacy")).text(),/Threads revocation and data deletion/);
+  assert.deepEqual(await (await callback(signed)).json(),receipt,"retries have stable confirmation data");
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM threads_deletion_requests").first<{n:number}>())?.n,1);
+  assert.equal((await getThreadsJob(db,p.id))!.status,"cancelled");
+  assert.ok(await getPost(db,p.id),"owner-authored content was not erased");
 });
 
 test("Facebook recovery and cancellation preserve active Threads jobs", async () => {

@@ -57,7 +57,7 @@ before(async () => {
 });
 after(async () => { await worker?.dispose(); });
 beforeEach(async () => {
-  for (const t of ["threads_jobs", "threads_media_grants", "threads_targets", "threads_accounts", "threads_oauth_states", "threads_revocation_events",
+  for (const t of ["threads_jobs", "threads_media_grants", "threads_targets", "threads_accounts", "threads_oauth_states", "threads_revocation_events", "threads_deletion_requests",
     "instagram_targets", "bluesky_targets", "posts", "audit"]) await db.prepare(`DELETE FROM ${t}`).run();
   calls = []; accountId = USER; status = "FINISHED"; publishFails = false; nextId = 0; holdPublish = undefined; renewFails = false; holdStatus = undefined;
   globalThis.fetch = async (input, init) => {
@@ -176,13 +176,12 @@ test("Meta's signed callbacks: a forged request changes nothing, a valid one sus
     body: new URLSearchParams({ signed_request: sign({ algorithm: "HMAC-SHA256", user_id: USER, issued_at: Math.floor(Date.now() / 1000) }) }) }), env(), "delete");
   assert.equal(del.status, 200);
   const body = await del.json() as { url: string; confirmation_code: string };
-  assert.match(body.confirmation_code, /^[A-Za-z0-9_-]{16}$/);
-  const held = await threadsConnection(db);
-  assert.equal(held?.suspended_kind, "delete");
-  assert.ok(held?.suspended_at != null);
-  await assert.rejects(threadsAccessToken(env()), /suspended/);
+  assert.match(body.confirmation_code, /^[A-Za-z0-9_-]{32}$/);
+  assert.match(body.url, /\/threads\/delete\/status\//);
+  assert.equal(await threadsConnection(db), null, "signed data deletion erases the connected profile and encrypted token");
+  await assert.rejects(threadsAccessToken(env()), /No Threads account/);
   const events = await db.prepare("SELECT COUNT(*) AS n FROM threads_revocation_events").first<{ n: number }>();
-  assert.equal(events?.n, 1);
+  assert.equal(events?.n, 0, "no provider-linked callback history remains");
   const get = await threadsAccountCallback(new Request("https://gs-poster.test/threads/delete"), env(), "delete");
   assert.equal(get.status, 405);
 });
@@ -541,9 +540,14 @@ test("T4: a fresh signed event or replay after a same-second reconnect suspends 
   for (const kind of ["deauthorize", "delete"] as const) {
     const res = await callback(kind, oldEvent);
     assert.equal(res.status, 200, kind);
-    assert.ok((await threadsConnection(db))!.suspended_at != null,
-      "replay leaves posting suspended, never silently authorized");
-    await assert.rejects(threadsAccessToken(env()), /suspended/);
+    if (kind === "delete") {
+      assert.equal(await threadsConnection(db), null, "delete erases the new sign-in, even when replayed");
+      await assert.rejects(threadsAccessToken(env()), /No Threads account/);
+    } else {
+      assert.ok((await threadsConnection(db))!.suspended_at != null,
+        "replay leaves posting suspended, never silently authorized");
+      await assert.rejects(threadsAccessToken(env()), /suspended/);
+    }
     if (kind === "deauthorize") {
       await disconnectThreads(db);
       await connect();
@@ -551,7 +555,9 @@ test("T4: a fresh signed event or replay after a same-second reconnect suspends 
     }
   }
   const marker = await db.prepare("SELECT COUNT(*) AS n FROM threads_revocation_events").first<{ n: number }>();
-  assert.equal(marker?.n, 2);
+  assert.equal(marker?.n, 0, "signed deletion erased provider-linked event history");
+  const receipt = await db.prepare("SELECT COUNT(*) AS n FROM threads_deletion_requests").first<{ n: number }>();
+  assert.equal(receipt?.n, 1);
 });
 
 test("T4: an early signed callback blocks scheduled Threads publication and requires a fresh connection", async () => {
@@ -589,7 +595,7 @@ test("T4: callback during remote container processing stops at the atomic final-
   holdStatus = gateStatus.hold;
   const run = processThreadsBatch(env());
   await gateStatus.reached;
-  assert.equal((await callback("delete", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) })).status, 200);
+  assert.equal((await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) })).status, 200);
   gateStatus.release();
   await run;
   assert.equal(graphPosts("/threads_publish").length, 0, "suspension before the barrier blocks the final send");
