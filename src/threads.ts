@@ -358,6 +358,9 @@ export async function threadsDeletionStatus(req: Request, env: Env): Promise<Res
     Content delivered to Meta is governed by its own retention rules.</p>
     <p><a href="/privacy">Privacy Policy</a></p></main>`;
   const response = html(page("Threads deletion status", body, { public: true }), { headers });
+  // The HTML helper also adds cache directives. Normalize this sensitive
+  // request-specific page to exactly one non-cacheable response directive.
+  response.headers.set("Cache-Control", "no-store");
   return req.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
 }
 
