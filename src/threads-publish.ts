@@ -327,8 +327,8 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
   const job = await claimDue(env.DB, now);
   if (!job) return;
   const fail = async (message: string, ambiguous: boolean, from: ThreadsJobStatus[]) => {
-    await write(env.DB, job, { status: "failed", error: message, ambiguous: ambiguous ? 1 : 0, lease_until: null }, from);
-    await audit(env.DB, "cron", ambiguous ? "threads-ambiguous" : "threads-failed", job.post_id, message);
+    if (await write(env.DB, job, { status: "failed", error: message, ambiguous: ambiguous ? 1 : 0, lease_until: null }, from))
+      await audit(env.DB, "cron", ambiguous ? "threads-ambiguous" : "threads-failed", job.post_id, message);
   };
   let sent = false;
   let remoteId: string | null = null;
@@ -403,8 +403,8 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
       const late = await env.DB.prepare(`UPDATE threads_jobs SET status = 'published', media_id = ?, ambiguous = 0, error = NULL,
           lease_until = NULL, updated_at = ? WHERE post_id = ? AND generation = ? AND status = 'failed' AND ambiguous = 1 AND media_id IS NULL`)
         .bind(mediaId, new Date().toISOString(), job.post_id, job.generation).run();
-      await audit(env.DB, "cron", (late.meta.changes ?? 0) === 1 ? "threads-published-late" : "threads-late-result-after-owner-decision",
-        job.post_id, mediaId);
+      if ((late.meta.changes ?? 0) === 1)
+        await audit(env.DB, "cron", "threads-published-late", job.post_id, mediaId);
       return;
     }
     const permalink = (await graph(creds, "GET", mediaId, { fields: "permalink" }).catch(() => null))?.permalink ?? null;
@@ -465,7 +465,7 @@ export function threadsJobCard(job: ThreadsJob | null, postId: string, csrf: str
       <label>Approval PIN<input name="pin" type="password" inputmode="numeric" autocomplete="off" required></label>
       <button type="submit">${esc(button)}</button></form>`;
   const kind = (job.kind === "CAROUSEL" ? job.items.length + "-photo carousel" : job.kind === "IMAGE" ? "photo post" : "text post") +
-    " for @" + (job.account_username || job.account_id);
+    (job.account_id ? " for @" + (job.account_username || job.account_id) : " (account data deleted)");
   return `<section class="ed-card th-job" aria-label="Threads publishing"><h3>Threads</h3>
     <p><strong>${esc(LABEL[job.status])}</strong> · ${esc(kind)}${job.status === "scheduled" ? " · " + esc(when(job.due_at)) : ""}</p>
     ${job.permalink ? `<p><a href="${esc(job.permalink)}" target="_blank" rel="noopener noreferrer">Open on Threads</a></p>` : ""}

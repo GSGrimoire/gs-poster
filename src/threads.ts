@@ -15,7 +15,8 @@
  *   authorization, which requires owner PIN-gated reconnection.
  */
 import type { Env } from "./env.ts";
-import { audit } from "./db.ts";
+import { audit, ensureSchema } from "./db.ts";
+import { esc, html, page } from "./html.ts";
 import type { Session } from "./session.ts";
 import { cookie, getCookie, randomToken, safeEqual, sha256 } from "./session.ts";
 
@@ -88,6 +89,10 @@ export async function ensureThreadsSchema(db: D1Database): Promise<void> {
     db.prepare(`CREATE TABLE IF NOT EXISTS threads_revocation_events (
       event_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL,
       issued_at INTEGER NOT NULL, received_at INTEGER NOT NULL)`),
+    // No account ID or encrypted token is retained in deletion receipts.
+    db.prepare(`CREATE TABLE IF NOT EXISTS threads_deletion_requests (
+      request_hash TEXT PRIMARY KEY, confirmation_code TEXT NOT NULL UNIQUE,
+      received_at INTEGER NOT NULL, completed_at INTEGER NOT NULL)`),
   ]);
   // Upgrade existing D1 accounts without dropping encrypted sign-ins.
   const columns = await db.prepare("PRAGMA table_info(threads_accounts)").all<{ name: string }>();
@@ -258,12 +263,60 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
     return new Response("Stale signed request", { status: 400, headers });
   await ensureThreadsSchema(env.DB);
   const userId = String(data.user_id);
-  // A replay is still capable of forcing suspension after a new same-account
-  // authorization. This denial-of-service tradeoff is intentional: silently
-  // leaving a genuinely revoked token publishable is not acceptable.
-  // The event marker and suspension update commit in the same D1 transaction.
-  // A callback racing a reconnect either suspends the old connection before
-  // its PIN-authorized replacement, or suspends the replacement itself.
+
+  if (kind === "delete") {
+    // A data deletion request is not a deauthorization. Erase synchronously
+    // and only return a completed receipt once the D1 transaction commits.
+    // A signed replay re-runs erasure, also fencing a fresh connection to the
+    // same account; it reuses its original anonymous status receipt.
+    await ensureSchema(env.DB);
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS threads_media_grants (
+      token_hash TEXT PRIMARY KEY, post_id TEXT NOT NULL, item_index INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL, generation TEXT)`).run();
+    const requestHash = await sha256("threads-delete-v1:" + signed);
+    await env.DB.batch([
+      env.DB.prepare(`INSERT OR IGNORE INTO threads_deletion_requests
+        (request_hash, confirmation_code, received_at, completed_at)
+        VALUES (?, ?, ?, ?)`).bind(requestHash, randomToken(), now, now),
+      env.DB.prepare(`DELETE FROM threads_media_grants WHERE post_id IN
+        (SELECT post_id FROM threads_jobs WHERE account_id = ?)`).bind(userId),
+      // Preserve operational events, but remove provider names, identifiers
+      // and remote errors from audit text for this deleted account.
+      env.DB.prepare(`UPDATE audit SET detail = NULL WHERE
+        (post_id IN (SELECT post_id FROM threads_jobs WHERE account_id = ?) AND action LIKE 'threads-%')
+        OR (actor = 'threads-provider' AND action = 'threads-account-suspended')`).bind(userId),
+      // An irreversible final send may have completed. Surface uncertainty,
+      // but rotate the generation to reject any late in-flight database write.
+      // User-authored draft text and dates are not imported Meta profile data.
+      env.DB.prepare(`UPDATE threads_jobs SET
+        status = CASE WHEN status = 'sending' OR (status = 'failed' AND ambiguous = 1)
+          THEN 'failed' WHEN status = 'published' THEN 'published' ELSE 'cancelled' END,
+        ambiguous = CASE WHEN status = 'sending' OR (status = 'failed' AND ambiguous = 1)
+          THEN 1 ELSE 0 END,
+        error = CASE WHEN status = 'sending' OR (status = 'failed' AND ambiguous = 1)
+          THEN 'Account deletion occurred after the final send began. Publication may have completed; never resend automatically.'
+          ELSE NULL END,
+        account_id = '', account_username = '', children = '[]', container_id = NULL,
+        processing_since = NULL, media_id = NULL, permalink = NULL,
+        lease_until = NULL, generation = lower(hex(randomblob(16))), updated_at = ?
+        WHERE account_id = ?`).bind(new Date().toISOString(), userId),
+      env.DB.prepare("DELETE FROM threads_revocation_events WHERE user_id = ?").bind(userId),
+      // Do not let an earlier PIN-initiated OAuth state finish after deletion.
+      env.DB.prepare("DELETE FROM threads_oauth_states"),
+      env.DB.prepare("DELETE FROM threads_accounts WHERE account_key = 'primary' AND user_id = ?").bind(userId),
+    ]);
+    const receipt = await env.DB.prepare(`SELECT confirmation_code FROM threads_deletion_requests
+      WHERE request_hash = ?`).bind(requestHash).first<{ confirmation_code: string }>();
+    if (!receipt) throw new Error("Threads deletion was not durably acknowledged.");
+    const origin = (env.PUBLIC_ORIGIN || "https://gs-poster.goofyspook.workers.dev").replace(/\/$/, "");
+    return Response.json({
+      url: origin + "/threads/delete/status/" + receipt.confirmation_code,
+      confirmation_code: receipt.confirmation_code,
+    }, { headers });
+  }
+  // A signed deauthorization may be a replay from a prior authorization.
+  // Suspend the currently connected account rather than silently allowing
+  // publication. The event digest and hold commit together.
   const results = await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO threads_revocation_events (event_hash, user_id, kind, issued_at, received_at)
       VALUES (?, ?, ?, ?, ?)`).bind(await sha256(kind + ":" + signed), userId, kind, issued, now),
@@ -275,11 +328,30 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
     await audit(env.DB, "threads-provider", "threads-account-suspended", null,
       kind + " for account " + userId + " issued_at=" + issued).catch(() => undefined);
   }
-  if (kind === "deauthorize") return new Response("ok", { headers });
-  // Meta expects a status URL and a confirmation code for data deletion.
-  const code = (await sha256(userId + ":" + issued)).slice(0, 16);
-  return Response.json({ url: (env.PUBLIC_ORIGIN || "https://gs-poster.goofyspook.workers.dev").replace(/\/$/, "") + "/privacy", confirmation_code: code },
-    { headers });
+  return new Response("ok", { headers });
+}
+
+/** A public, unguessable receipt, without personal identifiers. */
+export async function threadsDeletionStatus(req: Request, env: Env): Promise<Response> {
+  const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" };
+  if (req.method !== "GET" && req.method !== "HEAD")
+    return new Response("Method not allowed", { status: 405, headers: { ...headers, Allow: "GET, HEAD" } });
+  const match = /^\/threads\/delete\/status\/([A-Za-z0-9_-]{32})$/.exec(new URL(req.url).pathname);
+  if (!match) return new Response("Not found", { status: 404, headers });
+  await ensureThreadsSchema(env.DB);
+  const row = await env.DB.prepare(`SELECT confirmation_code, completed_at FROM threads_deletion_requests
+    WHERE confirmation_code = ?`).bind(match[1]).first<{ confirmation_code: string; completed_at: number }>();
+  if (!row) return new Response("Not found", { status: 404, headers });
+  const body = `<main><h2>Threads data deletion completed</h2>
+    <p>GS Poster completed this request on ${esc(new Date(row.completed_at * 1000).toISOString())}.
+    Stored Threads credentials, account profile and provider-issued job identifiers were erased.
+    A publication already past the final send boundary may have completed and is never automatically retried.</p>
+    <p>Confirmation code: <code>${esc(row.confirmation_code)}</code></p>
+    <p>Editorial drafts and operational history without the deleted account details may remain.
+    Content delivered to Meta is governed by its own retention rules.</p>
+    <p><a href="/privacy">Privacy Policy</a></p></main>`;
+  const response = html(page("Threads deletion status", body, { public: true }), { headers });
+  return req.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
 }
 
 const CALLBACK_MAX_BYTES = 8192;

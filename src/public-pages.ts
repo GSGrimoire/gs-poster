@@ -37,19 +37,21 @@ const terms = `
 
 const privacy = `
 <main>
-<h2>Privacy Policy</h2><p class="hint">Effective date: 28 October 2026</p>
+<h2>Privacy Policy</h2><p class="hint">Effective date: 8 November 2026</p>
 <p>This policy describes information processed by GS Poster when authorized GS Grimoire editors use the service. Public information pages can be accessed without logging in.</p>
 <h3>Data collected and processed</h3>
 <p><strong>Editor authentication:</strong> GitHub account identifiers needed for access authorization, and session cookies for signed-in use and request protection.</p>
 <p><strong>Publishing workflow:</strong> Draft captions, post names, planned times, platform selections, approval status, errors, publication identifiers and an audit history of editorial actions.</p>
 <p><strong>Media:</strong> Uploaded images, videos and alternative text are held in private object storage or referenced from authorized sources.</p>
-<p><strong>Connected platforms:</strong> Account identifiers and authorization credentials used to perform approved actions on connected social media accounts. Secrets are managed on the server and are not intentionally exposed in public pages.</p>
+<p><strong>Connected platforms:</strong> Account identifiers and authorization credentials used to perform approved actions on connected social media accounts. Threads stores an account identifier, username, encrypted access token, temporary media grants and provider-issued job identifiers. Secrets are managed on the server and are not intentionally exposed in public pages.</p>
 <h3>Purposes</h3>
 <p>This information is used to authenticate authorized editors, prepare and approve content, transfer approved media to selected platforms, schedule publishing, display status and history, and investigate failures or misuse. It is not sold to advertisers.</p>
 <h3>Service providers and recipients</h3>
-<p>GS Poster uses GitHub for editor sign-in, Cloudflare for hosting and storage, and connected publishing platforms, currently Facebook and Bluesky. If an editor connects TikTok, GS Poster processes the account identifier and encrypted authorization tokens needed for selected video and photo transfers. Inbox uploads require manual publication in TikTok. Direct Post testing requires separate video.publish permission and explicit approval, and is restricted to private visibility while unaudited. Temporary unguessable media URLs are served for approved TikTok fetches and expire after three hours. External providers maintain their own privacy policies.</p>
+<p>GS Poster uses GitHub for editor sign-in, Cloudflare for hosting and storage, and connected publishing platforms, currently Facebook and Bluesky. If an editor connects TikTok, GS Poster processes the account identifier and encrypted authorization tokens needed for selected video and photo transfers. Inbox uploads require manual publication in TikTok. Direct Post testing requires separate video.publish permission and explicit approval, and is restricted to private visibility while unaudited. Temporary unguessable media URLs are served for approved TikTok fetches and expire after three hours. Threads uses short-lived media links for Meta to retrieve explicitly approved photos. External providers maintain their own privacy policies.</p>
 <h3>Retention</h3>
 <p>Private media uploads currently have an approximately 45-day storage policy and are not a permanent archive. Post records, activity logs and published or cancelled post history may remain for operational and accountability purposes. Copies delivered to social platforms are subject to those platforms' separate retention practices.</p>
+<h3>Threads revocation and data deletion</h3>
+<p>A signed Threads deauthorization suspends local publishing until owner-authorized reconnection. A valid signed data deletion request synchronously erases the stored account and encrypted access token, revokes local media grants and removes provider account and publication identifiers from saved Threads jobs. Unsent jobs are cancelled; a final send already in flight is recorded as uncertain and is not automatically retried. Owner-authored drafts and necessary operational records without those provider identifiers may remain. The callback returns a unique confirmation code and a public request-specific completion page, neither of which exposes the account identifier. Content already held by Meta is subject to Meta's retention policies.</p>
 <h3>Security</h3>
 <p>The dashboard is protected by restricted sign-in, publishing approval checks, request validation and private media storage. No internet-connected service can guarantee perfect security.</p>
 <h3>Your requests and contact</h3>

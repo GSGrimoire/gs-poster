@@ -19,7 +19,7 @@ import { tiktokConnection } from "./tiktok.ts";
 import { tiktokOptionsPage, TIKTOK_DIRECT_POST_VISIBLE } from "./tiktok-options.ts";
 import { serveTikTokMedia } from "./tiktok-media.ts";
 import { THREADS_CONNECT_JS, threadsCallback, threadsSettings, threadsSettingsAction } from "./threads-web.ts";
-import { threadsAccountCallback } from "./threads.ts";
+import { threadsAccountCallback, threadsDeletionStatus } from "./threads.ts";
 import { cancelThreadsJob, closeAmbiguousThreadsJob, getThreadsJob, queueThreadsOnApproval, retryThreadsJob,
   serveThreadsMedia, threadsFreezeProblem, threadsItems, threadsJobCard, threadsPhotoDigest, threadsPending, threadsReleasePlan } from "./threads-publish.ts";
 import { cancelInstagramJob, closeAmbiguousInstagramJob, getInstagramJob, instagramFreezeProblem, instagramJobCard, instagramPending, instagramReleasePlan,
@@ -112,6 +112,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   // Threads: same kind of short-lived media links; Meta's signed account
   // callbacks (verified with the app secret); the sign-in callback checks the session itself.
   if (path.startsWith("/threads/media/")) return serveThreadsMedia(req,env);
+  if (path.startsWith("/threads/delete/status/")) return threadsDeletionStatus(req,env);
   if (path === "/threads/deauthorize") return threadsAccountCallback(req,env,"deauthorize");
   if (path === "/threads/delete") return threadsAccountCallback(req,env,"delete");
   if (path === "/threads/callback") return threadsCallback(req,env);
