@@ -81,7 +81,7 @@ export async function unsealThreadsToken(env: Env, value: string): Promise<strin
 
 export async function ensureThreadsSchema(db: D1Database): Promise<void> {
   await db.batch([
-    db.prepare("CREATE TABLE IF NOT EXISTS threads_oauth_states (state_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL, actor TEXT NOT NULL, expires_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS threads_oauth_states (state_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL, actor TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS threads_accounts (account_key TEXT PRIMARY KEY CHECK(account_key='primary'),
       user_id TEXT NOT NULL, username TEXT NOT NULL, token_cipher TEXT NOT NULL, connected_by TEXT NOT NULL,
       expires_at INTEGER NOT NULL, issued_at INTEGER NOT NULL, updated_at TEXT NOT NULL, lease_id TEXT, lease_until INTEGER,
@@ -94,6 +94,14 @@ export async function ensureThreadsSchema(db: D1Database): Promise<void> {
       request_hash TEXT PRIMARY KEY, confirmation_code TEXT NOT NULL UNIQUE,
       received_at INTEGER NOT NULL, completed_at INTEGER NOT NULL)`),
   ]);
+  // Keep consumed authorization states until the callback has committed.
+  // Data deletion removes even consumed states, thereby fencing a callback
+  // which is already waiting on the provider's token/profile endpoints.
+  const stateCols = await db.prepare("PRAGMA table_info(threads_oauth_states)").all<{ name: string }>();
+  if (!stateCols.results.some(column => column.name === "consumed_at")) {
+    try { await db.prepare("ALTER TABLE threads_oauth_states ADD COLUMN consumed_at INTEGER").run(); }
+    catch (error) { if (!/duplicate column name/i.test(String(error))) throw error; }
+  }
   // Upgrade existing D1 accounts without dropping encrypted sign-ins.
   const columns = await db.prepare("PRAGMA table_info(threads_accounts)").all<{ name: string }>();
   for (const [name, type] of [["suspended_at", "INTEGER"], ["suspended_kind", "TEXT"], ["suspended_issued_at", "INTEGER"]]) {
@@ -144,8 +152,11 @@ export async function finishThreadsConnection(env: Env, session: Session, req: R
   const state = u.searchParams.get("state") || "", bound = getCookie(req, THREADS_STATE_COOKIE) || "";
   if (!state || !bound || !safeEqual(state, bound)) throw new Error("Threads sign-in expired or was opened in a different browser.");
   await ensureThreadsSchema(env.DB);
-  const consumed = await env.DB.prepare("DELETE FROM threads_oauth_states WHERE state_hash = ? AND session_hash = ? AND actor = ? AND expires_at > ?")
-    .bind(await sha256(state), await sha256(session.raw), session.login, unix()).run();
+  const stateHash = await sha256(state);
+  const consumedAt = unix();
+  const consumed = await env.DB.prepare(`UPDATE threads_oauth_states SET consumed_at = ?
+    WHERE state_hash = ? AND session_hash = ? AND actor = ? AND expires_at > ? AND consumed_at IS NULL`)
+    .bind(consumedAt, stateHash, await sha256(session.raw), session.login, consumedAt).run();
   if (consumed.meta.changes !== 1) throw new Error("Threads sign-in expired or was already used. Start again from the settings page.");
   if (u.searchParams.has("error")) throw new Error("Threads sign-in was cancelled.");
   const code = (u.searchParams.get("code") || "").replace(/#_$/, "");
@@ -165,14 +176,19 @@ export async function finishThreadsConnection(env: Env, session: Session, req: R
   if (existing && existing.user_id !== me.id) throw new Error("Another Threads account is connected. Disconnect it first.");
   const now = unix();
   const saved = await env.DB.prepare(`INSERT INTO threads_accounts (account_key, user_id, username, token_cipher, connected_by, expires_at, issued_at, updated_at, connected_at)
-      VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, unixepoch())
+    SELECT 'primary', ?, ?, ?, ?, ?, ?, ?, unixepoch() FROM threads_oauth_states
+      WHERE state_hash = ? AND consumed_at = ? AND expires_at > unixepoch()
     ON CONFLICT(account_key) DO UPDATE SET username = excluded.username, token_cipher = excluded.token_cipher,
       connected_by = excluded.connected_by, expires_at = excluded.expires_at, issued_at = excluded.issued_at,
       updated_at = excluded.updated_at, connected_at = excluded.connected_at, suspended_at = NULL,
       suspended_kind = NULL, suspended_issued_at = NULL, lease_id = NULL, lease_until = NULL
     WHERE threads_accounts.user_id = excluded.user_id`)
     .bind(me.id, String(me.username ?? ""), await sealThreadsToken(env, long.access_token), session.login,
-      now + long.expires_in, now, new Date().toISOString()).run();
+      now + long.expires_in, now, new Date().toISOString(), stateHash, consumedAt).run();
+  // Deletion invalidates pending sign-ins atomically with erasure. If that
+  // happened mid-exchange, the guarded insert cannot restore credentials.
+  await env.DB.prepare("DELETE FROM threads_oauth_states WHERE state_hash = ? AND consumed_at = ?")
+    .bind(stateHash, consumedAt).run();
   const connection = await threadsConnection(env.DB);
   if (saved.meta.changes !== 1 || connection?.user_id !== me.id)
     throw new Error("The Threads connection changed while signing in. Reload settings.");
@@ -319,7 +335,9 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
   // publication. The event digest and hold commit together.
   const results = await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO threads_revocation_events (event_hash, user_id, kind, issued_at, received_at)
-      VALUES (?, ?, ?, ?, ?)`).bind(await sha256(kind + ":" + signed), userId, kind, issued, now),
+      SELECT ?, ?, ?, ?, ? WHERE EXISTS
+        (SELECT 1 FROM threads_accounts WHERE account_key = 'primary' AND user_id = ?)`)
+      .bind(await sha256(kind + ":" + signed), userId, kind, issued, now, userId),
     env.DB.prepare(`UPDATE threads_accounts SET suspended_at = ?, suspended_kind = ?, suspended_issued_at = ?,
       lease_id = NULL, lease_until = NULL
       WHERE account_key = 'primary' AND user_id = ? AND suspended_at IS NULL`).bind(now, kind, issued, userId),
