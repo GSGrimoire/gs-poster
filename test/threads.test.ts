@@ -662,6 +662,35 @@ test("a disconnect after a run read its sign-in stops the job at the send barrie
   assert.match(job.error!, /was disconnected or suspended before the final send/);
 });
 
+
+test("T6: deleting an account after the final send barrier prevents late provider identifiers being restored", async () => {
+  await connect();
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  await processThreadsBatch(env()); // prepare the container
+  assert.equal((await getThreadsJob(db, p.id))!.status, "processing");
+  const pendingSend = gate();
+  holdPublish = pendingSend.hold;
+  const publish = processThreadsBatch(env());
+  await pendingSend.reached; // the one-way sending barrier was already crossed
+  const deleted = await callback("delete", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) });
+  assert.equal(deleted.status, 200);
+  pendingSend.release(); // the provider now reports a successful final send
+  await publish;
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.status, "failed", "a completed remote send is not falsely labelled cancelled");
+  assert.equal(job.ambiguous, true, "the owner must reconcile an in-flight send");
+  assert.equal(job.account_id, "");
+  assert.equal(job.media_id, null);
+  assert.equal(job.permalink, null);
+  assert.equal(job.container_id, null);
+  const auditRows = (await db.prepare("SELECT action, detail FROM audit WHERE post_id = ?")
+    .bind(p.id).all<{ action: string; detail: string | null }>()).results;
+  assert.ok(auditRows.every(row => row.detail === null || !/th-post-1|gsgrimoire|178414/.test(row.detail)),
+    "a late worker cannot recreate deleted provider identifiers in the activity log");
+  assert.equal(auditRows.filter(row => row.action === "threads-published").length, 0,
+    "a late remote response does not create a post-published audit entry after deletion");
+});
+
 test("T5: a streamed callback body with no declared size is cut off after 8 KB, unread beyond that", async () => {
   await connect();
   let pulled = 0;
