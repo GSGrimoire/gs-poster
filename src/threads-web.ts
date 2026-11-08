@@ -127,7 +127,14 @@ export async function threadsCallback(req: Request, env: Env): Promise<Response>
   if (await pinLocked(env.DB)) return fail("Too many wrong PINs. Approvals and account settings are locked for up to an hour.", 429, session.login);
   try {
     const conn = await finishThreadsConnection(env, session, req);
-    await audit(env.DB, session.login, "threads-account-connected", null, "@" + conn.username).catch(() => undefined);
+    // A provider deletion can race the OAuth completion. A late audit must not
+    // restore a profile name after the deletion transaction erased it.
+    await env.DB.prepare(`INSERT INTO audit (ts, actor, action, post_id, detail)
+      SELECT ?, ?, 'threads-account-connected', NULL, ?
+      WHERE EXISTS (SELECT 1 FROM threads_accounts
+        WHERE account_key = 'primary' AND user_id = ? AND suspended_at IS NULL)`)
+      .bind(new Date().toISOString(), session.login, "@" + conn.username, conn.user_id)
+      .run().catch(() => undefined);
     return redirect("/threads/settings?notice=connected", clearThreadsStateCookie());
   } catch (error) {
     const res = fail(error instanceof Error ? error.message : "Threads sign-in failed.", 400, session.login);

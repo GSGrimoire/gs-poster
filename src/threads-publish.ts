@@ -148,6 +148,7 @@ export async function queueThreadsOnApproval(env: Env, postId: string, expectedV
   if (plan.accountId !== expectedAccountId)
     throw new Error("The Threads account changed. Reload and review the new account before approving.");
   const now = new Date().toISOString();
+  const generation = randomToken();
   const res = await env.DB.prepare(`INSERT INTO threads_jobs (post_id, status, kind, due_at, text, frame, items, created_by, updated_at, account_id, account_username, generation)
     SELECT ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM posts
       WHERE id = ? AND updated_at = ? AND status = 'draft' AND approved_at IS NULL
@@ -159,9 +160,10 @@ export async function queueThreadsOnApproval(env: Env, postId: string, expectedV
       updated_at = excluded.updated_at, account_id = excluded.account_id, account_username = excluded.account_username, generation = excluded.generation
     WHERE threads_jobs.status = 'cancelled'`)
     .bind(postId, plan.kind, dueAt.toISOString(), post.threads!.caption, frame, JSON.stringify(frozenItems), actor, now,
-      plan.accountId, plan.account, randomToken(), postId, expectedVersion, expectedAccountId).run();
+      plan.accountId, plan.account, generation, postId, expectedVersion, expectedAccountId).run();
   if ((res.meta.changes ?? 0) !== 1) throw new Error("Threads could not be queued: the draft or connected account changed, or a job already exists. Reload.");
-  await audit(env.DB, actor, "threads-queued", postId, plan.kind + " at " + dueAt.toISOString() + " for @" + plan.account);
+  await auditCurrentThreadsJob(env.DB, { post_id: postId, account_id: plan.accountId, generation },
+    actor, "threads-queued", plan.kind + " at " + dueAt.toISOString() + " for @" + plan.account);
   return (await getThreadsJob(env.DB, postId))!;
 }
 
@@ -307,6 +309,19 @@ async function claimDue(db: D1Database, now: Date): Promise<ThreadsJob | null> {
   return fromRow({ ...row, lease_until: lease, status: row.status === "scheduled" ? "preparing" : row.status });
 }
 
+/** Write provider-related audit detail only while the exact approved job
+ * generation and account still exist. A deletion may have finished after a
+ * remote Graph response but before a worker writes its final audit line. */
+async function auditCurrentThreadsJob(db: D1Database,
+  job: Pick<ThreadsJob, "post_id" | "generation" | "account_id">,
+  actor: string, action: string, detail?: string): Promise<void> {
+  await db.prepare(`INSERT INTO audit (ts, actor, action, post_id, detail)
+    SELECT ?, ?, ?, ?, ? WHERE EXISTS
+      (SELECT 1 FROM threads_jobs WHERE post_id = ? AND generation = ? AND account_id = ?)`)
+    .bind(new Date().toISOString(), actor, action, job.post_id, detail ?? null,
+      job.post_id, job.generation, job.account_id).run();
+}
+
 async function write(db: D1Database, job: ThreadsJob, sets: Record<string, unknown>, from: ThreadsJobStatus[]): Promise<boolean> {
   const entries = Object.entries({ ...sets, updated_at: new Date().toISOString() });
   const res = await db.prepare(`UPDATE threads_jobs SET ${entries.map(([k]) => k + " = ?").join(", ")}
@@ -328,7 +343,7 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
   if (!job) return;
   const fail = async (message: string, ambiguous: boolean, from: ThreadsJobStatus[]) => {
     if (await write(env.DB, job, { status: "failed", error: message, ambiguous: ambiguous ? 1 : 0, lease_until: null }, from))
-      await audit(env.DB, "cron", ambiguous ? "threads-ambiguous" : "threads-failed", job.post_id, message);
+      await auditCurrentThreadsJob(env.DB, job, "cron", ambiguous ? "threads-ambiguous" : "threads-failed", message);
   };
   let sent = false;
   let remoteId: string | null = null;
@@ -404,7 +419,7 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
           lease_until = NULL, updated_at = ? WHERE post_id = ? AND generation = ? AND status = 'failed' AND ambiguous = 1 AND media_id IS NULL`)
         .bind(mediaId, new Date().toISOString(), job.post_id, job.generation).run();
       if ((late.meta.changes ?? 0) === 1)
-        await audit(env.DB, "cron", "threads-published-late", job.post_id, mediaId);
+        await auditCurrentThreadsJob(env.DB, job, "cron", "threads-published-late", mediaId);
       return;
     }
     const permalink = (await graph(creds, "GET", mediaId, { fields: "permalink" }).catch(() => null))?.permalink ?? null;
@@ -414,7 +429,7 @@ export async function processThreadsBatch(env: Env, now = new Date()): Promise<v
         .bind(String(permalink), new Date().toISOString(), job.post_id, job.generation, mediaId).run();
     }
     await pruneThreadsGrants(env.DB, job.post_id);
-    await audit(env.DB, "cron", "threads-published", job.post_id, mediaId);
+    await auditCurrentThreadsJob(env.DB, job, "cron", "threads-published", mediaId);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (sent) await fail((remoteId ? `Threads returned post id ${remoteId}, but GS Poster could not record it (` : "Threads may already have this post (") +

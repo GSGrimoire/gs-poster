@@ -15,7 +15,7 @@
  *   authorization, which requires owner PIN-gated reconnection.
  */
 import type { Env } from "./env.ts";
-import { audit, ensureSchema } from "./db.ts";
+import { ensureSchema } from "./db.ts";
 import { esc, html, page } from "./html.ts";
 import type { Session } from "./session.ts";
 import { cookie, getCookie, randomToken, safeEqual, sha256 } from "./session.ts";
@@ -325,8 +325,15 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
       WHERE account_key = 'primary' AND user_id = ? AND suspended_at IS NULL`).bind(now, kind, issued, userId),
   ]);
   if ((results[1].meta.changes ?? 0) === 1) {
-    await audit(env.DB, "threads-provider", "threads-account-suspended", null,
-      kind + " for account " + userId + " issued_at=" + issued).catch(() => undefined);
+    // A simultaneous deletion may erase the connection after the suspension
+    // transaction but before this audit write. Never restore account metadata.
+    await ensureSchema(env.DB);
+    await env.DB.prepare(`INSERT INTO audit (ts, actor, action, post_id, detail)
+      SELECT ?, 'threads-provider', 'threads-account-suspended', NULL, ?
+      WHERE EXISTS (SELECT 1 FROM threads_accounts WHERE account_key = 'primary'
+        AND user_id = ? AND suspended_at IS NOT NULL)`)
+      .bind(new Date().toISOString(), kind + " for account " + userId + " issued_at=" + issued,
+        userId).run().catch(() => undefined);
   }
   return new Response("ok", { headers });
 }
