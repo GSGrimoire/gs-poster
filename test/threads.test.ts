@@ -770,3 +770,94 @@ test("a late result from a closed Threads generation cannot finish the replaceme
   assert.equal(current.ambiguous, true);
   assert.equal(current.media_id, null);
 });
+
+// T7: a sign-in started before a signed deauthorization can never clear it.
+const callbackRequest = (state: string) => new Request(`https://gs-poster.test/threads/callback?code=test-code&state=${state}`,
+  { headers: { Cookie: `${THREADS_STATE_COOKIE}=${state}` } });
+const pendingStates = async () => (await db.prepare("SELECT COUNT(*) AS n FROM threads_oauth_states").first<{ n: number }>())!.n;
+
+test("T7: a second sign-in started before a deauthorization cannot clear the hold or publish", async () => {
+  const a = await beginThreadsConnection(env(), session);
+  const b = await beginThreadsConnection(env(), session);
+  await finishThreadsConnection(env(), session, callbackRequest(a.state));
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal((await callback("deauthorize", { user_id: USER, issued_at: now })).status, 200);
+  assert.equal(await pendingStates(), 0, "the deauthorization invalidated sign-in B");
+  const held = (await threadsConnection(db))!;
+  assert.ok(held.suspended_at != null);
+  await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(b.state)), /expired or was already used/);
+  const after = (await threadsConnection(db))!;
+  assert.equal(after.suspended_at, held.suspended_at, "sign-in B did not clear the hold");
+  assert.equal(after.connected_at, held.connected_at);
+  await assert.rejects(threadsAccessToken(env()), /suspended/);
+  calls = [];
+  await processThreadsBatch(env());
+  assert.equal(graphPosts("/threads").length + graphPosts("/threads_publish").length, 0, "nothing reaches Meta");
+  const job = (await getThreadsJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false);
+  // Recovery: PIN-gated disconnect (the web route checks the PIN), then a fresh sign-in.
+  await disconnectThreads(db);
+  await connect();
+  assert.equal((await threadsConnection(db))!.suspended_at, null, "a sign-in started after the disconnect succeeds");
+  assert.equal(await retryThreadsJob(env(), p.id, "gsgrimoire"), true);
+  await processThreadsBatch(env());
+  await processThreadsBatch(env());
+  assert.equal(graphPosts("/threads_publish").length, 1, "only the explicit retry after reconnection sends");
+});
+
+test("T7: a deauthorization with no stored account still invalidates a pending sign-in", async () => {
+  const s = await beginThreadsConnection(env(), session);
+  assert.equal(await pendingStates(), 1);
+  assert.equal((await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) })).status, 200);
+  assert.equal(await pendingStates(), 0);
+  calls = [];
+  await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(s.state)), /expired or was already used/);
+  assert.equal(calls.length, 0, "no token exchange with Meta");
+  assert.equal(await threadsConnection(db), null);
+});
+
+test("T7: a deauthorization during a token exchange stops it, with or without a stored account", async () => {
+  for (const stored of [false, true]) {
+    for (const t of ["threads_accounts", "threads_oauth_states", "threads_revocation_events"]) await db.prepare(`DELETE FROM ${t}`).run();
+    const a = stored ? await beginThreadsConnection(env(), session) : undefined;
+    const b = await beginThreadsConnection(env(), session);
+    if (a) await finishThreadsConnection(env(), session, callbackRequest(a.state));
+    const before = await threadsConnection(db);
+    const mock = globalThis.fetch;
+    let revoked = false;
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+      if (path === "/v1.0/me" && !revoked) {
+        assert.equal((await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) })).status, 200);
+        revoked = true;
+      }
+      return mock(input, init);
+    };
+    try {
+      await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(b.state)),
+        stored ? /suspended/ : /connection changed while signing in/i);
+    } finally { globalThis.fetch = mock; }
+    assert.ok(revoked, "the deauthorization committed while the exchange was in flight");
+    assert.equal(await pendingStates(), 0);
+    const now = await threadsConnection(db);
+    if (!stored) assert.equal(now, null, "the in-flight sign-in stored nothing");
+    else {
+      assert.ok(now!.suspended_at != null, "the stored account stays suspended");
+      assert.equal(now!.connected_at, before!.connected_at, "the in-flight sign-in replaced nothing");
+      await assert.rejects(threadsAccessToken(env()), /suspended/);
+    }
+  }
+});
+
+test("T7: the sign-in upsert itself refuses to overwrite a suspended account", async () => {
+  // Defence in depth: even a state that survived (inserted directly here) cannot clear a hold.
+  await connect();
+  await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) });
+  const s = await beginThreadsConnection(env(), session);
+  await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(s.state)), /suspended/);
+  assert.ok((await threadsConnection(db))!.suspended_at != null);
+  assert.equal(await pendingStates(), 0, "the refused attempt also removed its state");
+  await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(s.state)), /expired or was already used/);
+});

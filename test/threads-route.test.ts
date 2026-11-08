@@ -449,3 +449,54 @@ test("an unconfirmed Facebook cancellation cannot restart a stopped Threads job"
   assert.equal((await getPost(db, p.id))!.status, "scheduled");
   assert.equal((await getThreadsJob(db, p.id))!.status, "cancelled");
 });
+
+test("T7: a sign-in started before a signed deauthorization cannot clear the hold through the router", async () => {
+  assert.equal((await post("/threads/disconnect", { pin: PIN, confirm: "yes" })).status, 303);
+  const start = async () => {
+    const s = await session();
+    const res = await mf.dispatchFetch(ORIGIN + "/threads/connect", { method: "POST", redirect: "manual",
+      headers: { Origin: ORIGIN, "Content-Type": "application/x-www-form-urlencoded", Cookie: SESSION_COOKIE + "=" + s.raw },
+      body: new URLSearchParams({ csrf: s.csrf, pin: PIN }) });
+    assert.equal(res.status, 200);
+    const cookie = res.headers.get("set-cookie")!.split(";")[0];
+    return { s, cookie, state: cookie.split("=")[1] };
+  };
+  const finish = (f: Awaited<ReturnType<typeof start>>) =>
+    mf.dispatchFetch(ORIGIN + "/threads/callback?code=test-code&state=" + f.state,
+      { headers: { Cookie: SESSION_COOKIE + "=" + f.s.raw + "; " + f.cookie }, redirect: "manual" });
+  const deauthorize = () => {
+    const payload = Buffer.from(JSON.stringify({ algorithm: "HMAC-SHA256", user_id: ACCOUNT_ID,
+      issued_at: Math.floor(Date.now() / 1000) })).toString("base64url");
+    return mf.dispatchFetch(ORIGIN + "/threads/deauthorize", { method: "POST",
+      body: new URLSearchParams({ signed_request: createHmac("sha256", APP_SECRET).update(payload).digest("base64url") + "." + payload }) });
+  };
+  const account = () => db.prepare("SELECT connected_at, suspended_at FROM threads_accounts")
+    .first<{ connected_at: number; suspended_at: number | null }>();
+
+  // Two tabs start while nothing is connected; A finishes; Meta deauthorizes; B finishes late.
+  const a = await start(), b = await start();
+  assert.equal(await states(), 2);
+  assert.equal((await finish(a)).status, 303);
+  assert.equal((await deauthorize()).status, 200);
+  assert.equal(await states(), 0, "the deauthorization invalidated tab B's sign-in");
+  const held = (await account())!;
+  assert.ok(held.suspended_at != null);
+  const late = await finish(b);
+  assert.equal(late.status, 400);
+  assert.match(await late.text(), /expired or was already used/);
+  assert.deepEqual(await account(), held, "tab B neither replaced the account nor cleared the hold");
+  await assert.rejects(threadsAccessToken({ DB: db, THREADS_APP_ID: "123456789", THREADS_APP_SECRET: APP_SECRET,
+    COOKIE_SECRET: SECRET } as Env), /suspended/);
+  assert.equal((await post("/threads/connect", { pin: PIN })).status, 400, "a new start is refused while the hold stands");
+
+  // A deauthorization with no stored account still invalidates a pending sign-in.
+  assert.equal((await post("/threads/disconnect", { pin: PIN, confirm: "yes" })).status, 303);
+  const c = await start();
+  assert.equal((await deauthorize()).status, 200);
+  assert.equal((await finish(c)).status, 400);
+  assert.equal(await account(), null);
+
+  // Recovery: a sign-in started after the deauthorization works.
+  assert.equal((await finish(await start())).status, 303);
+  assert.equal((await account())!.suspended_at, null);
+});

@@ -145,6 +145,8 @@ async function json(res: Response, what: string): Promise<Record<string, unknown
   return body;
 }
 
+const SUSPENDED_RECONNECT = "Threads posting is suspended by a signed account callback. Disconnect in Threads settings with your approval PIN, then connect again.";
+
 /** Callback: one-use state, same session, then code to long-lived token. */
 export async function finishThreadsConnection(env: Env, session: Session, req: Request): Promise<ThreadsConnection> {
   const app = need(env);
@@ -182,7 +184,7 @@ export async function finishThreadsConnection(env: Env, session: Session, req: R
       connected_by = excluded.connected_by, expires_at = excluded.expires_at, issued_at = excluded.issued_at,
       updated_at = excluded.updated_at, connected_at = excluded.connected_at, suspended_at = NULL,
       suspended_kind = NULL, suspended_issued_at = NULL, lease_id = NULL, lease_until = NULL
-    WHERE threads_accounts.user_id = excluded.user_id`)
+    WHERE threads_accounts.user_id = excluded.user_id AND threads_accounts.suspended_at IS NULL`)
     .bind(me.id, String(me.username ?? ""), await sealThreadsToken(env, long.access_token), session.login,
       now + long.expires_in, now, new Date().toISOString(), stateHash, consumedAt).run();
   // Deletion invalidates pending sign-ins atomically with erasure. If that
@@ -190,6 +192,8 @@ export async function finishThreadsConnection(env: Env, session: Session, req: R
   await env.DB.prepare("DELETE FROM threads_oauth_states WHERE state_hash = ? AND consumed_at = ?")
     .bind(stateHash, consumedAt).run();
   const connection = await threadsConnection(env.DB);
+  // A sign-in never clears a hold: the upsert above refuses a suspended row.
+  if (connection?.suspended_at != null) throw new Error(SUSPENDED_RECONNECT);
   if (saved.meta.changes !== 1 || connection?.user_id !== me.id)
     throw new Error("The Threads connection changed while signing in. Reload settings.");
   return connection;
@@ -333,7 +337,12 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
   // A signed deauthorization may be a replay from a prior authorization.
   // Suspend the currently connected account rather than silently allowing
   // publication. The event digest and hold commit together.
+  // Every pending or in-flight sign-in was started before this event, so
+  // none of them may finish: the insert in finishThreadsConnection is fenced
+  // on its state row. This applies even when no account is stored. Recovery
+  // is a fresh PIN-gated connect after this commit.
   const results = await env.DB.batch([
+    env.DB.prepare("DELETE FROM threads_oauth_states"),
     env.DB.prepare(`INSERT OR IGNORE INTO threads_revocation_events (event_hash, user_id, kind, issued_at, received_at)
       SELECT ?, ?, ?, ?, ? WHERE EXISTS
         (SELECT 1 FROM threads_accounts WHERE account_key = 'primary' AND user_id = ?)`)
@@ -342,7 +351,7 @@ export async function threadsAccountCallback(req: Request, env: Env, kind: "deau
       lease_id = NULL, lease_until = NULL
       WHERE account_key = 'primary' AND user_id = ? AND suspended_at IS NULL`).bind(now, kind, issued, userId),
   ]);
-  if ((results[1].meta.changes ?? 0) === 1) {
+  if ((results[2].meta.changes ?? 0) === 1) {
     // A simultaneous deletion may erase the connection after the suspension
     // transaction but before this audit write. Never restore account metadata.
     await ensureSchema(env.DB);
