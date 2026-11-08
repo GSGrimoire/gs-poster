@@ -322,7 +322,7 @@ test("T6: signed data deletion erases credentials and provider identifiers, and 
   const stateCookie = start.headers.get("set-cookie")!.split(";")[0];
   const state = stateCookie.split("=")[1];
   const connected = await mf.dispatchFetch(ORIGIN + "/threads/callback?code=test-code&state=" + state, {
-    headers: { Cookie: SESSION_COOKIE + "=" + s.raw + "; " + stateCookie },
+    headers: { Cookie: SESSION_COOKIE + "=" + s.raw + "; " + stateCookie }, redirect: "manual",
   });
   assert.equal(connected.status, 303);
   const account = await db.prepare("SELECT user_id, token_cipher FROM threads_accounts").first<{user_id:string;token_cipher:string}>();
