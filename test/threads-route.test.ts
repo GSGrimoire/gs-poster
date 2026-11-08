@@ -500,3 +500,38 @@ test("T7: a sign-in started before a signed deauthorization cannot clear the hol
   assert.equal((await finish(await start())).status, 303);
   assert.equal((await account())!.suspended_at, null);
 });
+
+test("T8: a sign-in started before the owner's PIN disconnect cannot recreate the account through the router", async () => {
+  assert.equal((await post("/threads/disconnect", { pin: PIN, confirm: "yes" })).status, 303);
+  const start = async () => {
+    const s = await session();
+    const res = await mf.dispatchFetch(ORIGIN + "/threads/connect", { method: "POST", redirect: "manual",
+      headers: { Origin: ORIGIN, "Content-Type": "application/x-www-form-urlencoded", Cookie: SESSION_COOKIE + "=" + s.raw },
+      body: new URLSearchParams({ csrf: s.csrf, pin: PIN }) });
+    assert.equal(res.status, 200);
+    const cookie = res.headers.get("set-cookie")!.split(";")[0];
+    return { s, cookie, state: cookie.split("=")[1] };
+  };
+  const finish = (f: Awaited<ReturnType<typeof start>>) =>
+    mf.dispatchFetch(ORIGIN + "/threads/callback?code=test-code&state=" + f.state,
+      { headers: { Cookie: SESSION_COOKIE + "=" + f.s.raw + "; " + f.cookie }, redirect: "manual" });
+  const account = () => db.prepare("SELECT user_id FROM threads_accounts").first();
+
+  const a = await start(), b = await start();
+  assert.equal((await finish(a)).status, 303);
+  assert.equal((await post("/threads/disconnect", { pin: PIN, confirm: "yes" })).status, 303);
+  assert.equal(await states(), 0, "the disconnect invalidated tab B's sign-in");
+  const late = await finish(b);
+  assert.equal(late.status, 400);
+  assert.match(await late.text(), /expired or was already used/);
+  assert.equal(await account(), null, "tab B did not recreate the account");
+  await assert.rejects(threadsAccessToken({ DB: db, THREADS_APP_ID: "123456789", THREADS_APP_SECRET: APP_SECRET,
+    COOKIE_SECRET: SECRET } as Env));
+
+  // A wrong PIN disconnect changes nothing, including pending sign-ins.
+  const c = await start();
+  assert.equal((await post("/threads/disconnect", { pin: "111111", confirm: "yes" })).status, 403);
+  assert.equal(await states(), 1);
+  assert.equal((await finish(c)).status, 303, "a sign-in started after the disconnect succeeds");
+  assert.ok(await account());
+});

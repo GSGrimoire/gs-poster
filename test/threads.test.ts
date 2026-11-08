@@ -861,3 +861,41 @@ test("T7: the sign-in upsert itself refuses to overwrite a suspended account", a
   assert.equal(await pendingStates(), 0, "the refused attempt also removed its state");
   await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(s.state)), /expired or was already used/);
 });
+
+// T8: the owner's disconnect also ends every sign-in started before it.
+test("T8: a sign-in started before the owner's disconnect cannot recreate the account or publish", async () => {
+  const a = await beginThreadsConnection(env(), session);
+  const b = await beginThreadsConnection(env(), session);
+  await finishThreadsConnection(env(), session, callbackRequest(a.state));
+  const p = await queued(undefined, new Date(Date.now() - 1000));
+  assert.equal(await disconnectThreads(db), true);
+  assert.equal(await pendingStates(), 0, "the disconnect invalidated sign-in B");
+  calls = [];
+  await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(b.state)), /expired or was already used/);
+  assert.equal(calls.length, 0, "no token exchange with Meta");
+  assert.equal(await threadsConnection(db), null, "no account was recreated");
+  await assert.rejects(threadsAccessToken(env()));
+  await processThreadsBatch(env());
+  assert.equal(graphPosts("/threads").length + graphPosts("/threads_publish").length, 0, "nothing reaches Meta");
+  assert.notEqual((await getThreadsJob(db, p.id))!.status, "published");
+  // A sign-in started after the disconnect succeeds.
+  await connect();
+  assert.equal((await threadsConnection(db))!.suspended_at, null);
+});
+
+test("T8: an owner disconnect during a token exchange stops that sign-in", async () => {
+  const s = await beginThreadsConnection(env(), session);
+  const mock = globalThis.fetch;
+  let disconnected = false;
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+    if (path === "/v1.0/me" && !disconnected) { await disconnectThreads(db); disconnected = true; }
+    return mock(input, init);
+  };
+  try {
+    await assert.rejects(finishThreadsConnection(env(), session, callbackRequest(s.state)), /connection changed while signing in/i);
+  } finally { globalThis.fetch = mock; }
+  assert.ok(disconnected, "the disconnect committed while the exchange was in flight");
+  assert.equal(await pendingStates(), 0);
+  assert.equal(await threadsConnection(db), null, "the in-flight sign-in stored nothing");
+});

@@ -238,7 +238,12 @@ export async function renewThreadsToken(env: Env, now = unix()): Promise<"renewe
 /** Removes the stored token. Threads offers no revoke call; Meta's own app settings revoke access. */
 export async function disconnectThreads(db: D1Database): Promise<boolean> {
   await ensureThreadsSchema(db);
-  const res = await db.prepare("DELETE FROM threads_accounts WHERE account_key = 'primary'").run();
+  // Sign-ins started before the disconnect, pending or mid-exchange, must not
+  // recreate the account: the credential insert is fenced on its state row.
+  const [, res] = await db.batch([
+    db.prepare("DELETE FROM threads_oauth_states"),
+    db.prepare("DELETE FROM threads_accounts WHERE account_key = 'primary'"),
+  ]);
   return (res.meta.changes ?? 0) > 0;
 }
 

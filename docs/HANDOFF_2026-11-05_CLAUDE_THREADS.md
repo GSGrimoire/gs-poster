@@ -132,3 +132,13 @@ A cancelled or published job unlocks the draft. Tested in `test/threads.test.ts`
   - Recovery is unchanged: PIN-gated disconnect, then a fresh PIN-gated connect. Deletion behaviour and the replay trade-off are unchanged.
 - **Tests:** production router: two parallel starts with a deauthorization between the callbacks; a deauthorization with no stored account; recovery. Real D1: the same ordering with a due job (nothing reaches Meta, the job fails without the unclear flag, an explicit retry after reconnection sends once); a deauthorization during the token exchange with and without a stored account; the upsert guard on its own. All five fail on the previous code.
 - **Checks:** `npm run check` gave 459 passed, 0 failed, three runs. The `wrangler` dry-run passes and `git diff --check origin/main...HEAD` is clean.
+
+## Review round 8 (ChatGPT-D, head `114aafc`): T8
+
+- **Finding:** the owner's PIN-gated disconnect deleted only the account row. A sign-in started before the disconnect could finish afterwards and recreate the account without a new PIN-approved connect.
+- **Fix:** `disconnectThreads` deletes every `threads_oauth_states` row and the account in one D1 batch. Both ways an account row is removed (owner disconnect and Meta's signed deletion) now end pending sign-ins, as does a signed deauthorization (T7). PIN, CSRF and lockout on the route are unchanged.
+- **Tests:**
+  - Router: two starts, A finishes, PIN disconnect, then B's callback returns 400 with no account recreated and the token refused; a wrong-PIN disconnect leaves pending sign-ins alone; a sign-in started after the disconnect succeeds.
+  - Real D1: the same ordering with a due job (nothing reaches Meta, no token exchange for B); a disconnect during the token exchange stores nothing. The existing test "a disconnect after a run read its sign-in stops the job at the send barrier" still covers the final send.
+  - All three new tests fail on the previous code.
+- **Checks:** `npm run check` gave 462 passed, 0 failed, three runs. The `wrangler` dry-run passes and `git diff --check origin/main...HEAD` is clean.
