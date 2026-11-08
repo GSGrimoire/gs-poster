@@ -560,6 +560,33 @@ test("T4: a fresh signed event or replay after a same-second reconnect suspends 
   assert.equal(receipt?.n, 1);
 });
 
+
+test("T6: a deletion arriving during a consumed OAuth exchange prevents credential resurrection", async () => {
+  const state = await beginThreadsConnection(env(), session);
+  const pending = new Request(`https://gs-poster.test/threads/callback?code=test-code&state=${state.state}`, {
+    headers: { Cookie: `${THREADS_STATE_COOKIE}=${state.state}` },
+  });
+  const mock = globalThis.fetch;
+  let erased = false;
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+    if (path === "/v1.0/me") {
+      const deletion = await callback("delete", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) });
+      assert.equal(deletion.status, 200);
+      erased = true;
+    }
+    return mock(input, init);
+  };
+  await assert.rejects(finishThreadsConnection(env(), session, pending), /connection changed while signing in/i);
+  assert.ok(erased, "the valid signed deletion committed before OAuth credential storage");
+  assert.equal(await threadsConnection(db), null, "a consumed pre-deletion state cannot recreate credentials");
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM threads_oauth_states").first<{n:number}>())?.n, 0);
+  const deauthorization = await callback("deauthorize", { user_id: USER, issued_at: Math.floor(Date.now() / 1000) });
+  assert.equal(deauthorization.status, 200);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM threads_revocation_events WHERE user_id = ?")
+    .bind(USER).first<{n:number}>())?.n, 0, "late deauthorization cannot recreate deleted provider history");
+});
+
 test("T4: an early signed callback blocks scheduled Threads publication and requires a fresh connection", async () => {
   await connect();
   const p = await queued(undefined, new Date(Date.now() - 1000));
