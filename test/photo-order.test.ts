@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {build} from "esbuild";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {createPost,ensureSchema,getPost} from "../src/db.ts";
-import {readOrder} from "../src/draft-editor.ts";
+import {readOrder,DRAFT_EDITOR_JS} from "../src/draft-editor.ts";
 import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
 import type {Env} from "../src/env.ts";
 
@@ -137,4 +137,10 @@ test("editor exposes an owned-media Bluesky picker and separate ordering control
   assert.match(html,/data-copy-index="0"/);
   for(const platform of ["facebook","bluesky","tiktok"])
     assert.match(html,new RegExp('data-media="'+platform+'" data-order="order_'));
+});
+
+test("staged Bluesky photo copies require an explicit one-shot commit",()=>{
+  assert.match(DRAFT_EDITOR_JS,/bsAddField\?\.value && !copyConfirmed/);
+  assert.match(DRAFT_EDITOR_JS,/copyConfirmed && !!bsAddField\?\.value/);
+  assert.match(DRAFT_EDITOR_JS,/Copy selected photos to save the Bluesky gallery/);
 });
