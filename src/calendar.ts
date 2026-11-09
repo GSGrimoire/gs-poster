@@ -28,7 +28,7 @@ export function weekRange(start: string, zone: string) {
 export function monthStart(month: string): string {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Invalid calendar month");
   const date = new Date(month + "-01T00:00:00Z");
-  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0,7) !== month)
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0,7) !== month || Number(month.slice(0,4))<1900 || Number(month.slice(0,4))>9998)
     throw new Error("Invalid calendar month");
   return month + "-01";
 }
@@ -295,7 +295,7 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
     '<a href="/calendar?view=week&week=' + dayPlus(start,7) + '">Next</a></div>' +
     '<nav class="calendar-view-toggle" aria-label="Planner view">' +
     '<a href="/calendar?view=week&week=' + start + '" aria-current="page">Week</a>' +
-    '<a href="/calendar?view=month&month=' + today.slice(0,7) + '">Month</a></nav></div>' +
+    '<a href="/calendar?view=month&month=' + dayPlus(start,3).slice(0,7) + '">Month</a></nav></div>' +
     '<div class="calendar-legend"><span><i class="calendar-swatch" style="background:var(--accent2)"></i>Draft</span>' +
     '<span><i class="calendar-swatch" style="background:#6099df"></i>Scheduled</span>' +
     '<span><i class="calendar-swatch" style="background:var(--ok)"></i>Published</span></div>' +
@@ -399,7 +399,7 @@ export function renderMonthCalendar(env: Env, posts: Post[], month: string, now 
     '<a href="/calendar?view=month&amp;month='+today.slice(0,7)+'">Today</a>'+
     '<a href="/calendar?view=month&amp;month='+monthPlus(month,1)+'">Next</a></div>'+
     '<nav class="calendar-view-toggle" aria-label="Planner view">'+
-    '<a href="/calendar?view=week&amp;week='+today+'">Week</a>'+
+    '<a href="/calendar?view=week&amp;week='+(month===today.slice(0,7)?today:first)+'">Week</a>'+
     '<a href="/calendar?view=month&amp;month='+month+'" aria-current="page">Month</a></nav></div>'+
     '<div class="calendar-legend"><span><i class="calendar-swatch" style="background:var(--accent2)"></i>Draft</span>'+
     '<span><i class="calendar-swatch" style="background:#6099df"></i>Scheduled</span>'+
