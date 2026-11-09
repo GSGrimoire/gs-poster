@@ -1257,8 +1257,11 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         saveState = "Save failed: " + (body.error || "the server answered " + r.status + ".") + (stopped ? " Your text is still on this page: copy what you need before reloading." : "");
       }
     } catch {
+      const uncertainCopy = copyConfirmed && !!bsAddField?.value;
       copyConfirmed = false;
-      saveState = "Save failed: no connection. Reload and check whether the Bluesky copy was saved before attempting it again.";
+      saveState = uncertainCopy
+        ? "Save failed: connection lost. Reload and inspect Bluesky before retrying the photo copy."
+        : "Save failed: no connection. Your changes are still here and will be saved when you edit again.";
     } finally {
       inflight = false;
       if (copied) { submitting = true; location.reload(); return; }
