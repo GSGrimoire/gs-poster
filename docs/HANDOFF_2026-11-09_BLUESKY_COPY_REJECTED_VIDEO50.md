@@ -40,3 +40,18 @@ Deployment: **not authorized**. Do not merge without independent source review a
 ## Evidence and review gate
 
 Added real web-route regression tests in test/photo-order.test.ts and test/draft-editor.test.ts, and upload grant boundary tests in test/upload.test.ts. Verify the CI run against the final head, including `npm run check` and Wrangler dry-run. Tests do not prove real browser drag behavior, actual 40 MB upload under Cloudflare memory limits, or live Facebook, Bluesky, TikTok and Instagram acceptance. Separate independent review session or qualified human must inspect the complete affected security path and pinned head before merge or deployment.
+
+## Additional owner request: Planner live clock and Month view (2026-11-09)
+
+Added within this same draft pull request to allow one combined independent review.
+
+- `src/calendar.ts`: a Copenhagen-zone current-time line is displayed only for today's Week column, updated every minute, with automatic initial scroll to the line and a day-header update across midnight. The Week 30-minute slots and signed-in drag-to-reschedule form remain unchanged.
+- `src/calendar.ts`: added strict YYYY-MM parsing, month navigation, Sunday-to-Saturday grid boundaries and daylight-saving-aware UTC range conversion. Month cells show every returned post for each day with a thumbnail when artwork exists, status, selected platforms, and direct post link. Month is **read-only**: no drag-to-reschedule, publish or approve action. Unsheduled drafts are labelled as unscheduled and shown on creation day; clicking the date switches to the Week scheduling view.
+- `src/web.ts`: existing authenticated `/` and `/calendar` routes accept `view=month&month=YYYY-MM` while preserving `view=week&week=YYYY-MM-DD` and legacy defaults. Invalid periods fall back to the current period. Month data loading uses a full date range including boundary weeks; no date/time or post identity is taken from arbitrary user-supplied URLs.
+- `src/db.ts`: monthly calendar queries no longer silently truncate after 500 records, while the week query stays capped at 500. Review load and memory implications for unusually high-volume months.
+- `test/calendar.test.ts`: month date boundaries (including Copenhagen daylight saving), month card rendering and escaping, navigation, time-line update behavior.
+- `test/draft-editor.test.ts`: authenticated month/week route tests, thumbnails and no publishing side effects.
+
+**Review focus:** verify every visible post corresponds to the same authenticated private-media proxy, the new Month route never changes publishing state, input month validation and UTC boundary behavior around daylight saving are correct, and the Week current-time overlay does not intercept drag/click interactions. Month query unbounded result volume is a capacity limitation requiring review. No actual browser interaction, visual screenshot or production deployment verification has occurred.
+
+**Combined gate:** continue to require a separate reviewer for this pull request's full private-media and publication-path review. Only the reviewer/owner should authorize merge and deployment after CI and security inspection. Re-pin the exact head commit after all changes.
