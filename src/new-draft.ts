@@ -161,7 +161,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <p class="form-info">One MP4 video, up to 50 MB. Original video uploads remain private until you explicitly approve a transfer.</p>
           <div id="new-video-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop MP4 video">
             <strong>Drop your video here</strong>
-            <span>Or select an MP4 file to preview, up to 20 MB</span>
+            <span>Or select an MP4 file to preview, up to 50 MB</span>
           </div>
           <input type="file" id="new-video-input" accept=".mp4,video/mp4" aria-label="Select video file">
           <video id="new-video-preview" controls playsinline preload="metadata" hidden></video>
