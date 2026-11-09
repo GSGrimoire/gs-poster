@@ -146,7 +146,6 @@ export const CALENDAR_JS = `
 (() => {
   const viewport = document.querySelector(".calendar-window");
   if (!viewport) return;
-  viewport.scrollTop = 12 * 60;
   // Follow the server-configured time zone, not the browser's own zone.
   // The line appears only in the day column that is currently "today".
   const clockZone = viewport.dataset.zone || "Europe/Copenhagen";
@@ -159,6 +158,8 @@ export const CALENDAR_JS = `
       .filter(p => p.type !== "literal").map(p => [p.type,p.value]));
     const today = parts.year + "-" + parts.month + "-" + parts.day;
     const minute = Number(parts.hour) * 60 + Number(parts.minute);
+    for (const heading of viewport.querySelectorAll(".calendar-head [data-day]"))
+      heading.classList.toggle("current", heading.dataset.day === today);
     for (const column of viewport.querySelectorAll(".calendar-day[data-day]")) {
       const line = column.querySelector(".calendar-now");
       if (!line) continue;
@@ -171,6 +172,10 @@ export const CALENDAR_JS = `
     }
   }
   updateNowLine();
+  const visibleLine = viewport.querySelector(".calendar-now:not([hidden])");
+  const minuteNow = visibleLine ? Number.parseFloat(visibleLine.style.top) : NaN;
+  viewport.scrollTop = Number.isFinite(minuteNow)
+    ? Math.max(0, minuteNow - viewport.clientHeight / 2) : 12 * 60;
   setInterval(updateNowLine, 60000);
   let moving = null;
   let ignoreSlotClicksUntil = 0;
@@ -233,7 +238,7 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
   const days = Array.from({ length: 7 }, (_, i) => dayPlus(start, i));
   const label = new Intl.DateTimeFormat("en-GB", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
   const header = '<div class="calendar-head"><div></div>' + days.map(day =>
-    '<div class="' + (day === today ? "current" : "") + '">' +
+    '<div data-day="' + day + '" class="' + (day === today ? "current" : "") + '">' +
     esc(label.format(new Date(day + "T12:00:00Z"))) + '</div>').join("") + '</div>';
   const timeAxis = '<div class="calendar-axis">' + Array.from({length:24},(_,h) =>
     '<span class="calendar-hour" style="top:' + h*60 + 'px">' + String(h).padStart(2,"0") + ':00</span>').join("") + '</div>';
