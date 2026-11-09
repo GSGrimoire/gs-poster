@@ -136,7 +136,9 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     const addRaw=String(form.get("bs_add_photos")??"");
     if(addRaw){
       const pool=postPhotos(cur);
-      const parts=addRaw.split(",");
+      // Bound the field before allocating or parsing an untrusted list.
+      if(addRaw.length>15)errors.push("Invalid Bluesky photo selection.");
+      const parts=addRaw.length>15?[]:addRaw.split(",");
       const indices=parts.map(Number);
       if(!blueskyOn || parts.length>4 || !parts.every(x=>/^\d{1,3}$/.test(x)) ||
           new Set(indices).size!==indices.length ||
@@ -627,7 +629,7 @@ export function renderDraftEditor(v: EditorView): string {
           ${p.video ? `<div class="row"><button type="button" id="bs-copy-fb-video">Use Facebook video for Bluesky</button><input type="hidden" name="bs_copy_fb_video" id="bs-copy-fb-video-flag" value="0"></div><label for="bs-copy-video-alt">Video description for Bluesky when copying<input id="bs-copy-video-alt" type="text" name="bs_copy_video_alt" maxlength="1000" value="${esc(bs?.video?.alt??"")}" placeholder="Describe the action in the video"></label>` : ""}
           <p class="hint">Drag photos within this gallery to reorder them, or use the arrows.</p>
           <div class="tiles" data-media="bluesky" data-order="order_bs">${bsMedia || empty}</div>
-          ${pool.length ? `<details class="bs-copy-picker" open><summary>Copy existing photos to Bluesky</summary>
+          ${pool.length ? `<details class="bs-copy-picker"${on.bluesky && (bs?.images.length ?? 0) === 0 ? " open" : ""}><summary>Copy existing photos to Bluesky</summary>
             <p class="hint">Drag a photo from another platform into the drop area, or choose Copy below. Originals stay on their current platforms. Bluesky allows four photos and each needs alternative text.</p>
             <div id="bs-copy-drop" class="bs-copy-drop" tabindex="0">Drop an existing photo here to copy it into Bluesky</div>
             <div class="bs-source-pool" id="bs-source-pool">
