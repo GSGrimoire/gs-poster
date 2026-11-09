@@ -333,3 +333,42 @@ test("Release refuses a saved time that is too close, pointing back to the edito
   assert.match(await res.text(),/Change the time in the editor/);
   assert.equal((await getPost(db,p.id))!.status,"draft");
 });
+
+test("rejected draft has a direct return action in editor and dashboard",async()=>{
+  const p=await draft({bluesky:true});
+  await db.prepare("UPDATE posts SET status='rejected',note=? WHERE id=?")
+    .bind("Revise the caption",p.id).run();
+  const rejected=(await getPost(db,p.id))!;
+  const editor=await (await get("/post/"+p.id)).text();
+  assert.match(editor,/Return rejected post to drafts/);
+  assert.match(editor,new RegExp('action="/post/'+p.id+'/return-to-drafts"'));
+  assert.match(editor,/Revise the caption/);
+  const dashboard=await (await get("/")).text();
+  assert.match(dashboard,new RegExp('action="/post/'+p.id+'/return-to-drafts"'));
+  const res=await call("/post/"+p.id+"/return-to-drafts",{expected_updated_at:rejected.updated_at});
+  assert.equal(res.status,302,await res.clone().text());
+  const restored=(await getPost(db,p.id))!;
+  assert.equal(restored.status,"draft");
+  assert.equal(restored.approved_at,null);
+  assert.equal(restored.note,"Revise the caption","reviewer feedback remains available");
+  assert.deepEqual(restored.bluesky?.images,rejected.bluesky?.images);
+  assert.deepEqual(restored.images,rejected.images);
+  assert.equal((await call("/post/"+p.id+"/return-to-drafts",
+    {expected_updated_at:restored.updated_at})).status,409,"cannot replay after return");
+});
+
+test("return rejected draft refuses forged, stale, cross-origin or approved requests",async()=>{
+  const p=await draft();
+  await db.prepare("UPDATE posts SET status='rejected' WHERE id=?").bind(p.id).run();
+  const rejected=(await getPost(db,p.id))!;
+  const endpoint="/post/"+p.id+"/return-to-drafts";
+  const fields={expected_updated_at:rejected.updated_at};
+  assert.equal((await call(endpoint,fields,{csrf:"invalid-csrf"})).status,403);
+  assert.equal((await call(endpoint,fields,{origin:"https://other.example"})).status,403);
+  assert.equal((await call(endpoint,{expected_updated_at:"2020-01-01T00:00:00.000Z"})).status,409);
+  assert.equal((await getPost(db,p.id))!.status,"rejected");
+  await db.prepare("UPDATE posts SET approved_at=? WHERE id=?")
+    .bind(new Date().toISOString(),p.id).run();
+  assert.equal((await call(endpoint,fields)).status,409);
+  assert.equal((await getPost(db,p.id))!.approved_at===null,false);
+});
