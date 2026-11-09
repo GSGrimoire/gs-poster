@@ -93,6 +93,48 @@ export const NEW_DRAFT_JS = String.raw`
     renumberImages();
     item.wrap.focus();
   }
+  // Reordering moves the entire record, retaining per-platform selection and
+  // alternative text with the original photo. Buttons remain the touch and
+  // keyboard alternative.
+  let draggedImage = null;
+  imageList.addEventListener("dragstart", e => {
+    if(busy||created||!e.dataTransfer)return;
+    const tile=e.target.closest(".new-file[draggable=true]");
+    if(!tile)return;
+    draggedImage=images.find(item=>item.wrap===tile)||null;
+    if(!draggedImage)return;
+    e.dataTransfer.effectAllowed="move";
+    e.dataTransfer.setData("text/plain","gs-new-photo");
+    tile.classList.add("dragging");
+  });
+  imageList.addEventListener("dragover", e => {
+    if(!draggedImage)return;
+    const target=e.target.closest(".new-file");
+    if(!target||target===draggedImage.wrap)return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect="move";
+    imageList.querySelectorAll(".drop-target").forEach(t=>t.classList.remove("drop-target"));
+    target.classList.add("drop-target");
+  });
+  imageList.addEventListener("drop", e => {
+    if(!draggedImage)return;
+    const target=e.target.closest(".new-file");
+    if(!target)return;
+    e.preventDefault();
+    const from=images.indexOf(draggedImage);
+    const to=images.findIndex(item=>item.wrap===target);
+    if(from>=0&&to>=0&&from!==to){
+      const selected=images.splice(from,1)[0];
+      images.splice(to,0,selected);
+      renumberImages();
+    }
+    draggedImage=null;
+    imageList.querySelectorAll(".dragging,.drop-target").forEach(t=>t.classList.remove("dragging","drop-target"));
+  });
+  imageList.addEventListener("dragend", () => {
+    draggedImage=null;
+    imageList.querySelectorAll(".dragging,.drop-target").forEach(t=>t.classList.remove("dragging","drop-target"));
+  });
 
 
   function kind() { return form.querySelector('input[name="content_kind"]:checked')?.value || "text"; }
@@ -162,6 +204,8 @@ export const NEW_DRAFT_JS = String.raw`
     for(const item of additions){
       const wrap=document.createElement("article");
       wrap.className="new-file";
+      wrap.draggable=true;
+      wrap.title="Drag to reorder, or use the Move up and Move down buttons";
       wrap.tabIndex=-1;
       wrap.setAttribute("aria-label","Selected carousel image");
       const img=document.createElement("img");
