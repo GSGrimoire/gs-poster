@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkImageUrl, fetchImage } from "../src/media.ts";
+import { INITIAL_VIDEO_MAX_BYTES } from "../src/video.ts";
 import { createUpload, handleUploadPut, looksLike, parseUploadRef,
   UPLOAD_MAX_LINKS_PER_HOUR, UPLOAD_QUOTA_BYTES, pendingUploadPageInfo, uploadStatusForOwner } from "../src/upload.ts";
 import {CHAT_UPLOAD_JS,browserUploadPage} from "../src/chat-upload.ts";
@@ -163,4 +164,18 @@ test("chat uploader sends file bytes with a one-time PUT and never auto-publishe
   assert.match(CHAT_UPLOAD_JS,/credentials:"omit"/);
   assert.match(CHAT_UPLOAD_JS,/response\.reference/);
   assert.doesNotMatch(CHAT_UPLOAD_JS,/\/approve|\/publish/);
+});
+
+test("MP4 grants accept 40 MB files with a 50 MB bound, not unbounded uploads",async()=>{
+  const {env}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"clip.mp4",actor:"GSGrimoire"});
+  assert.equal(grant.max_bytes,50_000_000);
+  assert.equal(INITIAL_VIDEO_MAX_BYTES,50_000_000);
+  const url=new URL(grant.upload_url),parts=url.pathname.split("/");
+  const info=await pendingUploadPageInfo(env.DB,parts[2],parts[3]);
+  assert.equal(info?.maxBytes,50_000_000);
+  const headerOnly=new Request(grant.upload_url,{method:"PUT",body:new Uint8Array(12),headers:{
+    "Content-Length":"50000001",
+  }});
+  assert.equal((await handleUploadPut(headerOnly,env)).status,413);
 });
