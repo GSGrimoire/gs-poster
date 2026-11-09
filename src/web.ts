@@ -410,7 +410,7 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
   try { if (params.get("month")) month = monthStart(params.get("month")!).slice(0,7); }
   catch { /* invalid month: show current month */ }
   const range = view==="month" ? monthRange(month,env.TIMEZONE) : weekRange(start,env.TIMEZONE);
-  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
+  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to,view==="month");
   const csrf = await csrfToken(env,session);
   const calendar = view==="month" ? renderMonthCalendar(env,calendarPosts,month,now)
     : renderCalendar(env,calendarPosts,csrf,start,now);
