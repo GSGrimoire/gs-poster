@@ -24,6 +24,34 @@ export function weekRange(start: string, zone: string) {
   };
 }
 
+/** Month inputs use YYYY-MM, and day calculations stay in UTC until zone conversion. */
+export function monthStart(month: string): string {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Invalid calendar month");
+  const date = new Date(month + "-01T00:00:00Z");
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0,7) !== month)
+    throw new Error("Invalid calendar month");
+  return month + "-01";
+}
+
+export function monthPlus(month: string, offset: number): string {
+  const start = monthStart(month);
+  const date = new Date(start + "T00:00:00Z");
+  date.setUTCMonth(date.getUTCMonth() + offset);
+  return date.toISOString().slice(0, 7);
+}
+
+export function monthRange(month: string, zone: string) {
+  const first = monthStart(month);
+  const fromDay = weekStart(first);
+  const last = dayPlus(monthPlus(month, 1) + "-01", -1);
+  const toDay = dayPlus(weekStart(last), 7);
+  return {
+    from: localToUtc(fromDay + "T00:00", zone).toISOString(),
+    to: localToUtc(toDay + "T00:00", zone).toISOString(),
+    startDay: fromDay, endDay: toDay,
+  };
+}
+
 /**
  * Return side-by-side lanes for cards whose 66-minute visible spans intersect.
  * Inputs are minute-of-day values sorted in ascending order.
@@ -94,6 +122,13 @@ const STYLE = `
 .platform-icon.tiktok{background:#141414;color:#fafafa;border:1px solid #4ad6d6;text-shadow:1px 1px #ee4769}
 .calendar-post[data-status="draft"]{border-left-color:var(--accent2)}
 .calendar-post:focus-visible{outline:3px solid var(--accent2);outline-offset:2px}
+.calendar-now{position:absolute;left:0;right:0;height:2px;z-index:8;background:#ec5151;pointer-events:none}
+.calendar-now[hidden]{display:none}
+.calendar-now::before{content:"";position:absolute;left:-4px;top:-4px;width:9px;height:9px;border-radius:50%;background:#ec5151}
+.calendar-now-label{position:absolute;right:3px;bottom:5px;background:#b92e2e;color:#fff;border-radius:4px;padding:2px 5px;font:700 11px system-ui,sans-serif;white-space:nowrap}
+.calendar-view-toggle{display:flex;align-items:center;gap:3px;border:1px solid var(--line);border-radius:8px;padding:3px}
+.calendar-view-toggle a{padding:6px 12px;border-radius:5px;color:var(--text);text-decoration:none}
+.calendar-view-toggle a[aria-current="page"]{background:var(--accent);color:#fff;font-weight:700}
 
 .cal-tooltip{position:absolute;top:calc(100% + 3px);left:0;z-index:40;display:none;pointer-events:none;min-width:230px;max-width:300px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 6px 18px #0007;white-space:normal;overflow-wrap:anywhere;font:12px/1.5 system-ui,sans-serif}
 .calendar-post:hover,.calendar-post:focus{z-index:25}
@@ -112,6 +147,31 @@ export const CALENDAR_JS = `
   const viewport = document.querySelector(".calendar-window");
   if (!viewport) return;
   viewport.scrollTop = 12 * 60;
+  // Follow the server-configured time zone, not the browser's own zone.
+  // The line appears only in the day column that is currently "today".
+  const clockZone = viewport.dataset.zone || "Europe/Copenhagen";
+  const clock = new Intl.DateTimeFormat("en-GB", {
+    timeZone: clockZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  function updateNowLine() {
+    const parts = Object.fromEntries(clock.formatToParts(new Date())
+      .filter(p => p.type !== "literal").map(p => [p.type,p.value]));
+    const today = parts.year + "-" + parts.month + "-" + parts.day;
+    const minute = Number(parts.hour) * 60 + Number(parts.minute);
+    for (const column of viewport.querySelectorAll(".calendar-day[data-day]")) {
+      const line = column.querySelector(".calendar-now");
+      if (!line) continue;
+      line.hidden = column.dataset.day !== today;
+      if (!line.hidden) {
+        line.style.top = minute + "px";
+        line.querySelector(".calendar-now-label").textContent =
+          "Now " + parts.hour + ":" + parts.minute;
+      }
+    }
+  }
+  updateNowLine();
+  setInterval(updateNowLine, 60000);
   let moving = null;
   let ignoreSlotClicksUntil = 0;
   const dialog = document.getElementById("cal-dialog");
@@ -224,27 +284,128 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
         '<span class="cal-time">' + esc(local.slice(11,16)) + ' <span class="platform-icons">' + platforms + '</span></span>' +
         '<span class="cal-title">' + esc(title) + '</span></span>' + tip + '</a>';
     }).join("");
-    return '<div class="calendar-day">' + slots + cards + '</div>';
+    return '<div class="calendar-day" data-day="' + day + '">' + slots + cards +
+      '<div class="calendar-now" hidden><span class="calendar-now-label"></span></div></div>';
   }).join("");
 
   return '<style>' + STYLE + '</style><div class="calendar-toolbar"><strong>' +
     esc(start) + ' to ' + esc(dayPlus(start,6)) + '</strong><div class="calendar-nav">' +
-    '<a href="/calendar?week=' + dayPlus(start,-7) + '">Previous</a>' +
-    '<a href="/calendar?week=' + today + '">Today</a>' +
-    '<a href="/calendar?week=' + dayPlus(start,7) + '">Next</a></div></div>' +
+    '<a href="/calendar?view=week&week=' + dayPlus(start,-7) + '">Previous</a>' +
+    '<a href="/calendar?view=week&week=' + today + '">Today</a>' +
+    '<a href="/calendar?view=week&week=' + dayPlus(start,7) + '">Next</a></div>' +
+    '<nav class="calendar-view-toggle" aria-label="Planner view">' +
+    '<a href="/calendar?view=week&week=' + start + '" aria-current="page">Week</a>' +
+    '<a href="/calendar?view=month&month=' + today.slice(0,7) + '">Month</a></nav></div>' +
     '<div class="calendar-legend"><span><i class="calendar-swatch" style="background:var(--accent2)"></i>Draft</span>' +
     '<span><i class="calendar-swatch" style="background:#6099df"></i>Scheduled</span>' +
     '<span><i class="calendar-swatch" style="background:var(--ok)"></i>Published</span></div>' +
-    '<div class="calendar-window"><div class="calendar-inner">' + header + '<div class="calendar-days">' +
+    '<div class="calendar-window" data-zone="' + esc(env.TIMEZONE) + '"><div class="calendar-inner">' + header + '<div class="calendar-days">' +
     timeAxis + cols + '</div></div></div>' +
     '<p class="calendar-info">Copenhagen time. Click an available empty timeslot to create a draft, hover for details, or drag a pending post to reschedule. ' +
     'Grey slots are past, less than 12 minutes away, or beyond 30 days. Creating a draft never publishes; moving an approved post requires your PIN. Published posts remain visible.</p>' +
     '<dialog class="cal-modal" id="cal-dialog"><h2>Reschedule <span id="cal-moving"></span></h2>' +
     '<form method="post" id="cal-form"><input type="hidden" name="csrf" value="' + esc(csrf) + '">' +
-    '<input type="hidden" name="expected_updated_at"><input type="hidden" name="return_to" value="/calendar?week=' + start + '">' +
+    '<input type="hidden" name="expected_updated_at"><input type="hidden" name="return_to" value="/calendar?view=week&amp;week=' + start + '">' +
     '<label for="cal-when">New time (Europe/Copenhagen)</label>' +
     '<input type="datetime-local" name="when" id="cal-when" required>' +
     '<label for="cal-pin">Approval PIN</label><input type="password" name="pin" id="cal-pin" required autocomplete="off">' +
     '<div class="row"><button type="button" id="cal-dismiss">Cancel</button><button class="primary" type="submit">Save time</button></div>' +
     '</form></dialog><script src="/calendar.js" defer></script>';
+}
+
+const MONTH_STYLE = `
+.calendar-month-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.calendar-month-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));min-width:980px}
+.calendar-month-weekday{padding:11px 8px;text-align:center;font:700 12px system-ui,sans-serif;background:var(--panel);border-bottom:1px solid var(--line)}
+.calendar-month-day{min-height:152px;padding:8px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:6px;min-width:0}
+.calendar-month-day:nth-child(7n){border-right:none}
+.calendar-month-day.outside{background:color-mix(in srgb,var(--muted) 7%,var(--panel))}
+.calendar-month-day.today{background:color-mix(in srgb,var(--accent2) 9%,var(--panel))}
+.calendar-month-date{align-self:flex-start;padding:3px 6px;border-radius:5px;text-decoration:none;font:700 13px system-ui,sans-serif;color:var(--text)}
+.calendar-month-date:hover,.calendar-month-date:focus-visible{background:color-mix(in srgb,var(--accent2) 16%,var(--panel));outline-offset:1px}
+.calendar-month-day.today .calendar-month-date{background:var(--accent);color:#fff}
+.calendar-month-day.outside .calendar-month-date{color:var(--muted)}
+.calendar-month-posts{display:flex;flex-direction:column;gap:5px}
+.calendar-month-post{display:flex;gap:7px;align-items:flex-start;min-width:0;border:1px solid var(--line);border-left:3px solid var(--accent2);border-radius:6px;padding:5px;background:var(--bg);color:var(--text);text-decoration:none}
+.calendar-month-post[data-status="scheduled"]{border-left-color:#6099df}
+.calendar-month-post[data-status="published"]{border-left-color:var(--ok)}
+.calendar-month-post[data-status="rejected"]{border-left-color:var(--err)}
+.calendar-month-post:hover,.calendar-month-post:focus-visible{border-color:var(--accent2);outline-offset:1px}
+.calendar-month-thumb{width:42px;height:48px;object-fit:cover;border-radius:4px;flex:0 0 42px;background:#0002}
+.calendar-month-video{width:42px;height:48px;flex:0 0 42px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent2) 14%,var(--panel));border-radius:4px;font:700 11px system-ui,sans-serif}
+.calendar-month-text{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+.calendar-month-title{font:650 12px/1.3 system-ui,sans-serif;overflow-wrap:anywhere}
+.calendar-month-meta{font:11px/1.25 system-ui,sans-serif;color:var(--muted)}
+.calendar-month-post .platform-icon{width:15px;height:15px;font-size:10px}
+.calendar-month-info{font:13px system-ui,sans-serif;color:var(--muted);margin:12px 0}
+.calendar-month-wrap .platform-icon.ig{background:#8943a8;color:white;font-size:8px}
+`;
+
+/** Read-only month overview. The day has no times or publishing controls. */
+export function renderMonthCalendar(env: Env, posts: Post[], month: string, now = new Date()): string {
+  const first = monthStart(month);
+  const {startDay,endDay} = monthRange(month,env.TIMEZONE);
+  const today = toLocalInput(now,env.TIMEZONE).slice(0,10);
+  const displayMonth = new Intl.DateTimeFormat("en-GB", {month:"long",year:"numeric",timeZone:"UTC"})
+    .format(new Date(first+"T12:00:00Z"));
+  const dayLabel = new Intl.DateTimeFormat("en-GB", {weekday:"long",day:"numeric",month:"long",year:"numeric",timeZone:"UTC"});
+  const postsByDay = new Map<string, Array<{p:Post;iso:string}>>();
+  for (const p of posts) {
+    // An unscheduled draft appears on its creation day, but is labelled unscheduled.
+    const iso = postCalendarTime(p) ?? p.created_at;
+    const day = toLocalInput(new Date(iso),env.TIMEZONE).slice(0,10);
+    if (!postsByDay.has(day)) postsByDay.set(day,[]);
+    postsByDay.get(day)!.push({p,iso});
+  }
+  for (const values of postsByDay.values())
+    values.sort((a,b) => a.iso.localeCompare(b.iso) || a.p.id.localeCompare(b.p.id));
+  const weekdays = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]
+    .map(day => '<div class="calendar-month-weekday">'+day+'</div>').join("");
+  const cells: string[] = [];
+  for (let day=startDay; day<endDay; day=dayPlus(day,1)) {
+    const outside = day.slice(0,7)!==month;
+    const todayClass = day===today?" today":"";
+    const entries = (postsByDay.get(day) ?? []).map(({p}) => {
+      const caption = p.facebook_enabled ? p.message : p.tiktok_enabled ? (p.tiktok_caption??p.message) : p.bluesky?.caption || p.instagram?.caption || p.message;
+      const title = p.label || p.release || caption.slice(0,50) || "Untitled post";
+      const imageTarget = p.facebook_enabled&&p.images.length ? "facebook" :
+        p.tiktok_enabled&&(p.tiktok_images??p.images).length ? "tiktok" :
+        p.bluesky?.images.length ? "bluesky" :
+        p.instagram?.items.length ? "instagram" : null;
+      const thumb = imageTarget
+        ? '<img class="calendar-month-thumb" loading="lazy" alt="" src="/media/'+esc(p.id)+'/0?thumb=1&amp;platform='+imageTarget+'">'
+        : (p.video || p.tiktok_video || p.bluesky?.video || p.instagram?.video)
+          ? '<span class="calendar-month-video" aria-hidden="true">Video</span>' : "";
+      const platforms = (p.facebook_enabled ? '<span class="platform-icon" title="Facebook" aria-label="Facebook">f</span>' : '') +
+        (p.bluesky ? '<span class="platform-icon sky" title="Bluesky" aria-label="Bluesky">🦋</span>' : '') +
+        (p.tiktok_enabled ? '<span class="platform-icon tiktok" title="TikTok" aria-label="TikTok">♪</span>' : '') +
+        (p.instagram ? '<span class="platform-icon ig" title="Instagram" aria-label="Instagram">IG</span>' : '');
+      const unscheduled = !p.scheduled_at && p.status!=="published";
+      const subtitle = p.status.charAt(0).toUpperCase()+p.status.slice(1) + (unscheduled?" · Unscheduled":"");
+      return '<a class="calendar-month-post" href="/post/'+esc(p.id)+'" data-status="'+esc(p.status)+'" title="'+esc(title)+'">'+
+        thumb+'<span class="calendar-month-text"><span class="calendar-month-title">'+esc(title)+'</span>'+
+        '<span class="calendar-month-meta">'+esc(subtitle)+'</span>'+
+        '<span class="platform-icons">'+platforms+'</span></span></a>';
+    }).join("");
+    const fullDay = dayLabel.format(new Date(day+"T12:00:00Z"));
+    cells.push('<section class="calendar-month-day'+(outside?' outside':'')+todayClass+
+      '" data-day="'+day+'" aria-label="'+esc(fullDay)+'">'+
+      '<a class="calendar-month-date" href="/calendar?view=week&amp;week='+day+'" aria-label="View week of '+esc(fullDay)+'">'+
+      String(Number(day.slice(8)))+'</a><div class="calendar-month-posts">'+entries+'</div></section>');
+  }
+  return '<style>'+STYLE+MONTH_STYLE+'</style>'+
+    '<div class="calendar-toolbar"><strong>'+esc(displayMonth)+'</strong><div class="calendar-nav">'+
+    '<a href="/calendar?view=month&amp;month='+monthPlus(month,-1)+'">Previous</a>'+
+    '<a href="/calendar?view=month&amp;month='+today.slice(0,7)+'">Today</a>'+
+    '<a href="/calendar?view=month&amp;month='+monthPlus(month,1)+'">Next</a></div>'+
+    '<nav class="calendar-view-toggle" aria-label="Planner view">'+
+    '<a href="/calendar?view=week&amp;week='+today+'">Week</a>'+
+    '<a href="/calendar?view=month&amp;month='+month+'" aria-current="page">Month</a></nav></div>'+
+    '<div class="calendar-legend"><span><i class="calendar-swatch" style="background:var(--accent2)"></i>Draft</span>'+
+    '<span><i class="calendar-swatch" style="background:#6099df"></i>Scheduled</span>'+
+    '<span><i class="calendar-swatch" style="background:var(--ok)"></i>Published</span></div>'+
+    '<div class="calendar-month-wrap"><div class="calendar-month-grid">'+weekdays+cells.join("")+'</div></div>'+
+    '<p class="calendar-month-info">Dates use '+esc(env.TIMEZONE)+'. All posts for each displayed day are listed without hours. '+
+    'Unscheduled drafts are shown on their creation date and clearly marked. Select a post to edit or review it; '+
+    'select a day number to see its week and the time-based scheduling tools.</p>';
 }
