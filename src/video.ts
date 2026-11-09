@@ -1,13 +1,13 @@
 /**
- * Initial Bluesky video transport: GitHub-hosted MP4 up to 20 MB.
- * The limit is intentionally much lower than Bluesky's 300 MB maximum.
+ * Video transport: GitHub-hosted or private MP4 up to 50 MB.
+ * A bounded limit protects Worker memory, upload quotas and fetch latency.
  * Larger files require a separate streaming/transcoding workflow.
  */
 import type { Env } from "./env.ts";
 import { parseGitHubUrl } from "./media.ts";
 import { isUploadRef, parseUploadRef, readUpload } from "./upload.ts";
 
-export const INITIAL_VIDEO_MAX_BYTES = 20_000_000;
+export const INITIAL_VIDEO_MAX_BYTES = 50_000_000;
 
 export function checkVideoUrl(value: string): string | null {
   if (isUploadRef(value)) {
@@ -28,7 +28,7 @@ export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
     const upload = parseUploadRef(value);
     if (!upload || upload.ext !== "mp4") throw new Error("Invalid private MP4 upload reference.");
     const raw = await readUpload(env, upload);
-    if (raw.byteLength > INITIAL_VIDEO_MAX_BYTES) throw new Error("Private MP4 exceeds 20 MB.");
+    if (raw.byteLength > INITIAL_VIDEO_MAX_BYTES) throw new Error("Private MP4 exceeds 50 MB.");
     const bytes = new Uint8Array(raw);
     if (bytes.length < 12 || String.fromCharCode(...bytes.subarray(4, 8)) !== "ftyp") {
       throw new Error("Private upload does not have an MP4 header.");
@@ -53,7 +53,7 @@ export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
   const length = Number(response.headers.get("content-length") ?? 0);
   if (length > INITIAL_VIDEO_MAX_BYTES) {
     await response.body.cancel();
-    throw new Error("MP4 exceeds the 20 MB video storage limit.");
+    throw new Error("MP4 exceeds the 50 MB video storage limit.");
   }
   const parts: Uint8Array[] = [];
   const reader = response.body.getReader();
@@ -65,7 +65,7 @@ export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
       received += next.value.byteLength;
       if (received > INITIAL_VIDEO_MAX_BYTES) {
         await reader.cancel();
-        throw new Error("MP4 exceeds the 20 MB video storage limit.");
+        throw new Error("MP4 exceeds the 50 MB video storage limit.");
       }
       parts.push(next.value);
     }
