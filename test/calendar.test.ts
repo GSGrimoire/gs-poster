@@ -179,3 +179,19 @@ test("month labels and titles remain HTML-escaped",()=>{
   assert.doesNotMatch(html,/<img src=x onerror=alert\(1\)>/);
   assert.match(html,/&#60;img src=x/);
 });
+
+test("monthly calendar query does not discard posts after the weekly 500-item cap",async()=>{
+  // A single bulk insertion isolates read behavior from upload and publish paths.
+  await db.prepare(`WITH RECURSIVE seq(n) AS
+    (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 510)
+    INSERT INTO posts (id,created_at,updated_at,status,message,scheduled_at,created_by)
+    SELECT 'p_monthbulk_'||n, '2031-04-02T10:00:00.000Z',
+      '2031-04-02T10:00:00.000Z','draft','Bulk month post',
+      '2031-04-15T12:00:00.000Z','test' FROM seq`).run();
+  const range=monthRange("2031-04",zone);
+  const limited=await listCalendarPosts(db,range.from,range.to);
+  const complete=await listCalendarPosts(db,range.from,range.to,true);
+  assert.equal(limited.length,500,"existing week remains bounded");
+  assert.equal(complete.length,510,"month includes every post in the range");
+  assert.equal(new Set(complete.map(x=>x.id)).size,510);
+});
