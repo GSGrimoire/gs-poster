@@ -50,8 +50,9 @@ export async function prepareLinkedVideo(
   // strict GitHub-only source. No arbitrary client URL enters the fetch.
   const bytes=await fetchVideo(env,source);
   if(!bytes.byteLength||bytes.byteLength>INITIAL_VIDEO_MAX_BYTES)
-    throw new VideoPrepareError("The MP4 is empty or exceeds 20 MB.");
-  const original=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength) as ArrayBuffer;
+    throw new VideoPrepareError("The MP4 is empty or exceeds 50 MB.");
+  const original=bytes.byteOffset===0 && bytes.byteLength===bytes.buffer.byteLength
+    ? bytes.buffer as ArrayBuffer : bytes.slice().buffer as ArrayBuffer;
   const expectedHash=await fingerprint(original);
   const grant=await createUpload(env,origin,{filename:"prepared.mp4",actor});
   const response=await handleUploadPut(new Request(grant.upload_url,{
