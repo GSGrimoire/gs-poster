@@ -91,3 +91,50 @@ test("the editor shows move buttons and an order field per platform with two or 
   assert.match(html,/aria-label="Move Facebook photo 1 later"/);
   assert.doesNotMatch(html,/name="order_tt"/,"TikTok shares the Facebook gallery here, so it has no order of its own");
 });
+
+test("late Bluesky activation copies selected existing photos without changing Facebook",async()=>{
+  const p=await draft();
+  const r=await save(p,{p_facebook:"1",p_bluesky:"1",message:MSG,bs_caption:"Copied to Bluesky",
+    bs_add_photos:"2,0",bs_add_alt_2:"Third photo",bs_add_alt_0:"First photo"});
+  assert.equal(r.status,200,await r.clone().text());
+  const updated=(await getPost(db,p.id))!;
+  assert.deepEqual(updated.images,p.images);
+  assert.deepEqual(updated.bluesky?.images,[
+    {url:IMG(2),alt:"Third photo"},{url:IMG(0),alt:"First photo"},
+  ]);
+  assert.equal(updated.approved_at,null,"copying media cannot approve publication");
+});
+
+test("Bluesky can copy a TikTok gallery photo when enabled later",async()=>{
+  const p=await draft({tiktok:true});
+  const r=await save(p,{p_facebook:"1",p_tiktok:"1",p_bluesky:"1",message:MSG,
+    bs_caption:"TikTok artwork on Bluesky",bs_add_photos:"5",bs_add_alt_5:"Ninth photo"});
+  assert.equal(r.status,200,await r.clone().text());
+  const updated=(await getPost(db,p.id))!;
+  assert.deepEqual(updated.bluesky?.images,[{url:IMG(9),alt:"Ninth photo"}]);
+  assert.deepEqual(updated.tiktok_images,p.tiktok_images,"TikTok gallery remains independent");
+});
+
+test("Bluesky copies refuse forged indices, duplicates and over-limit galleries",async()=>{
+  const p=await draft({bluesky:true});
+  for(const bs_add_photos of ["0,0","999","-1","0,,1","0,1,2,3,4","0,1"]){
+    const r=await save(p,{p_facebook:"1",p_bluesky:"1",message:MSG,
+      bs_caption:"No change",bs_add_photos});
+    assert.equal(r.status,400,bs_add_photos);
+  }
+  const updated=(await getPost(db,p.id))!;
+  assert.deepEqual(updated.bluesky?.images,p.bluesky?.images);
+  assert.equal(updated.approved_at,null);
+});
+
+test("editor exposes an owned-media Bluesky picker and separate ordering controls",async()=>{
+  const p=await draft({bluesky:true,tiktok:true});
+  const raw=await makeSession(signer,"GSGrimoire");
+  const html=await (await mf.dispatchFetch(ORIGIN+"/post/"+p.id,{headers:{Cookie:SESSION_COOKIE+"="+raw}})).text();
+  assert.match(html,/id="bs-copy-drop"/);
+  assert.match(html,/data-copy-bs="0"/);
+  assert.match(html,/name="bs_add_photos"/);
+  assert.match(html,/data-copy-index="0"/);
+  for(const platform of ["facebook","bluesky","tiktok"])
+    assert.match(html,new RegExp('data-media="'+platform+'" data-order="order_'));
+});
