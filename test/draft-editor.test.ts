@@ -375,9 +375,9 @@ test("return rejected draft refuses forged, stale, cross-origin or approved requ
 
 test("authenticated planner routes switch between week and month without changing a post",async()=>{
   const p=await draft({images:3,inHours:3});
-  const chosen=new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Copenhagen",year:"numeric",month:"2-digit"})
-    .format(new Date(p.scheduled_at!));
-  const target=chosen.slice(0,7);
+  const parts=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Copenhagen",year:"numeric",month:"2-digit"})
+    .formatToParts(new Date(p.scheduled_at!));
+  const target=parts.find(x=>x.type==="year")!.value+"-"+parts.find(x=>x.type==="month")!.value;
   const result=await get("/calendar?view=month&month="+target);
   assert.equal(result.status,200);
   const html=await result.text();
