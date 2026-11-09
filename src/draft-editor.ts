@@ -639,7 +639,8 @@ export function renderDraftEditor(v: EditorView): string {
             </div>
             <input type="hidden" id="bs-add-photos" name="bs_add_photos" value="">
             <div id="bs-copy-staged" class="bs-copy-staged" aria-live="polite"></div>
-            <p class="hint" id="bs-copy-status" role="status" aria-live="polite"></p>
+            <button type="button" id="bs-copy-save" disabled>Copy selected photos to Bluesky</button>
+            <p class="hint" id="bs-copy-status" role="status" aria-live="polite">Choose photos, describe each one, then press Copy selected photos.</p>
           </details>` : `<p class="hint">Attach a photo to this post to make it available for Bluesky.</p>`}
           ${on.bluesky && bs?.video?.url && parseGitHubUrl(bs.video.url) ? `<div class="row"><button type="button" data-prepare-video="bluesky">Prepare Bluesky video privately</button></div>` : ""}
           ${bs && !bs.video && bs.images.length > 1 ? `<input type="hidden" name="order_bs" value="${Array.from({ length: bs.images.length }, (_, i) => i).join(",")}">` : ""}
@@ -1200,6 +1201,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   const STRUCTURAL = /^(p_|remove_|order_|bs_add_photos$|tt_copy_fb$|bs_copy_fb_video$|ig_video_source$|tiktok_title$|tiktok_caption$|when$)/;
   const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
   let timer = null, inflight = false, stopped = false, needsReload = false;
+  let copyConfirmed = false;
   function setVersion(v) {
     document.querySelectorAll('input[name="expected_updated_at"]').forEach(i => { i.value = v; });
     const panel = document.getElementById("draft-media-panel");
@@ -1223,11 +1225,18 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   }
   async function autosave() {
     if (stopped || !dirty()) { refresh(); return; }
+    // The new Bluesky photo list is an append-only one-shot operation.
+    // Do not autosave it repeatedly while descriptions are being typed.
+    if (bsAddField?.value && !copyConfirmed) {
+      saveState = "Choose Copy selected photos to save the Bluesky gallery.";
+      refresh(); return;
+    }
     if (inflight || window.gsMediaBusy) { schedule(); return; }
     inflight = true;
     saveState = "Saving...";
     refresh();
     const sent = snapshot(), before = baseline;
+    let copied = false;
     try {
       const r = await fetch(form.action, { method: "POST", body: new FormData(form), credentials: "same-origin",
         headers: { "X-GS-Autosave": "1", Accept: "application/json" } });
@@ -1238,17 +1247,21 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         baseline = sent;
         saveState = "";
         preflightStale = true;
+        copied = copyConfirmed && !!bsAddField?.value;
         if (structural(before) !== structural(sent)) needsReload = true;
         document.dispatchEvent(new CustomEvent("gs-saved"));
       } else {
         // 409: changed elsewhere or no longer a draft. Stop, keep the edits.
         if (r.status === 409) stopped = true;
+        copyConfirmed = false;
         saveState = "Save failed: " + (body.error || "the server answered " + r.status + ".") + (stopped ? " Your text is still on this page: copy what you need before reloading." : "");
       }
     } catch {
-      saveState = "Save failed: no connection. Your changes are still here and will be saved when you edit again.";
+      copyConfirmed = false;
+      saveState = "Save failed: no connection. Reload and check whether the Bluesky copy was saved before attempting it again.";
     } finally {
       inflight = false;
+      if (copied) { submitting = true; location.reload(); return; }
       refresh();
       if (!stopped && dirty() && !saveState) schedule();
       maybeReload();
@@ -1258,7 +1271,11 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   form.addEventListener("change", () => schedule());
   // The Save button saves now instead of a full page post; without JavaScript
   // the form still posts normally.
-  form.addEventListener("submit", e => { e.preventDefault(); clearTimeout(timer); autosave(); });
+  form.addEventListener("submit", e => {
+    e.preventDefault(); clearTimeout(timer);
+    if (bsAddField?.value) copyConfirmed = true;
+    autosave();
+  });
   // Enter inside the media uploader must not submit the editor form.
   document.getElementById("draft-media-panel")?.addEventListener("keydown", e => {
     if (e.key === "Enter" && e.target instanceof HTMLInputElement) e.preventDefault();
@@ -1299,6 +1316,18 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   const bsStaged = document.getElementById("bs-copy-staged");
   const bsAddField = document.getElementById("bs-add-photos");
   const bsStatus = document.getElementById("bs-copy-status");
+  const bsCopySave = document.getElementById("bs-copy-save");
+  bsCopySave?.addEventListener("click", () => {
+    const missing = Array.from(bsStaged.querySelectorAll('input[name^="bs_add_alt_"]'))
+      .find(input => !input.value.trim());
+    if (missing) {
+      bsStatus.textContent = "Describe each selected photo before copying.";
+      missing.focus(); return;
+    }
+    copyConfirmed = true;
+    clearTimeout(timer);
+    autosave();
+  });
   function stageBlueskyPhoto(index) {
     const source = document.querySelector('.bs-source-item[data-pool-index="' + index + '"]');
     if (!source || !bsStaged || !bsAddField) return;
@@ -1337,7 +1366,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     fields.append(label, remove);
     item.append(thumb, fields);
     bsStaged.append(item);
-    bsStatus.textContent = "Photo staged for Bluesky. Add its description; changes save automatically.";
+    bsStatus.textContent = "Photo staged. Describe it, then press Copy selected photos.";
     syncStaged();
     alt.focus();
   }
@@ -1345,6 +1374,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     if (!bsAddField || !bsStaged) return;
     bsAddField.value = Array.from(bsStaged.querySelectorAll("[data-staged]"))
       .map(t => t.dataset.staged).join(",");
+    if (bsCopySave) bsCopySave.disabled = !bsAddField.value;
     bsAddField.dispatchEvent(new Event("input", { bubbles: true }));
   }
   form.addEventListener("click", e => {
