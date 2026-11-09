@@ -1,7 +1,7 @@
 import { before, after, test } from "node:test";
 import assert from "node:assert/strict";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { weekStart, weekRange, dayPlus, postCalendarTime, renderCalendar, assignCalendarLanes } from "../src/calendar.ts";
+import { weekStart, weekRange, monthStart, monthPlus, monthRange, dayPlus, postCalendarTime, renderCalendar, renderMonthCalendar, CALENDAR_JS, assignCalendarLanes } from "../src/calendar.ts";
 import { createPost, getPost, listCalendarPosts, updateCalendarTime, updateCalendarCaptions, updatePost, claimForPublish } from "../src/db.ts";
 import type { Post } from "../src/db.ts";
 import type { Env } from "../src/env.ts";
@@ -93,4 +93,89 @@ test("overlapping calendar cards use separate lanes while later cards reuse spac
   assert.deepEqual(positions.map(x=>x.lane),[0,1,0,0]);
   assert.deepEqual(positions.map(x=>x.lanes),[2,2,2,1]);
   assert.deepEqual(assignCalendarLanes([540,540,540]).map(x=>x.lane),[0,1,2]);
+});
+
+test("monthly date ranges include complete Sunday-Saturday weeks and cross daylight-saving boundaries",()=>{
+  assert.equal(monthStart("2026-11"),"2026-11-01");
+  assert.equal(monthPlus("2026-12",1),"2027-01");
+  assert.equal(monthPlus("2027-01",-1),"2026-12");
+  assert.deepEqual(monthRange("2026-11",zone),{
+    from:"2026-10-31T23:00:00.000Z",
+    to:"2026-12-05T23:00:00.000Z",
+    startDay:"2026-11-01",endDay:"2026-12-06",
+  });
+  assert.deepEqual(monthRange("2026-03",zone),{
+    from:"2026-02-28T23:00:00.000Z",
+    to:"2026-04-04T22:00:00.000Z",
+    startDay:"2026-03-01",endDay:"2026-04-05",
+  });
+  const may=monthRange("2026-05",zone);
+  assert.equal(may.startDay,"2026-04-26");
+  assert.equal(may.endDay,"2026-06-07","six complete calendar rows");
+  for(const invalid of ["2026-00","2026-13","2026-1","foo","2026-11-09","9999-12","2026-11?next=1"]){
+    assert.throws(()=>monthStart(invalid),/Invalid calendar month/);
+  }
+});
+
+test("week planner has zone-aware live current time indicator and updates after midnight",()=>{
+  const html=renderCalendar({TIMEZONE:zone} as Env,[],"csrf","2026-11-08",new Date("2026-11-09T13:05:00Z"));
+  assert.match(html,/class="calendar-day" data-day="2026-11-09"/);
+  assert.match(html,/class="calendar-now" hidden/);
+  assert.match(html,/data-zone="Europe\/Copenhagen"/);
+  assert.match(html,/aria-current="page">Week/);
+  assert.match(html,/view=month&month=2026-11/);
+  assert.match(CALENDAR_JS,/clock\.formatToParts\(new Date\(\)\)/);
+  assert.match(CALENDAR_JS,/setInterval\(updateNowLine, 60000\)/);
+  assert.match(CALENDAR_JS,/column\.dataset\.day !== today/);
+  assert.match(CALENDAR_JS,/line\.style\.top = minute \+ "px"/);
+});
+
+test("month planner shows all day posts with thumbnails, statuses, and no hourly cards",()=>{
+  const template={
+    id:"p_testone",label:"",release:null,message:"Library art",created_by:"test",
+    created_at:"2026-11-09T10:00:00.000Z",updated_at:"2026-11-09T10:00:00.000Z",
+    scheduled_at:"2026-11-09T18:00:00.000Z",approved_at:null,status:"draft",
+    facebook_enabled:true,tiktok_enabled:false,images:["https://raw.githubusercontent.com/example/repo/main/a.png"],
+    tiktok_images:null,video:null,
+    bluesky:null,instagram:null,
+  } as unknown as Post;
+  const items:Post[]=[
+    {...template,id:"p_one",label:"First gallery"},
+    {...template,id:"p_two",label:"Second gallery",status:"scheduled"},
+    {...template,id:"p_three",label:"Third gallery",status:"published"},
+    {...template,id:"p_tiktok",facebook_enabled:false,tiktok_enabled:true,tiktok_images:["https://raw.githubusercontent.com/example/repo/main/t.png"],label:"TikTok gallery"},
+    {...template,id:"p_sky",facebook_enabled:false,tiktok_enabled:false,images:[],label:"Bluesky gallery",
+      bluesky:{caption:"Blue",images:[{url:"https://raw.githubusercontent.com/example/repo/main/b.png",alt:"Blue"}],video:null,patreon:null}},
+    {...template,id:"p_draft",facebook_enabled:false,images:[],scheduled_at:null,label:"Unscheduled idea"},
+    {...template,id:"p_outside",scheduled_at:"2026-12-02T18:00:00.000Z",label:"Following month"},
+  ];
+  const html=renderMonthCalendar({TIMEZONE:zone} as Env,items,"2026-11",new Date("2026-11-09T12:00:00Z"));
+  assert.match(html,/November 2026/);
+  assert.match(html,/calendar-month-grid/);
+  assert.match(html,/calendar-month-day today" data-day="2026-11-09"/);
+  assert.match(html,/data-day="2026-12-02"/);
+  for(const id of ["p_one","p_two","p_three","p_tiktok","p_sky","p_draft","p_outside"])
+    assert.match(html,new RegExp('href="/post/'+id+'"'));
+  assert.match(html,/src="\/media\/p_one\/0\?thumb=1&amp;platform=facebook"/);
+  assert.match(html,/src="\/media\/p_tiktok\/0\?thumb=1&amp;platform=tiktok"/);
+  assert.match(html,/src="\/media\/p_sky\/0\?thumb=1&amp;platform=bluesky"/);
+  assert.match(html,/Unscheduled/);
+  assert.match(html,/data-status="published"/);
+  assert.match(html,/view=week&amp;week=2026-11-09/);
+  assert.match(html,/aria-current="page">Month/);
+  assert.doesNotMatch(html,/class="calendar-hour"/);
+  assert.doesNotMatch(html,/class="cal-time"/);
+  assert.doesNotMatch(html,/draggable="true"/);
+  assert.doesNotMatch(html,/id="cal-form"/);
+});
+
+test("month labels and titles remain HTML-escaped",()=>{
+  const example={
+    id:"p_safe",label:"<img src=x onerror=alert(1)>",message:"Unsafe",release:null,
+    scheduled_at:"2026-11-09T12:00:00Z",created_at:"2026-11-09T12:00:00Z",
+    status:"draft",facebook_enabled:false,tiktok_enabled:false,images:[],bluesky:null,instagram:null,
+  } as unknown as Post;
+  const html=renderMonthCalendar({TIMEZONE:zone} as Env,[example],"2026-11");
+  assert.doesNotMatch(html,/<img src=x onerror=alert\(1\)>/);
+  assert.match(html,/&#60;img src=x/);
 });
