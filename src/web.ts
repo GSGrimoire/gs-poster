@@ -150,7 +150,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|tiktok-redraft|instagram-cancel|instagram-retry|instagram-close|x-opened))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|return-to-drafts|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|tiktok-redraft|instagram-cancel|instagram-retry|instagram-close|x-opened))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -340,7 +340,7 @@ function shortTime(env: Env, iso: string): string {
   return new Intl.DateTimeFormat("en-GB", { timeZone: env.TIMEZONE, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 }
 
-function postCard(env: Env, p: HistoryPost): string {
+function postCard(env: Env, p: HistoryPost, csrf?: string): string {
   const tiktokOnly = p.tiktokHistoryState !== null;
   const gallery = tiktokOnly ? tiktokMedia(p).images : p.images;
   const source = tiktokOnly ? "?platform=tiktok" : "?platform=facebook";
@@ -352,7 +352,11 @@ function postCard(env: Env, p: HistoryPost): string {
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
     <div class="meta">${statusChip(p, p.tiktokHistoryState)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p, p.tiktokHistoryState))}</span>${p.tiktok_enabled?'<span class="chip">TikTok</span>':""}</div>
     <p class="caption clip">${esc(tiktokOnly ? (p.tiktok_caption ?? p.message) : p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
-    ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
+    ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}
+    ${p.status === "rejected" && !p.approved_at && csrf ? `<form method="post" action="/post/${p.id}/return-to-drafts" class="row">
+      <input type="hidden" name="csrf" value="${esc(csrf)}">
+      <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
+      <button type="submit">Return to drafts</button></form>` : ""}</div>`;
 }
 
 
@@ -382,13 +386,13 @@ function pager<T>(data: Paged<T>, params: URLSearchParams, key: string, path: st
 }
 function postSection(
   env: Env, id: string, title: string, data: Paged<HistoryPost>, params: URLSearchParams,
-  path: string, key: string, empty: string,
+  path: string, key: string, empty: string, csrf?: string,
 ): string {
   return '<details class="history-section" id="' + esc(id) + '" open>' +
     '<summary><span>' + esc(title) + '</span><span class="history-count">' +
     data.total + '</span></summary>' +
     '<div class="history-section-body">' +
-    (data.items.length ? data.items.map((p) => postCard(env,p)).join("") :
+    (data.items.length ? data.items.map((p) => postCard(env,p,csrf)).join("") :
       '<p class="empty">' + esc(empty) + '</p>') +
     pager(data,params,key,path,id) + '</div></details>';
 }
@@ -402,7 +406,8 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
   catch { /* invalid week: show the current week */ }
   const range = weekRange(start, env.TIMEZONE);
   const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
-  const calendar = renderCalendar(env,calendarPosts,await csrfToken(env,session),start);
+  const csrf = await csrfToken(env,session);
+  const calendar = renderCalendar(env,calendarPosts,csrf,start);
   const draftSearch = normalizedSearch(params.get("q") ?? "");
   const drafts = await searchPosts(env.DB,"drafts",draftSearch,viewPage(params,"drafts_page"));
   const missing = missingSecrets(env);
@@ -424,7 +429,7 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     esc(draftSearch) + '"><button class="primary" type="submit">Search</button>' +
     (draftSearch ? '<a class="btn" href="/">Clear</a>' : '') + '</form>' +
     postSection(env,"drafts","Drafts",drafts,params,"/","drafts_page",
-      "No drafts match this search.") ;
+      "No drafts match this search.",csrf) ;
   return html(page("GS Poster",body,{login:session.login,wide:true}));
 }
 
@@ -988,6 +993,15 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       .catch(() => undefined);
     if (auto) return Response.json({ ok: true, updated_at: saved }, { headers: { "Cache-Control": "no-store" } });
     return postPage(env, session, id, { notice: "Saved. Nothing was published." });
+  }
+  if (action === "return-to-drafts") {
+    const current = await getPost(env.DB, id);
+    const version = String(form.get("expected_updated_at") ?? "");
+    if (!current || current.status !== "rejected" || current.approved_at || current.updated_at !== version)
+      return postPage(env,session,id,{error:"This is no longer an unapproved rejected draft. Reload before changing its status."},409);
+    const restored = await backToDraft(env,id,session.login,false,version);
+    return restored ? redirect(`/post/${id}`) :
+      postPage(env,session,id,{error:"Cannot safely return this post to drafts. Reload and check for a previously approved target."},409);
   }
   if (action === "reject") {
     const ok = await rejectPost(env, id, String(form.get("reason") || "").slice(0, 500), session.login);
