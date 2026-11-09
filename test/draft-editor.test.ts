@@ -372,3 +372,24 @@ test("return rejected draft refuses forged, stale, cross-origin or approved requ
   assert.equal((await call(endpoint,fields)).status,409);
   assert.equal((await getPost(db,p.id))!.approved_at===null,false);
 });
+
+test("authenticated planner routes switch between week and month without changing a post",async()=>{
+  const p=await draft({images:3,inHours:3});
+  const chosen=new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Copenhagen",year:"numeric",month:"2-digit"})
+    .format(new Date(p.scheduled_at!));
+  const target=chosen.slice(0,7);
+  const result=await get("/calendar?view=month&month="+target);
+  assert.equal(result.status,200);
+  const html=await result.text();
+  assert.match(html,/calendar-month-grid/);
+  assert.match(html,/aria-current="page">Month/);
+  assert.match(html,new RegExp('href="/post/'+p.id+'"'));
+  assert.match(html,new RegExp('src="/media/'+p.id+'/0\\?thumb=1&amp;platform=facebook"'));
+  assert.doesNotMatch(html,/class="calendar-slot"/,"month has no time slots");
+  const week=await get("/calendar?view=week&week="+target+"-01");
+  assert.equal(week.status,200);
+  assert.match(await week.text(),/class="calendar-now" hidden/);
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.status,"draft");
+  assert.equal(saved.approved_at,null);
+});
