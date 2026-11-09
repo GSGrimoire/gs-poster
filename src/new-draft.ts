@@ -91,6 +91,9 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   .new-drop span{font:13px system-ui,sans-serif;color:var(--muted);margin-top:4px}
   .new-file{display:grid;grid-template-columns:78px minmax(0,1fr);gap:10px 14px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:10px;margin:9px 0}
   .new-file img{width:78px;height:88px;object-fit:cover;border-radius:7px;grid-row:span 2}
+  .new-file[draggable=true]{cursor:grab}
+  .new-file.dragging{opacity:.45}
+  .new-file.drop-target{outline:2px dashed var(--accent2);outline-offset:2px}
   .new-file label{margin:0;grid-column:2}
   .new-file input{width:100%}
   .new-file .gallery-controls{grid-column:2}
@@ -145,7 +148,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <label class="choice-tile"><input type="radio" name="content_kind" value="text" ${kind==="text"?"checked":""}> Text only</label>
         </div>
         <section id="new-images-panel" ${kind!=="images"?"hidden":""}>
-          <p class="form-info" id="new-image-guidance">Select each image’s destinations. Each platform keeps its own gallery and count: Facebook 80, TikTok 35, Bluesky 4. Use Move up/down to reorder the shared source sequence.</p>
+          <p class="form-info" id="new-image-guidance">Select each image’s destinations. Each platform keeps its own gallery and count: Facebook 80, TikTok 35, Bluesky 4. Drag images to reorder them, or use Move up/down. Each platform keeps its own selected subset.</p>
           <div id="new-images-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop images">
             <strong>Drop your artwork here</strong>
             <span>Or select JPG, PNG or GIF files, up to 10 MB each</span>
