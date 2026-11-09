@@ -16,7 +16,7 @@ const TYPES: Record<UploadExt, { mime: string; max: number }> = {
   jpeg: { mime: "image/jpeg", max: 10 * 1024 * 1024 },
   png: { mime: "image/png", max: 10 * 1024 * 1024 },
   gif: { mime: "image/gif", max: 10 * 1024 * 1024 },
-  mp4: { mime: "video/mp4", max: 20_000_000 },
+  mp4: { mime: "video/mp4", max: 50_000_000 },
 };
 const REF = /^upload:\/\/([a-f0-9]{32})\.(jpg|jpeg|png|gif|mp4)$/;
 const key = (r: UploadRef) => "uploads/" + r.id + "." + r.ext;
