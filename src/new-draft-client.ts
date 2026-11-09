@@ -280,8 +280,8 @@ export const NEW_DRAFT_JS = String.raw`
       }
     } else if (k === "video") {
       if (!video) throw new Error("Choose an MP4 video.");
-      if (!/\.mp4$/i.test(video.name) || video.size <= 0 || video.size > 20000000)
-        throw new Error("Video must be an MP4 no larger than 20 MB.");
+      if (!/\.mp4$/i.test(video.name) || video.size <= 0 || video.size > 50000000)
+        throw new Error("Video must be an MP4 no larger than 50 MB.");
       if (bs && !$("new-video-alt").value.trim())
         throw new Error("Provide alternative text for your Bluesky video.");
     }
