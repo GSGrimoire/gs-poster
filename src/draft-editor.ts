@@ -708,14 +708,20 @@ export function renderDraftEditor(v: EditorView): string {
     ${v.xCard ?? ""}
     ${release}
     ${v.tiktokCard}
-    <details class="ed-card"><summary>Reject and send back to the assistant</summary>
+    ${p.status === "rejected" ? `<form method="post" action="/post/${id}/return-to-drafts" class="ed-card">
+      <input type="hidden" name="csrf" value="${esc(v.csrf)}">
+      <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
+      <h3>Return rejected post to drafts</h3>
+      <p class="hint">Keeps the captions and media, changes the status to Draft, and sends nothing. A separate approval is still required.</p>
+      <button type="submit">Return to drafts</button>
+    </form>` : `<details class="ed-card"><summary>Reject and send back to the assistant</summary>
       <form method="post" action="/post/${id}/reject">
         <input type="hidden" name="csrf" value="${esc(v.csrf)}">
         <label for="reason">What should change? (optional)</label>
         <input id="reason" type="text" name="reason" maxlength="500">
         <div class="row"><button class="danger">Reject</button></div>
       </form>
-    </details>
+    </details>`}
   </aside>
   </div>
 </div>
@@ -820,7 +826,9 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         hashtags: (text.match(/(^|[^\p{L}\p{N}_&])#[\p{L}\p{N}_]+/gu) || []).length, lowRes: igApi.lowRes() };
     }
     const tiles = kept(mediaBox(card));
-    const photos = tiles.filter(t => t.dataset.tile === "photo");
+    const staged = id === "bluesky"
+      ? Array.from(card.querySelectorAll("#bs-copy-staged [data-staged]")) : [];
+    const photos = [...tiles.filter(t => t.dataset.tile === "photo"), ...staged];
     let text = card.querySelector("[data-caption]")?.value || "";
     if (id === "tiktok" && !text.trim()) text = document.getElementById("ed-message")?.value || "";
     return {
