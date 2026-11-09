@@ -9,7 +9,7 @@ import { markTikTokInboxApproved, markTikTokCreatorPublished, reopenTikTokInboxD
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { POSTER_FAVICON } from "./favicon.ts";
-import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
+import { CALENDAR_JS, renderCalendar, renderMonthCalendar, weekStart, weekRange, monthStart, monthRange } from "./calendar.ts";
 import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { CHAT_UPLOAD_JS } from "./chat-upload.ts";
@@ -400,14 +400,20 @@ function postSection(
 async function dashboard(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
   await refreshScheduled(env).catch(() => undefined);
   await reconcileOldTikTokInboxDrafts(env.DB);
-  const currentDate = toLocalInput(new Date(), env.TIMEZONE).slice(0, 10);
+  const now = new Date();
+  const currentDate = toLocalInput(now, env.TIMEZONE).slice(0, 10);
+  const view = params.get("view")==="month" ? "month" : "week";
   let start = weekStart(currentDate);
+  let month = currentDate.slice(0,7);
   try { if (params.get("week")) start = weekStart(params.get("week")!); }
   catch { /* invalid week: show the current week */ }
-  const range = weekRange(start, env.TIMEZONE);
+  try { if (params.get("month")) month = monthStart(params.get("month")!).slice(0,7); }
+  catch { /* invalid month: show current month */ }
+  const range = view==="month" ? monthRange(month,env.TIMEZONE) : weekRange(start,env.TIMEZONE);
   const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
   const csrf = await csrfToken(env,session);
-  const calendar = renderCalendar(env,calendarPosts,csrf,start);
+  const calendar = view==="month" ? renderMonthCalendar(env,calendarPosts,month,now)
+    : renderCalendar(env,calendarPosts,csrf,start,now);
   const draftSearch = normalizedSearch(params.get("q") ?? "");
   const drafts = await searchPosts(env.DB,"drafts",draftSearch,viewPage(params,"drafts_page"));
   const missing = missingSecrets(env);
@@ -415,10 +421,10 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     (missing.length ? '<div class="notice err">Not fully set up. Missing secrets: ' +
       missing.map(esc).join(", ") + '.</div>' : '') +
     '<div class="hero"><div class="hero-kicker">GS Grimoire editorial planner</div>' +
-    '<h2>Drafts and the weekly planner</h2>' +
+    '<h2>Drafts and the planner</h2>' +
     '<p>Review and approve your saved drafts. Scheduled posts, TikTok inbox transfers, published posts and activity are in History.</p></div>' +
     '<div class="row" style="justify-content:space-between;align-items:center">' +
-    '<h2 style="margin:0">Weekly planner</h2><div class="inline-actions">' +
+    '<h2 style="margin:0">'+(view==="month"?"Monthly":"Weekly")+' planner</h2><div class="inline-actions">' +
     '<a class="btn" href="/history">View History</a>' +
     '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
     '<a class="btn" href="/new">New draft</a></div></div>' +
