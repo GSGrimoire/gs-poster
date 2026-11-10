@@ -179,3 +179,47 @@ test("MP4 grants accept 40 MB files with a 50 MB bound, not unbounded uploads",a
   }});
   assert.equal((await handleUploadPut(headerOnly,env)).status,413);
 });
+
+test("actual image bytes are bounded even when Content-Length declares fewer bytes",async()=>{
+  const {env,db,objects}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"cover.png",actor:"test"});
+  const body=new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(png);
+      controller.enqueue(new Uint8Array(1024));
+      controller.close();
+    },
+  });
+  const req=new Request(grant.upload_url,{
+    method:"PUT",body,headers:{"Content-Length":String(png.byteLength)},duplex:"half",
+  } as RequestInit & {duplex:"half"});
+  const res=await handleUploadPut(req,env);
+  assert.equal(res.status,413,await res.clone().text());
+  assert.equal(objects.size,0,"no object is stored after an actual-size violation");
+  assert.equal(db.rows[0].status,"pending","pre-write rejection does not consume the token");
+});
+
+test("actual MP4 bytes cannot exceed their grant even if the declared size is accepted",async()=>{
+  const {env,db,objects}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"sample.mp4",actor:"test"});
+  // Use a tiny effective grant so the overrun is caught without materializing
+  // or storing a multi-megabyte body. The extension signature is valid.
+  db.rows[0].max_bytes=20;
+  const mp4=new Uint8Array([0,0,0,20,102,116,121,112,105,115,111,109,0,0,0,0,0,0,0,0]);
+  const body=new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(mp4);
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+  });
+  const req=new Request(grant.upload_url,{
+    method:"PUT",body,headers:{"Content-Length":"20"},duplex:"half",
+  } as RequestInit & {duplex:"half"});
+  const res=await handleUploadPut(req,env);
+  assert.equal(res.status,413,await res.clone().text());
+  assert.equal(objects.size,0,"oversized MP4 cannot be finalized");
+  assert.notEqual(db.rows[0].status,"stored");
+  assert.equal((await handleUploadPut(upload(grant.upload_url,mp4),env)).status,404,
+    "a possibly started multipart write does not reopen the bearer token");
+});
