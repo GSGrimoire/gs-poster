@@ -29,3 +29,49 @@ On desktop and mobile browsers, exercise source-pool click/drag copy for Bluesky
 ## Handoff evidence
 
 Attach the exact deployed staging commit, commands, sanitized HTTP results, sizes/checksums, Cloudflare memory/errors chart, D1 statuses and quota arithmetic, browser observations, failures, and cleanup proof to pull request #90. Independent reviewer must re-check the final source commit and evidence. A green GitHub Actions run is necessary but **not sufficient** for production approval. Keep the pull request draft until the owner and independent reviewer expressly clear all gates.
+
+## Executable acceptance infrastructure added to PR #90
+
+The code on this branch now includes a headless **real Chromium** desktop/mobile acceptance test that runs automatically in a separate GitHub Actions job, `.github/workflows/pr90-browser-acceptance.yml`. It uses the real bundled application and an isolated Miniflare database, not a screenshot mock. The job uploads `results.json` and individual browser screenshots as an Actions artifact. This is **not** a Cloudflare production-isolate test, and green browser checks do not constitute final release approval.
+
+### Provision the separate Cloudflare environment first
+
+Set up the GitHub Actions **environment** `pr90-isolated-staging` with required manual reviewers. Create separate resources with a `gs-poster-pr90-` prefix, never reuse the live application's bucket, database, OAuth namespace, hostname or GitHub OAuth client. Set these environment variables:
+
+| Environment variables | Purpose |
+| --- | --- |
+| `PR90_WORKER_NAME` | Distinct `gs-poster-pr90-...` Worker |
+| `PR90_R2_BUCKET` | Distinct `gs-poster-pr90-...` private bucket |
+| `PR90_LOGIN` | Test-only allowlisted GitHub account |
+| `PR90_STAGING_ORIGIN` | HTTPS `https://<PR90_WORKER_NAME>.<subdomain>.workers.dev` origin |
+
+Set these **staging-only environment secrets**: `PR90_D1_DATABASE_ID`, `PR90_KV_NAMESPACE_ID`, `PR90_CLOUDFLARE_ACCOUNT_ID`, `PR90_CLOUDFLARE_API_TOKEN`, `PR90_STAGING_COOKIE_SECRET`, `PR90_STAGING_GITHUB_CLIENT_ID`, `PR90_STAGING_GITHUB_CLIENT_SECRET`. Configure the separate GitHub OAuth app callback URL under this staged origin. Use an API token restricted to those staging resources. Do not put production values into any of these slots.
+
+The staging deployment workflow **does not run on commits**. To stage *before the PR is merged*, have an authorized owner add the label `pr90-staging-acceptance` to pull request #90. The `pull_request:labeled` workflow checks the PR number, same-repository source, exact branch, and isolated environment. The environment reviewers should inspect the proposed exact head before approving the workflow execution. The `workflow_dispatch` alternative is usable only when the workflow is also available on the default branch; do not merge solely to enable it. No staging execution has been performed by the implementer.
+
+The generated Worker configuration selects `src/pr90-staging-entry.ts` instead of the production entry, has no cron triggers, no production provider secrets, and rejects publishing, retry, external integration and approval endpoints even with credentials. The staging public probe checks this boundary and produces a JSON artifact. If a probe fails, do not continue with acceptance.
+
+### Stream real video through the staged Worker
+
+Prepare real MP4 files of **exactly 40,000,000 and 49,000,000 bytes**, retain the original checksums and use separate one-use upload grants obtained from the *staged* UI. While each grant remains valid, run locally, keeping secret grants out of shell history and CI logs:
+
+```bash
+export PR90_STAGING_ORIGIN="https://gs-poster-pr90-acceptance.<subdomain>.workers.dev"
+# Set PR90_UPLOAD_URL securely to a freshly issued staged grant.
+node scripts/pr90-staging-upload.mjs /path/to/real-40000000.mp4
+node scripts/pr90-staging-upload.mjs /path/to/real-49000000.mp4
+```
+
+The operator must supply a **different fresh grant** before each command. The script streams bytes from disk with an explicit Content-Length, checks returned stored size, requires replay refusal and writes sanitized checksum/status evidence to `artifacts/pr90-staging`. It cannot itself confirm remote R2 bytes or Cloudflare memory telemetry.
+
+For the **GitHub allowlisted import**, create a separate unapproved staging draft with a video URL in the repository allowed by the application. Use a **staging-only** signed-in browser session cookie, supplied through the private `PR90_SESSION_COOKIE` environment variable, and run:
+
+```bash
+node scripts/pr90-staging-private-video.mjs p_STAGINGDRAFTID tiktok /path/to/real-40000000.mp4
+```
+
+Repeat with a new staging draft and the 49,000,000-byte source. The importer pulls the saved URL in the draft, uses the browser's CSRF/version fence, and requests **no approval or publication**. The script checks a 1-megabyte signed-in range read and a full downstream preview checksum against the input, and writes sanitized evidence. Avoid sharing or uploading staging cookies to GitHub.
+
+### Complete the nonautomated evidence
+
+For both sizes and both import methods, independently inspect the staged R2 object's size/digest and D1 upload rows and quota, including malformed, uncertain and replay scenarios. Capture Cloudflare Worker 5xx, error 1102 and exceededMemory metrics across the test period, along with staged preview/download behavior. Attach dated screenshots, real-browser artifact results and failures, the staging commit identifier, cleanup proof, and the operator's recording of resource isolation to PR #90. If instrumentation is missing, the gate remains blocked. The separate reviewer must inspect this evidence at the latest exact PR head before production merge.
