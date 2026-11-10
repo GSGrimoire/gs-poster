@@ -158,8 +158,12 @@ class UploadError extends Error {
 /** Carries whether the multipart path conclusively never committed an object.
  * An abort failure or a possibly completed upload MUST retain its quota fence. */
 class MultipartStoreFailure extends Error {
-  constructor(readonly original:unknown,readonly definitelyAbsent:boolean) {
+  readonly original:unknown;
+  readonly definitelyAbsent:boolean;
+  constructor(original:unknown,definitelyAbsent:boolean) {
     super(original instanceof Error ? original.message : String(original));
+    this.original=original;
+    this.definitelyAbsent=definitelyAbsent;
   }
 }
 function json(body: unknown, status = 200): Response {
