@@ -309,8 +309,17 @@ test("declared-length mismatch after a part starts is aborted and excluded from 
 test("oversize actual body after a multipart part is aborted and releases quota",async()=>{
   const {env,stats}=setup();
   const grant=await createUpload(env,"https://poster.test",{filename:"long.mp4",actor:"test"});
-  const data=mp4Body(5*MiB+1);
-  const res=await handleUploadPut(upload(grant.upload_url,data,data.length-1),env);
+  const first=mp4Body(5*MiB);
+  const stream=new ReadableStream<Uint8Array>({
+    start(controller){
+      controller.enqueue(first);
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+  });
+  const req=new Request(grant.upload_url,{method:"PUT",body:stream,
+    headers:{"Content-Length":String(first.length)},duplex:"half"} as RequestInit & {duplex:"half"});
+  const res=await handleUploadPut(req,env);
   assert.equal(res.status,413);
   assert.equal(stats.parts,1);
   assert.equal(stats.aborted,1);
@@ -347,4 +356,16 @@ test("MP4 header declaration rejection frees quota while successful multipart re
   assert.equal(stats.completed,1);
   assert.equal((await getUploadUsage(env.DB)).reserved_bytes,MP4_HEADER.length);
   assert.equal((await uploadStatusForOwner(env.DB,good.reference,"test"))?.bytes,MP4_HEADER.length);
+});
+
+test("missing Content-Length consumes the grant without reserving bytes",async()=>{
+  const {env}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"missing.mp4",actor:"test"});
+  const req=new Request(grant.upload_url,{method:"PUT",
+    body:new ReadableStream<Uint8Array>({start(c){c.enqueue(MP4_HEADER);c.close();}}),
+    duplex:"half"} as RequestInit & {duplex:"half"});
+  assert.equal((await handleUploadPut(req,env)).status,411);
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+  assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"test"))?.status,"failed");
+  assert.equal((await handleUploadPut(upload(grant.upload_url,MP4_HEADER),env)).status,404);
 });
