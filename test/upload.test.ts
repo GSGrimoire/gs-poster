@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkImageUrl, fetchImage } from "../src/media.ts";
+import { INITIAL_VIDEO_MAX_BYTES } from "../src/video.ts";
 import { createUpload, handleUploadPut, looksLike, parseUploadRef,
-  UPLOAD_MAX_LINKS_PER_HOUR, UPLOAD_QUOTA_BYTES, pendingUploadPageInfo, uploadStatusForOwner } from "../src/upload.ts";
+  UPLOAD_MAX_LINKS_PER_HOUR, UPLOAD_QUOTA_BYTES, pendingUploadPageInfo, uploadStatusForOwner, getUploadUsage } from "../src/upload.ts";
 import {CHAT_UPLOAD_JS,browserUploadPage} from "../src/chat-upload.ts";
 import type { Env } from "../src/env.ts";
 
@@ -23,6 +24,10 @@ function fakeDb() {
       } else if (sql.includes("SET status = 'stored'")) {
         const r = rows.find(x=>x.id===args[1] && x.status==="uploading");
         if(r){r.status="stored";r.bytes=args[0];changes++;}
+      } else if (sql.includes("SET status='failed'")) {
+        const allowed=sql.includes("status='pending'")?"pending":"uploading";
+        const r=rows.find(x=>x.id===args[0] && x.status===allowed);
+        if(r){r.status="failed";changes++;}
       } else if (sql.includes("SET status = 'pending'")) {
         const r = rows.find(x=>x.id===args[0] && x.status==="uploading");
         if(r){r.status="pending";changes++;}
@@ -40,9 +45,42 @@ function fakeDb() {
 function setup() {
   const db = fakeDb();
   const objects = new Map<string,ArrayBuffer>();
-  const r2 = {objects,async put(key:string,value:ArrayBuffer){objects.set(key,value);},
-    async get(key:string){const v=objects.get(key);return v?{arrayBuffer:async()=>v}:null;}};
-  return {db,objects,env:{DB:db,UPLOADS:r2} as unknown as Env};
+  const stats={started:0,parts:0,aborted:0,completed:0,failAbort:false,failComplete:false,failPart:false};
+  const r2 = {
+    objects,stats,
+    async put(key:string,value:ArrayBuffer|Uint8Array){
+      const bytes=value instanceof Uint8Array?value:new Uint8Array(value);
+      objects.set(key,bytes.slice().buffer);
+    },
+    async get(key:string){const v=objects.get(key);return v?{arrayBuffer:async()=>v}:null;},
+    async delete(key:string){objects.delete(key);},
+    async createMultipartUpload(key:string){
+      stats.started++;
+      const parts=new Map<number,Uint8Array>();
+      return {
+        async uploadPart(n:number,value:Uint8Array) {
+          stats.parts++;
+          if(stats.failPart)throw new Error("Upload part acknowledgment lost");
+          parts.set(n,value.slice());
+          return {partNumber:n,etag:"part-"+n};
+        },
+        async abort(){
+          stats.aborted++;
+          if(stats.failAbort)throw new Error("R2 abort acknowledgment lost");
+          parts.clear();
+        },
+        async complete(ordered:{partNumber:number}[]){
+          stats.completed++;
+          if(stats.failComplete)throw new Error("R2 completion uncertain");
+          const total=ordered.reduce((sum,p)=>sum+(parts.get(p.partNumber)?.length??0),0);
+          const out=new Uint8Array(total);let at=0;
+          for(const p of ordered) {const b=parts.get(p.partNumber)!;out.set(b,at);at+=b.length;}
+          objects.set(key,out.buffer);
+        },
+      };
+    },
+  };
+  return {db,objects,stats,env:{DB:db,UPLOADS:r2} as unknown as Env};
 }
 const png = new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,13]);
 const upload = (url:string, bytes:Uint8Array, length=bytes.length) =>
@@ -78,11 +116,18 @@ test("invalid token, expired link, bad signature and size rejected",async()=>{
   const wrong=g.upload_url.replace(/[^/]+$/,"x".repeat(32));
   assert.equal((await handleUploadPut(upload(wrong,png),env)).status,404);
   assert.equal((await handleUploadPut(upload(g.upload_url,new Uint8Array([1,2,3])),env)).status,415);
-  assert.equal(db.rows[0].status,"pending");
-  assert.equal((await handleUploadPut(upload(g.upload_url,png,g.max_bytes+1),env)).status,413);
+  assert.equal(db.rows[0].status,"failed","a definite pre-write invalid body releases quota");
+  assert.equal((await handleUploadPut(upload(g.upload_url,png,g.max_bytes+1),env)).status,404);
   assert.equal(objects.size,0);
-  db.rows[0].expires_at=new Date(Date.now()-1000).toISOString();
-  assert.equal((await handleUploadPut(upload(g.upload_url,png),env)).status,404);
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+  const oversized=await createUpload(env,"https://poster.test",{filename:"a.png",actor:"test"});
+  assert.equal((await handleUploadPut(upload(oversized.upload_url,png,oversized.max_bytes+1),env)).status,413);
+  assert.equal((await uploadStatusForOwner(env.DB,oversized.reference,"test"))?.status,"failed");
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+  const expired=await createUpload(env,"https://poster.test",{filename:"a.png",actor:"test"});
+  const record=db.rows.find(r=>r.id===parseUploadRef(expired.reference)!.id)!;
+  record.expires_at=new Date(Date.now()-1000).toISOString();
+  assert.equal((await handleUploadPut(upload(expired.upload_url,png),env)).status,404);
 });
 test("two simultaneous attempts can store only once",async()=>{
   const {env,objects}=setup();
@@ -163,4 +208,164 @@ test("chat uploader sends file bytes with a one-time PUT and never auto-publishe
   assert.match(CHAT_UPLOAD_JS,/credentials:"omit"/);
   assert.match(CHAT_UPLOAD_JS,/response\.reference/);
   assert.doesNotMatch(CHAT_UPLOAD_JS,/\/approve|\/publish/);
+});
+
+test("MP4 grants accept 40 MB files with a 50 MB bound, not unbounded uploads",async()=>{
+  const {env}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"clip.mp4",actor:"GSGrimoire"});
+  assert.equal(grant.max_bytes,50_000_000);
+  assert.equal(INITIAL_VIDEO_MAX_BYTES,50_000_000);
+  const url=new URL(grant.upload_url),parts=url.pathname.split("/");
+  const info=await pendingUploadPageInfo(env.DB,parts[2],parts[3]);
+  assert.equal(info?.maxBytes,50_000_000);
+  const headerOnly=new Request(grant.upload_url,{method:"PUT",body:new Uint8Array(12),headers:{
+    "Content-Length":"50000001",
+  }});
+  assert.equal((await handleUploadPut(headerOnly,env)).status,413);
+});
+
+test("actual image bytes are bounded even when Content-Length declares fewer bytes",async()=>{
+  const {env,db,objects}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"cover.png",actor:"test"});
+  const body=new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(png);
+      controller.enqueue(new Uint8Array(1024));
+      controller.close();
+    },
+  });
+  const req=new Request(grant.upload_url,{
+    method:"PUT",body,headers:{"Content-Length":String(png.byteLength)},duplex:"half",
+  } as RequestInit & {duplex:"half"});
+  const res=await handleUploadPut(req,env);
+  assert.equal(res.status,413,await res.clone().text());
+  assert.equal(objects.size,0,"no object is stored after an actual-size violation");
+  assert.equal(db.rows[0].status,"failed","pre-write rejection consumes the token and frees quota");
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+});
+
+test("actual MP4 bytes cannot exceed their grant even if the declared size is accepted",async()=>{
+  const {env,db,objects}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"sample.mp4",actor:"test"});
+  // Use a tiny effective grant so the overrun is caught without materializing
+  // or storing a multi-megabyte body. The extension signature is valid.
+  db.rows[0].max_bytes=20;
+  const mp4=new Uint8Array([0,0,0,20,102,116,121,112,105,115,111,109,0,0,0,0,0,0,0,0]);
+  const body=new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(mp4);
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+  });
+  const req=new Request(grant.upload_url,{
+    method:"PUT",body,headers:{"Content-Length":"20"},duplex:"half",
+  } as RequestInit & {duplex:"half"});
+  const res=await handleUploadPut(req,env);
+  assert.equal(res.status,413,await res.clone().text());
+  assert.equal(objects.size,0,"oversized MP4 cannot be finalized");
+  assert.equal(db.rows[0].status,"failed","pre-write MP4 overrun frees the reservation");
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+  assert.equal((await handleUploadPut(upload(grant.upload_url,mp4),env)).status,404,
+    "failed grants cannot be replayed even if no part was written");
+});
+
+const MP4_HEADER=new Uint8Array([0,0,0,20,102,116,121,112,105,115,111,109,0,0,0,0,0,0,0,0]);
+const MiB=1024*1024;
+const mp4Body=(size:number):Uint8Array=>{
+  const data=new Uint8Array(size);
+  data.set(MP4_HEADER);
+  return data;
+};
+
+test("malformed and truncated MP4 pre-write failures consume links but free quota",async()=>{
+  const {env,stats}=setup();
+  for(const value of [new Uint8Array([0]),new Uint8Array(12),new Uint8Array(12).fill(6)]){
+    const grant=await createUpload(env,"https://poster.test",{filename:"broken.mp4",actor:"test"});
+    const res=await handleUploadPut(upload(grant.upload_url,value),env);
+    assert.notEqual(res.status,200);
+    assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"test"))?.status,"failed");
+    assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+    assert.equal((await handleUploadPut(upload(grant.upload_url,MP4_HEADER),env)).status,404);
+  }
+  assert.equal(stats.started,0);
+});
+
+test("declared-length mismatch after a part starts is aborted and excluded from quota",async()=>{
+  const {env,stats,objects}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"short.mp4",actor:"test"});
+  const data=mp4Body(5*MiB);
+  const res=await handleUploadPut(upload(grant.upload_url,data,data.length+1),env);
+  assert.equal(res.status,413);
+  assert.equal(stats.parts,1);
+  assert.equal(stats.aborted,1);
+  assert.equal(stats.completed,0);
+  assert.equal(objects.size,0);
+  assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"test"))?.status,"failed");
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+  assert.equal((await handleUploadPut(upload(grant.upload_url,MP4_HEADER),env)).status,404);
+});
+
+test("oversize actual body after a multipart part is aborted and releases quota",async()=>{
+  const {env,stats}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"long.mp4",actor:"test"});
+  const first=mp4Body(5*MiB);
+  const stream=new ReadableStream<Uint8Array>({
+    start(controller){
+      controller.enqueue(first);
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+  });
+  const req=new Request(grant.upload_url,{method:"PUT",body:stream,
+    headers:{"Content-Length":String(first.length)},duplex:"half"} as RequestInit & {duplex:"half"});
+  const res=await handleUploadPut(req,env);
+  assert.equal(res.status,413);
+  assert.equal(stats.parts,1);
+  assert.equal(stats.aborted,1);
+  assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"test"))?.status,"failed");
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+});
+
+test("uncertain multipart abort or completion retains reservation and consumed token",async()=>{
+  for(const point of ["abort","complete"] as const){
+    const {env,stats}=setup();
+    const grant=await createUpload(env,"https://poster.test",{filename:"uncertain.mp4",actor:"test"});
+    if(point==="abort")stats.failAbort=true;
+    else stats.failComplete=true;
+    const data=mp4Body(point==="abort"?5*MiB:MP4_HEADER.length);
+    const res=await handleUploadPut(upload(grant.upload_url,data,
+      point==="abort"?data.length+1:data.length),env);
+    assert.notEqual(res.status,200);
+    assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"test"))?.status,"uploading");
+    assert.equal((await getUploadUsage(env.DB)).reserved_bytes,50_000_000);
+    assert.equal((await handleUploadPut(upload(grant.upload_url,MP4_HEADER),env)).status,404);
+    if(point==="abort")assert.equal(stats.aborted,1);
+    else assert.equal(stats.completed,1);
+  }
+});
+
+test("MP4 header declaration rejection frees quota while successful multipart retains actual stored size",async()=>{
+  const {env,stats}=setup();
+  const bad=await createUpload(env,"https://poster.test",{filename:"bad.mp4",actor:"test"});
+  assert.equal((await handleUploadPut(upload(bad.upload_url,MP4_HEADER,50_000_001),env)).status,413);
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+  assert.equal((await handleUploadPut(upload(bad.upload_url,MP4_HEADER),env)).status,404);
+  const good=await createUpload(env,"https://poster.test",{filename:"good.mp4",actor:"test"});
+  assert.equal((await handleUploadPut(upload(good.upload_url,MP4_HEADER),env)).status,200);
+  assert.equal(stats.completed,1);
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,MP4_HEADER.length);
+  assert.equal((await uploadStatusForOwner(env.DB,good.reference,"test"))?.bytes,MP4_HEADER.length);
+});
+
+test("missing Content-Length consumes the grant without reserving bytes",async()=>{
+  const {env}=setup();
+  const grant=await createUpload(env,"https://poster.test",{filename:"missing.mp4",actor:"test"});
+  const req=new Request(grant.upload_url,{method:"PUT",
+    body:new ReadableStream<Uint8Array>({start(c){c.enqueue(MP4_HEADER);c.close();}}),
+    duplex:"half"} as RequestInit & {duplex:"half"});
+  assert.equal((await handleUploadPut(req,env)).status,411);
+  assert.equal((await getUploadUsage(env.DB)).reserved_bytes,0);
+  assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"test"))?.status,"failed");
+  assert.equal((await handleUploadPut(upload(grant.upload_url,MP4_HEADER),env)).status,404);
 });

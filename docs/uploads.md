@@ -14,7 +14,7 @@ Usage:
 
 ### Limits
 - One-time bearer link valid for 10 minutes; only a hash of the secret is stored.
-- JPG, PNG, GIF up to 10 MiB; MP4 up to 20,000,000 bytes.
+- JPG, PNG, GIF up to 10 MiB; MP4 up to 50,000,000 bytes.
 - Header signature and exact request-length checks.
 - Up to 60 upload links per rolling hour, and 3 GiB of stored/reserved uploads.
 - The D1 quota is allocated atomically so simultaneous links cannot exceed either limit.

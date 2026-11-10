@@ -5,18 +5,13 @@
 import type { Env } from "./env.ts";
 import { getPost, replacePreparedVideoReference } from "./db.ts";
 import { parseGitHubUrl } from "./media.ts";
-import { checkVideoUrl, fetchVideo, INITIAL_VIDEO_MAX_BYTES } from "./video.ts";
-import { createUpload, handleUploadPut, isStoredOwnerVideo, readUpload } from "./upload.ts";
+import { checkVideoUrl, openGitHubVideoSource } from "./video.ts";
+import { createUpload, handleUploadPut, isStoredOwnerVideo, verifyStoredUploadParts } from "./upload.ts";
 
 export type VideoPrepareTarget = "tiktok" | "bluesky" | "instagram";
 export class VideoPrepareError extends Error {
   status: number;
   constructor(message:string,status=400) { super(message); this.status=status; }
-}
-
-async function fingerprint(bytes:ArrayBuffer):Promise<string> {
-  const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",bytes));
-  return Array.from(digest,v=>v.toString(16).padStart(2,"0")).join("");
 }
 
 export async function prepareLinkedVideo(
@@ -46,21 +41,20 @@ export async function prepareLinkedVideo(
     throw new VideoPrepareError("Only existing GitHub-linked MP4 videos can be prepared.");
   if(!env.UPLOADS)throw new VideoPrepareError("Private media storage is not configured.",503);
 
-  // fetchVideo has a bounded streaming read, an MP4 signature check and a
-  // strict GitHub-only source. No arbitrary client URL enters the fetch.
-  const bytes=await fetchVideo(env,source);
-  if(!bytes.byteLength||bytes.byteLength>INITIAL_VIDEO_MAX_BYTES)
-    throw new VideoPrepareError("The MP4 is empty or exceeds 20 MB.");
-  const original=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength) as ArrayBuffer;
-  const expectedHash=await fingerprint(original);
+  // Never hold an entire 40-50 MB GitHub video in Worker memory. The
+  // authenticated source is streamed into bounded 5 MiB R2 multipart parts.
+  const upstream=await openGitHubVideoSource(env,source);
+  const declared=upstream.headers.get("content-length");
   const grant=await createUpload(env,origin,{filename:"prepared.mp4",actor});
-  const response=await handleUploadPut(new Request(grant.upload_url,{
-    method:"PUT",headers:{"Content-Length":String(bytes.byteLength)},body:original,
-  }),env,{verifyBeforeFinalize:async ref=>{
-    const stored=await readUpload(env,ref);
-    if(stored.byteLength!==original.byteLength || await fingerprint(stored)!==expectedHash)
-      throw new Error("Private video copy failed the integrity check.");
-  }});
+  const request=new Request(grant.upload_url,{
+    method:"PUT",headers:declared?{"Content-Length":declared}:{},
+    body:upstream.body,
+    duplex:"half",
+  } as RequestInit & {duplex:"half"});
+  const response=await handleUploadPut(request,env,{
+    internalUnknownLength:true,
+    verifyBeforeFinalize:verifyStoredUploadParts.bind(null,env),
+  });
   if(!response.ok)
     throw new VideoPrepareError("Private video storage was not confirmed. Reload and inspect before retrying.",502);
   if(!(await isStoredOwnerVideo(env.DB,grant.reference,actor)))

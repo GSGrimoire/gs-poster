@@ -83,6 +83,14 @@ export async function uploadUnpublishedPhoto(env: Env, img: ImageBytes, forSched
   return String(res.id);
 }
 
+/** Facebook's current simple multipart transport is capped below private storage.
+ * Do not raise this without upgrading and testing Meta's larger-video transport. */
+export const FACEBOOK_VIDEO_MAX_BYTES = 20_000_000;
+export function assertFacebookVideoSize(size:number):void {
+  if (!Number.isSafeInteger(size) || size <= 0 || size > FACEBOOK_VIDEO_MAX_BYTES)
+    throw new FacebookError("Facebook video must be between 1 byte and 20 MB. Private storage allows up to 50 MB for other platforms; choose a smaller Facebook video or deselect Facebook.");
+}
+
 /** Upload a private MP4 directly to the Page video endpoint, without a public file URL.
  * Returns a Video ID, which is distinct from a normal Page feed post ID.
  */
@@ -91,9 +99,7 @@ export async function createPageVideo(
   input: { bytes: Uint8Array; title: string; description: string; scheduledUnix?: number },
 ): Promise<string> {
   const { pageId } = need(env);
-  if (!input.bytes.length || input.bytes.length > 20_000_000) {
-    throw new FacebookError("Video must be between 1 byte and 20 MB.");
-  }
+  assertFacebookVideoSize(input.bytes.length);
   const form = new FormData();
   form.set("source", new Blob([new Uint8Array(input.bytes)], { type:"video/mp4" }), "gs-poster.mp4");
   form.set("title", input.title.slice(0,255) || "GS Grimoire video");

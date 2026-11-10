@@ -4,12 +4,12 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, MONTH_CALENDAR_PAGE_SIZE, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
 import { markTikTokInboxApproved, markTikTokCreatorPublished, reopenTikTokInboxDraft, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, getTikTokHistoryState, type HistoryPost, type Paged, type TikTokHistoryState } from "./history.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { POSTER_FAVICON } from "./favicon.ts";
-import { CALENDAR_JS, renderCalendar, weekStart, weekRange } from "./calendar.ts";
+import { CALENDAR_JS, renderCalendar, renderMonthCalendar, weekStart, weekRange, monthStart, monthRange } from "./calendar.ts";
 import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { CHAT_UPLOAD_JS } from "./chat-upload.ts";
@@ -30,6 +30,7 @@ import { importTikTokLinkedImage, TikTokImportError } from "./tiktok-import.ts";
 import { prepareLinkedVideo, VideoPrepareError, type VideoPrepareTarget } from "./video-import.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
+import { assertFacebookVideoSize } from "./facebook.ts";
 import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
   markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
@@ -150,7 +151,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
 
   const ttOptions=/^\/post\/(p_[a-z0-9]+)\/tiktok-options$/.exec(path);
   if(ttOptions && req.method==="GET") return tiktokOptionsPage(env,session,ttOptions[1]);
-  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|tiktok-redraft|instagram-cancel|instagram-retry|instagram-close|x-opened))?$/.exec(path);
+  const m = /^\/post\/(p_[a-z0-9]+)(?:\/(save|approve|reject|cancel|redraft|return-to-drafts|retry-bluesky|retry-facebook|resume-facebook|abandon-facebook|reconcile-facebook|reconcile-stuck|reschedule|edit-caption|restore-cancelled|tiktok-upload|tiktok-status|tiktok-send|tiktok-clear|tiktok-redraft|instagram-cancel|instagram-retry|instagram-close|x-opened))?$/.exec(path);
   if (m) {
     const [, id, action] = m;
     if (!action && req.method === "GET") return postPage(env, session, id, {});
@@ -340,7 +341,7 @@ function shortTime(env: Env, iso: string): string {
   return new Intl.DateTimeFormat("en-GB", { timeZone: env.TIMEZONE, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 }
 
-function postCard(env: Env, p: HistoryPost): string {
+function postCard(env: Env, p: HistoryPost, csrf?: string): string {
   const tiktokOnly = p.tiktokHistoryState !== null;
   const gallery = tiktokOnly ? tiktokMedia(p).images : p.images;
   const source = tiktokOnly ? "?platform=tiktok" : "?platform=facebook";
@@ -352,7 +353,11 @@ function postCard(env: Env, p: HistoryPost): string {
   return `<div class="card"><a class="stretch" href="/post/${p.id}">
     <div class="meta">${statusChip(p, p.tiktokHistoryState)}${p.label ? `<strong>${esc(p.label)}</strong>` : ""}${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(whenText(env, p, p.tiktokHistoryState))}</span>${p.tiktok_enabled?'<span class="chip">TikTok</span>':""}</div>
     <p class="caption clip">${esc(tiktokOnly ? (p.tiktok_caption ?? p.message) : p.facebook_enabled ? p.message : (p.bluesky?.caption ?? p.message))}</p>${thumbs}</a>
-    ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}</div>`;
+    ${live || bsky ? `<div class="meta" style="margin-top:8px">${(live + bsky).slice(3)}</div>` : ""}
+    ${p.status === "rejected" && !p.approved_at && csrf ? `<form method="post" action="/post/${p.id}/return-to-drafts" class="row">
+      <input type="hidden" name="csrf" value="${esc(csrf)}">
+      <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
+      <button type="submit">Return to drafts</button></form>` : ""}</div>`;
 }
 
 
@@ -382,27 +387,43 @@ function pager<T>(data: Paged<T>, params: URLSearchParams, key: string, path: st
 }
 function postSection(
   env: Env, id: string, title: string, data: Paged<HistoryPost>, params: URLSearchParams,
-  path: string, key: string, empty: string,
+  path: string, key: string, empty: string, csrf?: string,
 ): string {
   return '<details class="history-section" id="' + esc(id) + '" open>' +
     '<summary><span>' + esc(title) + '</span><span class="history-count">' +
     data.total + '</span></summary>' +
     '<div class="history-section-body">' +
-    (data.items.length ? data.items.map((p) => postCard(env,p)).join("") :
+    (data.items.length ? data.items.map((p) => postCard(env,p,csrf)).join("") :
       '<p class="empty">' + esc(empty) + '</p>') +
     pager(data,params,key,path,id) + '</div></details>';
 }
 
 async function dashboard(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
-  await refreshScheduled(env).catch(() => undefined);
-  await reconcileOldTikTokInboxDrafts(env.DB);
-  const currentDate = toLocalInput(new Date(), env.TIMEZONE).slice(0, 10);
+  const now = new Date();
+  const currentDate = toLocalInput(now, env.TIMEZONE).slice(0, 10);
+  const view = params.get("view")==="month" ? "month" : "week";
+  // Month is observational: opening it must never reconcile old transfers or
+  // refresh scheduled publishing state. The legacy Week dashboard keeps its
+  // prior behavior until reconciliation is moved to a controlled job.
+  if (view!=="month") {
+    await refreshScheduled(env).catch(() => undefined);
+    await reconcileOldTikTokInboxDrafts(env.DB);
+  }
   let start = weekStart(currentDate);
+  let month = currentDate.slice(0,7);
   try { if (params.get("week")) start = weekStart(params.get("week")!); }
   catch { /* invalid week: show the current week */ }
-  const range = weekRange(start, env.TIMEZONE);
-  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to);
-  const calendar = renderCalendar(env,calendarPosts,await csrfToken(env,session),start);
+  try { if (params.get("month")) month = monthStart(params.get("month")!).slice(0,7); }
+  catch { /* invalid month: show current month */ }
+  const pageRaw=params.get("month_page")||"1";
+  const monthPage=/^[1-9]\d{0,2}$/.test(pageRaw) ? Number(pageRaw) : 1;
+  const range = view==="month" ? monthRange(month,env.TIMEZONE) : weekRange(start,env.TIMEZONE);
+  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to,view==="month",
+    view==="month"?(monthPage-1)*MONTH_CALENDAR_PAGE_SIZE:0);
+  const csrf = await csrfToken(env,session);
+  const calendar = view==="month" ? renderMonthCalendar(env,calendarPosts.slice(0,MONTH_CALENDAR_PAGE_SIZE),month,now,
+    {page:monthPage,hasNext:calendarPosts.length>MONTH_CALENDAR_PAGE_SIZE})
+    : renderCalendar(env,calendarPosts,csrf,start,now);
   const draftSearch = normalizedSearch(params.get("q") ?? "");
   const drafts = await searchPosts(env.DB,"drafts",draftSearch,viewPage(params,"drafts_page"));
   const missing = missingSecrets(env);
@@ -410,10 +431,10 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     (missing.length ? '<div class="notice err">Not fully set up. Missing secrets: ' +
       missing.map(esc).join(", ") + '.</div>' : '') +
     '<div class="hero"><div class="hero-kicker">GS Grimoire editorial planner</div>' +
-    '<h2>Drafts and the weekly planner</h2>' +
+    '<h2>Drafts and the planner</h2>' +
     '<p>Review and approve your saved drafts. Scheduled posts, TikTok inbox transfers, published posts and activity are in History.</p></div>' +
     '<div class="row" style="justify-content:space-between;align-items:center">' +
-    '<h2 style="margin:0">Weekly planner</h2><div class="inline-actions">' +
+    '<h2 style="margin:0">'+(view==="month"?"Monthly":"Weekly")+' planner</h2><div class="inline-actions">' +
     '<a class="btn" href="/history">View History</a>' +
     '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
     '<a class="btn" href="/new">New draft</a></div></div>' +
@@ -424,7 +445,7 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     esc(draftSearch) + '"><button class="primary" type="submit">Search</button>' +
     (draftSearch ? '<a class="btn" href="/">Clear</a>' : '') + '</form>' +
     postSection(env,"drafts","Drafts",drafts,params,"/","drafts_page",
-      "No drafts match this search.") ;
+      "No drafts match this search.",csrf) ;
   return html(page("GS Poster",body,{login:session.login,wide:true}));
 }
 
@@ -643,7 +664,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <label><input type="checkbox" name="target_facebook" value="1" checked> Publish to Facebook</label>
         <label for="message">Facebook caption</label>
         <textarea id="message" name="message">${esc(message)}</textarea>
-        <p class="hint">${p.video?"Video":p.images.length+" images"}</p></section>`:
+        <p class="hint">${p.video?"Video (Facebook limit: 20 MB; private storage and other targets: up to 50 MB)":p.images.length+" images"}</p></section>`:
         `<input type="hidden" name="message" value="${esc(message)}">`}
         ${bs?`<section class="platform-preview"><h3>Bluesky approval</h3>
         <label><input type="checkbox" name="target_bluesky" value="1" checked> Publish to Bluesky</label>
@@ -989,6 +1010,15 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (auto) return Response.json({ ok: true, updated_at: saved }, { headers: { "Cache-Control": "no-store" } });
     return postPage(env, session, id, { notice: "Saved. Nothing was published." });
   }
+  if (action === "return-to-drafts") {
+    const current = await getPost(env.DB, id);
+    const version = String(form.get("expected_updated_at") ?? "");
+    if (!current || current.status !== "rejected" || current.approved_at || current.updated_at !== version)
+      return postPage(env,session,id,{error:"This is no longer an unapproved rejected draft. Reload before changing its status."},409);
+    const restored = await backToDraft(env,id,session.login,false,version);
+    return restored ? redirect(`/post/${id}`) :
+      postPage(env,session,id,{error:"Cannot safely return this post to drafts. Reload and check for a previously approved target."},409);
+  }
   if (action === "reject") {
     const ok = await rejectPost(env, id, String(form.get("reason") || "").slice(0, 500), session.login);
     if (ok) return redirect(`/post/${id}`);
@@ -1269,8 +1299,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (facebook && current.video) {
       if (current.images.length) return postPage(env,session,id,
         {error:"Facebook video cannot be combined with image gallery."},400);
-      try { await fetchVideo(env,current.video); }
-      catch(error) { return postPage(env,session,id,{error:"Facebook video unavailable: "+
+      try {
+        const bytes=await fetchVideo(env,current.video);
+        assertFacebookVideoSize(bytes.byteLength);
+      } catch(error) { return postPage(env,session,id,{error:"Facebook video cannot be approved: "+
         (error instanceof Error ? error.message : String(error))},400); }
     }
     // Human review only authorizes media that is actually readable now.

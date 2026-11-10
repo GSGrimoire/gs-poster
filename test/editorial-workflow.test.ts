@@ -93,3 +93,11 @@ test("TikTok quick starts do not silently select Facebook or Bluesky",()=>{
   assert.equal(video.tiktok,true);
   assert.deepEqual(presetNewDraft("unknown"),blankNewDraft());
 });
+
+test("new-draft photos support drag ordering while retaining arrow controls",()=>{
+  assert.match(NEW_DRAFT_JS,/draggedImage=images\.find\(item=>item\.wrap===tile\)/);
+  assert.match(NEW_DRAFT_JS,/imageList\.addEventListener\("drop"/);
+  assert.match(NEW_DRAFT_JS,/wrap\.draggable=true/);
+  assert.match(NEW_DRAFT_JS,/action\("Move up",-1\)/);
+  assert.match(NEW_DRAFT_JS,/action\("Move down",1\)/);
+});
