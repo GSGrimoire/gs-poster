@@ -66,7 +66,7 @@ export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
   }
   const response = await openGitHubVideoSource(env,value);
   const parts: Uint8Array[] = [];
-  const reader = response.body.getReader();
+  const reader = response.body!.getReader();
   let received = 0;
   try {
     while (true) {
