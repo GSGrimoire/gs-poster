@@ -40,7 +40,7 @@ export function looksLike(ext: UploadExt, bytes: Uint8Array): boolean {
 }
 interface UploadRow {
   id: string; token_hash: string; ext: UploadExt; max_bytes: number;
-  status: "pending" | "uploading" | "stored"; created_at: string;
+  status: "pending" | "uploading" | "stored" | "failed"; created_at: string;
   expires_at: string; bytes: number | null; created_by: string | null;
 }
 let schemaReady = false;
@@ -153,6 +153,13 @@ class UploadError extends Error {
   constructor(message: string, status: number) {
     super(message);
     this.status = status;
+  }
+}
+/** Carries whether the multipart path conclusively never committed an object.
+ * An abort failure or a possibly completed upload MUST retain its quota fence. */
+class MultipartStoreFailure extends Error {
+  constructor(readonly original:unknown,readonly definitelyAbsent:boolean) {
+    super(original instanceof Error ? original.message : String(original));
   }
 }
 function json(body: unknown, status = 200): Response {
@@ -282,10 +289,17 @@ async function storeVideoInParts(
     await state.upload.complete(completedParts);
     return {bytes:total,parts:fingerprints};
   } catch (error) {
+    // No multipart handle means no completed object was submitted. If a
+    // multipart handle exists, only a CONFIRMED abort frees the quota.
+    // After complete() is attempted, even an exception is ambiguous.
+    let definitelyAbsent = !state.upload && !commitAttempted;
     if (state.upload && !commitAttempted) {
-      try { await state.upload.abort(); } catch { /* incomplete parts expire separately */ }
+      try {
+        await state.upload.abort();
+        definitelyAbsent = true;
+      } catch { /* unknown remote part state: retain reservation */ }
     }
-    throw error;
+    throw new MultipartStoreFailure(error,definitelyAbsent);
   } finally {
     try { await reader.cancel(); } catch { /* already finished */ }
     reader.releaseLock();
@@ -315,14 +329,22 @@ export async function handleUploadPut(
   const row = await env.DB.prepare("SELECT * FROM uploads WHERE id = ?").bind(id).first<UploadRow>();
   if (!row || row.status !== "pending" || row.expires_at <= new Date().toISOString() ||
       !safeEqual(await sha256(token),row.token_hash)) return gone();
+  // Pre-write request rejection is definitive: consume the invalid bearer
+  // grant as failed, freeing reserved bytes without granting a second PUT.
+  // The conditional update cannot invalidate another request's active claim.
+  const rejectUnused=async(message:string,status:number):Promise<Response>=>{
+    await env.DB.prepare("UPDATE uploads SET status='failed' WHERE id=? AND status='pending'")
+      .bind(id).run();
+    return json({error:message},status);
+  };
   const lengthHeader = request.headers.get("content-length");
   const length = lengthHeader === null ? null : Number(lengthHeader);
   if ((length === null && !options?.internalUnknownLength) ||
       (length !== null && (!Number.isSafeInteger(length) || length <= 0)))
-    return json({error:"Content-Length is required."},411);
+    return rejectUnused("Content-Length is required.",411);
   if (length !== null && length > row.max_bytes)
-    return json({error:"File exceeds allowed size."},413);
-  if (!request.body) return json({error:"The file is empty."},400);
+    return rejectUnused("File exceeds allowed size.",413);
+  if (!request.body) return rejectUnused("The file is empty.",400);
   const claim = await env.DB.prepare("UPDATE uploads SET status = 'uploading' WHERE id = ? AND status = 'pending' AND expires_at > ?")
     .bind(id,new Date().toISOString()).run();
   if ((claim.meta.changes ?? 0) !== 1) return gone();
@@ -335,8 +357,9 @@ export async function handleUploadPut(
     let size: number;
     let fingerprints: UploadPartDigest[] = [];
     if (row.ext === "mp4") {
-      writeStarted = true;
+      // The multipart helper reports whether failures left an object absent.
       const stored = await storeVideoInParts(env,ref,request.body,row.max_bytes,length);
+      writeStarted = true;
       size = stored.bytes;
       fingerprints = stored.parts;
     } else {
@@ -354,13 +377,27 @@ export async function handleUploadPut(
     if ((mark.meta.changes ?? 0) !== 1) throw new Error("Failed to finalize the upload record.");
     return json({ok:true,reference:formatUploadRef(ref),bytes:size});
   } catch (error) {
-    if (!writeStarted) await env.DB.prepare("UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'uploading'")
-      .bind(id).run();
-    if(writeStarted && !finalizationAttempted && options?.verifyBeforeFinalize && env.UPLOADS){
-      try { await env.UPLOADS.delete(key(ref)); } catch { /* non-ready status wins */ }
+    const cause=error instanceof MultipartStoreFailure ? error.original : error;
+    let definitelyAbsent=!writeStarted &&
+      (!(error instanceof MultipartStoreFailure) || error.definitelyAbsent);
+    if (writeStarted && !finalizationAttempted && options?.verifyBeforeFinalize && env.UPLOADS) {
+      // A verified import whose readback failed is not draft-ready. Only a
+      // CONFIRMED deletion permits the failed terminal state and quota release.
+      try {
+        await env.UPLOADS.delete(key(ref));
+        definitelyAbsent=true;
+      } catch { /* ambiguous object remains reserved and unavailable */ }
     }
-    return error instanceof UploadError
-      ? json({error:error.message},error.status)
+    if (definitelyAbsent) {
+      // Failed is terminal, excluded from the 3 GiB reservation sum. Never
+      // reopen a consumed link, even for definitely pre-write input errors.
+      try {
+        await env.DB.prepare("UPDATE uploads SET status='failed' WHERE id=? AND status='uploading'")
+          .bind(id).run();
+      } catch { /* uncertain database state: fail closed, never retry */ }
+    }
+    return cause instanceof UploadError
+      ? json({error:cause.message},cause.status)
       : json({error:"Upload failed. Contact support if the link has been consumed."},500);
   }
 }
@@ -382,7 +419,7 @@ export async function pendingUploadPageInfo(
 
 /** Only the OAuth/GitHub owner may query whether an upload can be used in a draft. */
 export async function uploadStatusForOwner(db:D1Database,reference:string,login:string):
-  Promise<{reference:string;status:"pending"|"uploading"|"stored"|"expired";bytes:number|null;max_bytes:number}|null> {
+  Promise<{reference:string;status:"pending"|"uploading"|"stored"|"failed"|"expired";bytes:number|null;max_bytes:number}|null> {
   const parsed=parseUploadRef(reference);
   if(!parsed||!login.trim())return null;
   await ensureUploads(db);
