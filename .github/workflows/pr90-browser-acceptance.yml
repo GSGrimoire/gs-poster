@@ -1,0 +1,43 @@
+name: PR 90 real-browser acceptance
+
+# Actual Chromium on the production browser JavaScript bundled into isolated
+# Miniflare. The job never deploys, contacts social providers, or uses secrets.
+# This does NOT replace real Cloudflare isolate acceptance.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr90-browser-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chromium:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 90 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install real Chromium for browser acceptance
+        run: |
+          npm install --no-save --package-lock=false playwright@1.58.2
+          npx playwright install --with-deps chromium
+      - name: Desktop and mobile Chromium acceptance
+        run: node --experimental-strip-types scripts/pr90-browser-acceptance.mjs
+      - name: Upload browser screenshots and structured results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr90-browser-acceptance-${{ github.sha }}
+          path: artifacts/browser-acceptance/
+          if-no-files-found: warn
+          retention-days: 14
