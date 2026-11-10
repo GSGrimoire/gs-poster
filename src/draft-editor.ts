@@ -385,6 +385,7 @@ export function renderDraftEditor(v: EditorView): string {
       <div class="eyebrow">Release</div>
       <h3>${!fbBs && !igOk ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
       ${releaseTargets}
+      ${p.facebook_enabled && p.video ? '<p class="hint">Facebook video limit: 20 MB. Private video uploads allow up to 50 MB for other platforms. A larger video cannot be approved for Facebook until you replace it or deselect Facebook.</p>' : ''}
       ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
       ${v.mediaLooksPending ? `<label><input type="checkbox" name="publish_without_media" value="1"> The name says media is pending, but Facebook has none. Publish without media anyway.</label>` : ""}
@@ -576,7 +577,7 @@ export function renderDraftEditor(v: EditorView): string {
           <label for="ed-message" class="cap-label">Caption</label>
           <textarea id="ed-message" name="message" maxlength="${FB_MAX}" data-max="${FB_MAX}" data-caption="facebook">${esc(p.message)}</textarea>
           <div class="field-meter"></div>
-          <p class="hint">Drag photos to change their order, or use the arrow buttons.</p>
+          <p class="hint">${p.video ? "Facebook video limit: 20 MB, even though private storage and other targets allow up to 50 MB." : "Drag photos to change their order, or use the arrow buttons."}</p>
           <div class="tiles" data-media="facebook" data-order="order_fb">${fbMedia || empty}</div>
           ${!p.video && p.images.length > 1 ? `<input type="hidden" name="order_fb" value="${Array.from({ length: p.images.length }, (_, i) => i).join(",")}">` : ""}
         </article>
