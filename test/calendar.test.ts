@@ -183,15 +183,22 @@ test("month labels and titles remain HTML-escaped",()=>{
 test("monthly calendar query does not discard posts after the weekly 500-item cap",async()=>{
   // A single bulk insertion isolates read behavior from upload and publish paths.
   await db.prepare(`WITH RECURSIVE seq(n) AS
-    (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 510)
+    (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 810)
     INSERT INTO posts (id,created_at,updated_at,status,message,scheduled_at,created_by)
     SELECT 'p_monthbulk_'||n, '2031-04-02T10:00:00.000Z',
       '2031-04-02T10:00:00.000Z','draft','Bulk month post',
       '2031-04-15T12:00:00.000Z','test' FROM seq`).run();
   const range=monthRange("2031-04",zone);
   const limited=await listCalendarPosts(db,range.from,range.to);
-  const complete=await listCalendarPosts(db,range.from,range.to,true);
+  const first=await listCalendarPosts(db,range.from,range.to,true);
+  const next=await listCalendarPosts(db,range.from,range.to,true,750);
   assert.equal(limited.length,500,"existing week remains bounded");
-  assert.equal(complete.length,510,"month includes every post in the range");
-  assert.equal(new Set(complete.map(x=>x.id)).size,510);
+  assert.equal(first.length,751,"first month page includes one overflow sentinel");
+  assert.equal(next.length,60,"remaining posts are reachable without an unbounded query");
+  assert.equal(new Set([...first.slice(0,750),...next].map(x=>x.id)).size,810);
+  const html=renderMonthCalendar({TIMEZONE:zone} as Env,first.slice(0,750),"2031-04",
+    new Date("2031-04-15T12:00:00Z"),{page:1,hasNext:true});
+  assert.match(html,/Month posts page 1/);
+  assert.match(html,/month_page=2/);
+  assert.match(html,/some days may continue on another page/);
 });
