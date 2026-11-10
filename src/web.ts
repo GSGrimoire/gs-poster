@@ -4,7 +4,7 @@
  */
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
-import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
+import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, MONTH_CALENDAR_PAGE_SIZE, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
 import { markTikTokInboxApproved, markTikTokCreatorPublished, reopenTikTokInboxDraft, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, getTikTokHistoryState, type HistoryPost, type Paged, type TikTokHistoryState } from "./history.ts";
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
@@ -398,21 +398,30 @@ function postSection(
 }
 
 async function dashboard(env: Env, session: Session, params: URLSearchParams): Promise<Response> {
-  await refreshScheduled(env).catch(() => undefined);
-  await reconcileOldTikTokInboxDrafts(env.DB);
   const now = new Date();
   const currentDate = toLocalInput(now, env.TIMEZONE).slice(0, 10);
   const view = params.get("view")==="month" ? "month" : "week";
+  // Month is observational: opening it must never reconcile old transfers or
+  // refresh scheduled publishing state. The legacy Week dashboard keeps its
+  // prior behavior until reconciliation is moved to a controlled job.
+  if (view!=="month") {
+    await refreshScheduled(env).catch(() => undefined);
+    await reconcileOldTikTokInboxDrafts(env.DB);
+  }
   let start = weekStart(currentDate);
   let month = currentDate.slice(0,7);
   try { if (params.get("week")) start = weekStart(params.get("week")!); }
   catch { /* invalid week: show the current week */ }
   try { if (params.get("month")) month = monthStart(params.get("month")!).slice(0,7); }
   catch { /* invalid month: show current month */ }
+  const pageRaw=params.get("month_page")||"1";
+  const monthPage=/^[1-9]\\d{0,2}$/.test(pageRaw) ? Number(pageRaw) : 1;
   const range = view==="month" ? monthRange(month,env.TIMEZONE) : weekRange(start,env.TIMEZONE);
-  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to,view==="month");
+  const calendarPosts = await listCalendarPosts(env.DB,range.from,range.to,view==="month",
+    view==="month"?(monthPage-1)*MONTH_CALENDAR_PAGE_SIZE:0);
   const csrf = await csrfToken(env,session);
-  const calendar = view==="month" ? renderMonthCalendar(env,calendarPosts,month,now)
+  const calendar = view==="month" ? renderMonthCalendar(env,calendarPosts.slice(0,MONTH_CALENDAR_PAGE_SIZE),month,now,
+    {page:monthPage,hasNext:calendarPosts.length>MONTH_CALENDAR_PAGE_SIZE})
     : renderCalendar(env,calendarPosts,csrf,start,now);
   const draftSearch = normalizedSearch(params.get("q") ?? "");
   const drafts = await searchPosts(env.DB,"drafts",draftSearch,viewPage(params,"drafts_page"));
