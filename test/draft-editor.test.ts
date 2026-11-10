@@ -393,3 +393,31 @@ test("authenticated planner routes switch between week and month without changin
   assert.equal(saved.status,"draft");
   assert.equal(saved.approved_at,null);
 });
+
+test("Month GET does not reconcile a legacy TikTok inbox transfer or approve its draft",async()=>{
+  const p=await createPost(db,{
+    message:"Legacy TikTok inbox transfer",created_by:"test",images:[],tiktok_images:[],
+    tiktok_enabled:true,facebook_enabled:false,scheduled_at:null,
+  });
+  await db.prepare(`CREATE TABLE IF NOT EXISTS tiktok_inbox_transfers
+    (post_id TEXT PRIMARY KEY,status TEXT NOT NULL,publish_id TEXT,media_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL,updated_at TEXT NOT NULL,sent_by TEXT NOT NULL,error TEXT,remote_status TEXT)`).run();
+  await db.prepare(`INSERT INTO tiktok_inbox_transfers
+    (post_id,status,media_ref,created_at,updated_at,sent_by)
+    VALUES (?,'inbox_ready','upload://legacy.mp4',?,?,?)`)
+    .bind(p.id,p.updated_at,p.updated_at,"test").run();
+  const dateParts=new Intl.DateTimeFormat("en-GB",{
+    timeZone:"Europe/Copenhagen",year:"numeric",month:"2-digit",
+  }).formatToParts(new Date(p.created_at));
+  const month=dateParts.find(x=>x.type==="year")!.value+"-"+dateParts.find(x=>x.type==="month")!.value;
+  const monthPage=await get("/calendar?view=month&month="+month);
+  assert.equal(monthPage.status,200);
+  assert.match(await monthPage.text(),/Legacy TikTok inbox transfer/);
+  const unchanged=(await getPost(db,p.id))!;
+  assert.equal(unchanged.status,"draft");
+  assert.equal(unchanged.approved_at,null,"an observational calendar GET cannot mark an inbox attempt approved");
+  // The old Week dashboard still performs its historical reconciliation.
+  const weekPage=await get("/calendar?view=week&week="+month+"-01");
+  assert.equal(weekPage.status,200);
+  assert.equal((await getPost(db,p.id))!.status,"scheduled");
+});
