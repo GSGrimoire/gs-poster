@@ -347,7 +347,10 @@ const MONTH_STYLE = `
 `;
 
 /** Read-only month overview. The day has no times or publishing controls. */
-export function renderMonthCalendar(env: Env, posts: Post[], month: string, now = new Date()): string {
+export function renderMonthCalendar(
+  env: Env, posts: Post[], month: string, now = new Date(),
+  paging: {page:number;hasNext:boolean} = {page:1,hasNext:false},
+): string {
   const first = monthStart(month);
   const {startDay,endDay} = monthRange(month,env.TIMEZONE);
   const today = toLocalInput(now,env.TIMEZONE).slice(0,10);
@@ -410,7 +413,13 @@ export function renderMonthCalendar(env: Env, posts: Post[], month: string, now 
     '<span><i class="calendar-swatch" style="background:#6099df"></i>Scheduled</span>'+
     '<span><i class="calendar-swatch" style="background:var(--ok)"></i>Published</span></div>'+
     '<div class="calendar-month-wrap"><div class="calendar-month-grid">'+weekdays+cells.join("")+'</div></div>'+
-    '<p class="calendar-month-info">Dates use '+esc(env.TIMEZONE)+'. All posts for each displayed day are listed without hours. '+
+    (paging.page > 1 || paging.hasNext
+      ? '<nav class="calendar-nav" aria-label="Month post pages" style="margin-top:12px">'+
+        (paging.page>1?'<a href="/calendar?view=month&amp;month='+month+'&amp;month_page='+(paging.page-1)+'">Previous posts</a>':'')+
+        '<strong>Month posts page '+paging.page+'</strong>'+
+        (paging.hasNext?'<a href="/calendar?view=month&amp;month='+month+'&amp;month_page='+(paging.page+1)+'">Next posts</a>':'')+
+        '</nav><p class="calendar-month-info">High-volume month: some days may continue on another page. No posts are silently omitted.</p>':'')+
+    '<p class="calendar-month-info">Dates use '+esc(env.TIMEZONE)+'. Posts for each displayed day are listed without hours. '+
     'Unscheduled drafts are shown on their creation date and clearly marked. Select a post to edit or review it; '+
     'select a day number to see its week and the time-based scheduling tools.</p>';
 }
