@@ -22,7 +22,9 @@ if(!dbUuid.test(db) || !/^[a-f0-9]{32}$/i.test(kv) || db.replaceAll("-","").toLo
   throw Error("Use distinct real D1 and OAuth KV identifiers for staging.");
 if(!/^[a-zA-Z0-9-]{1,39}$/.test(login))
   throw Error("Invalid staging GitHub sign-in account.");
-if(process.env.GITHUB_ACTIONS==="true" && process.env.GITHUB_REF!=="refs/heads/feature/bluesky-gallery-redraft-video50-20261109")
+const checkoutBranch=process.env.GITHUB_HEAD_REF
+  ? "refs/heads/"+process.env.GITHUB_HEAD_REF : process.env.GITHUB_REF;
+if(process.env.GITHUB_ACTIONS==="true" && checkoutBranch!=="refs/heads/feature/bluesky-gallery-redraft-video50-20261109")
   throw Error("Staging deployment must run from PR90's review branch, never main.");
 if((process.env.PR90_STAGING_CONFIRM||"")!=="ISOLATED_STAGING_NO_PUBLISH")
   throw Error("Explicit staging-only confirmation is required.");
