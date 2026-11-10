@@ -30,6 +30,7 @@ import { importTikTokLinkedImage, TikTokImportError } from "./tiktok-import.ts";
 import { prepareLinkedVideo, VideoPrepareError, type VideoPrepareTarget } from "./video-import.ts";
 import { fetchImage } from "./media.ts";
 import { fetchVideo } from "./video.ts";
+import { assertFacebookVideoSize } from "./facebook.ts";
 import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
   markFacebookUploadPosted, BULK_FACEBOOK_THRESHOLD, BULK_SCHEDULE_MIN_LEAD_MS,
@@ -663,7 +664,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <label><input type="checkbox" name="target_facebook" value="1" checked> Publish to Facebook</label>
         <label for="message">Facebook caption</label>
         <textarea id="message" name="message">${esc(message)}</textarea>
-        <p class="hint">${p.video?"Video":p.images.length+" images"}</p></section>`:
+        <p class="hint">${p.video?"Video (Facebook limit: 20 MB; private storage and other targets: up to 50 MB)":p.images.length+" images"}</p></section>`:
         `<input type="hidden" name="message" value="${esc(message)}">`}
         ${bs?`<section class="platform-preview"><h3>Bluesky approval</h3>
         <label><input type="checkbox" name="target_bluesky" value="1" checked> Publish to Bluesky</label>
@@ -1298,8 +1299,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     if (facebook && current.video) {
       if (current.images.length) return postPage(env,session,id,
         {error:"Facebook video cannot be combined with image gallery."},400);
-      try { await fetchVideo(env,current.video); }
-      catch(error) { return postPage(env,session,id,{error:"Facebook video unavailable: "+
+      try {
+        const bytes=await fetchVideo(env,current.video);
+        assertFacebookVideoSize(bytes.byteLength);
+      } catch(error) { return postPage(env,session,id,{error:"Facebook video cannot be approved: "+
         (error instanceof Error ? error.message : String(error))},400); }
     }
     // Human review only authorizes media that is actually readable now.
