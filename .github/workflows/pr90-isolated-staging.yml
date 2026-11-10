@@ -3,6 +3,10 @@ name: PR 90 isolated Cloudflare staging (manual only)
 # This workflow can ONLY deploy a separately provisioned, publication-disabled
 # Worker. It does not reference production Cloudflare or OAuth secrets.
 on:
+  # Workflow_dispatch workflows need to exist on main. This explicit label
+  # trigger makes isolated staging possible BEFORE production merge.
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       confirmation:
@@ -15,12 +19,21 @@ permissions:
 
 jobs:
   stage:
-    if: ${{ github.ref == 'refs/heads/feature/bluesky-gallery-redraft-video50-20261109' && inputs.confirmation == 'ISOLATED_STAGING_NO_PUBLISH' }}
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/feature/bluesky-gallery-redraft-video50-20261109' &&
+       inputs.confirmation == 'ISOLATED_STAGING_NO_PUBLISH') ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'pr90-staging-acceptance' &&
+       github.event.pull_request.number == 90 &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.head_ref == 'feature/bluesky-gallery-redraft-video50-20261109')
     runs-on: ubuntu-latest
     timeout-minutes: 18
     environment: pr90-isolated-staging
     env:
-      PR90_STAGING_CONFIRM: ${{ inputs.confirmation }}
+      PR90_STAGING_CONFIRM: ${{ github.event_name == 'pull_request' && 'ISOLATED_STAGING_NO_PUBLISH' || inputs.confirmation }}
       PR90_WORKER_NAME: ${{ vars.PR90_WORKER_NAME }}
       PR90_D1_DATABASE_ID: ${{ secrets.PR90_D1_DATABASE_ID }}
       PR90_KV_NAMESPACE_ID: ${{ secrets.PR90_KV_NAMESPACE_ID }}
@@ -30,6 +43,9 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.PR90_CLOUDFLARE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Validate the exact source commit, not GitHub's synthetic merge SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v5
         with:
           node-version: 22
