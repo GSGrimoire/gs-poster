@@ -35,7 +35,7 @@ const config={
   workers_dev:true,
   observability:{enabled:true},
   triggers:{crons:[]},
-  images:{binding:"IMAGES"},
+  // Intentionally omit account-level Cloudflare Images: no shared production media service.
   kv_namespaces:[{binding:"OAUTH_KV",id:kv}],
   d1_databases:[{binding:"DB",database_name:worker+"-db",database_id:db}],
   r2_buckets:[{binding:"UPLOADS",bucket_name:bucket}],
