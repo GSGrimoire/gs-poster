@@ -158,7 +158,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <div id="new-images-preview" aria-live="polite"></div>
         </section>
         <section id="new-video-panel" ${kind!=="video"?"hidden":""}>
-          <p class="form-info">One MP4 video, up to 50 MB. Original video uploads remain private until you explicitly approve a transfer.</p>
+          <p class="form-info">One private MP4 video, up to 50 MB. Facebook publishing accepts up to 20 MB. For a larger video, choose another platform or replace it before Facebook approval. Video uploads remain private until you approve a transfer.</p>
           <div id="new-video-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop MP4 video">
             <strong>Drop your video here</strong>
             <span>Or select an MP4 file to preview, up to 50 MB</span>
