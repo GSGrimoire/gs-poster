@@ -104,18 +104,29 @@ try {
   const desktop=await pageFor(false);
   const mobile=await pageFor(true);
   async function drag(page,source,target,label){
+    await source.scrollIntoViewIfNeeded();
+    await target.scrollIntoViewIfNeeded();
+    const a=await source.boundingBox(),b=await target.boundingBox();
+    assert.ok(a&&b,"missing on-screen drag boxes: "+label);
+    // A real Chromium mouse gesture. Locator.dragTo() proved unreliable with
+    // nested image/button drag sources in the initial acceptance run.
+    const startX=a.x+Math.min(15,a.width/4),startY=a.y+Math.min(15,a.height/4);
+    const endX=b.x+Math.min(18,b.width/3),endY=b.y+Math.min(18,b.height/3);
     await page.evaluate(()=>{
       window.__acceptDragEvents=[];
       for(const type of ["dragstart","dragover","drop","dragend"]){
         document.addEventListener(type,e=>window.__acceptDragEvents.push(type+":"+e.target.tagName),true);
       }
     });
-    await source.dragTo(target,{sourcePosition:{x:12,y:12},targetPosition:{x:12,y:12},
-      force:true,timeout:6000});
+    await page.mouse.move(startX,startY);
+    await page.mouse.down();
+    await page.mouse.move(startX+9,startY+9,{steps:4});
+    await page.mouse.move(endX,endY,{steps:18});
+    await page.mouse.up();
     const events=await page.evaluate(()=>window.__acceptDragEvents||[]);
     console.log("DRAG",label,events.filter(x=>!x.startsWith("dragover")).join(","));
-    assert.ok(events.some(x=>x.startsWith("dragstart")),"missing actual dragstart: "+label);
-    assert.ok(events.some(x=>x.startsWith("drop")),"missing actual drop: "+label);
+    assert.ok(events.some(x=>x.startsWith("dragstart")),"missing real dragstart: "+label);
+    assert.ok(events.some(x=>x.startsWith("drop")),"missing real drop: "+label);
   }
   async function scenario(name,page,fn){
     console.log("START",name);
