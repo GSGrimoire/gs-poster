@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createPageVideo, getPageVideoInfo, rescheduleFbPost, editFbCaption } from "../src/facebook.ts";
+import { createPageVideo, assertFacebookVideoSize, FACEBOOK_VIDEO_MAX_BYTES, getPageVideoInfo, rescheduleFbPost, editFbCaption } from "../src/facebook.ts";
 import type { Env } from "../src/env.ts";
 
 const env={FB_PAGE_ID:"page",FB_PAGE_TOKEN:"test-token",GRAPH_BASE_URL:"http://127.0.0.1:8999"} as Env;
@@ -60,4 +60,12 @@ test("scheduled video changes use description and video fields, never feed-post 
     assert.equal(time,1980003600);
     assert.equal(description,"Updated");
   }finally{globalThis.fetch=old;}
+});
+
+test("Facebook direct upload and release preflight share a precise 20 MB cap",()=>{
+  assert.equal(FACEBOOK_VIDEO_MAX_BYTES,20_000_000);
+  assert.doesNotThrow(()=>assertFacebookVideoSize(20_000_000));
+  assert.throws(()=>assertFacebookVideoSize(20_000_001),/Facebook video.*20 MB/);
+  assert.throws(()=>assertFacebookVideoSize(0),/Facebook video.*20 MB/);
+  assert.throws(()=>assertFacebookVideoSize(NaN),/Facebook video.*20 MB/);
 });
