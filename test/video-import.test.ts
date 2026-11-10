@@ -22,7 +22,7 @@ const MP4=Uint8Array.from([0,0,0,20,102,116,121,112,105,115,111,109,0,0,0,0,0,0,
 const BODY=Uint8Array.from(MP4);
 let mf:Miniflare, db:D1Database, bucket:R2Bucket;
 let requests:string[]=[];
-let malicious=false,oversize=false,redirectVideo=false;
+let malicious=false,oversize=false,redirectVideo=false,largeVideo=false;
 before(async()=>{
   const output=await build({entryPoints:["test/fixtures/web-entry.ts"],bundle:true,format:"esm",
     platform:"neutral",target:"es2022",write:false,external:["cloudflare:*","node:*"],
@@ -34,7 +34,21 @@ before(async()=>{
       if(![FB,TT,BS,IG].includes(req.url))return new Response("Blocked",{status:599});
       if(redirectVideo && req.url===TT)
         return new Response(null,{status:302,headers:{Location:"https://evil.example/redirect.mp4"}});
-      if(oversize)return new Response(MP4,{status:200,headers:{"Content-Length":String(20_000_001)}});
+      if(largeVideo && req.url===TT) {
+        const total=40_000_000;
+        let sent=0;
+        return new Response(new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if(sent>=total) { controller.close(); return; }
+            const size=Math.min(256*1024,total-sent);
+            const part=new Uint8Array(size);
+            if(sent===0)part.set(MP4);
+            sent+=size;
+            controller.enqueue(part);
+          },
+        }),{status:200,headers:{"Content-Length":String(total)}});
+      }
+      if(oversize)return new Response(MP4,{status:200,headers:{"Content-Length":String(50_000_001)}});
       return new Response(malicious?new Uint8Array([1,2,3,4]):MP4,{status:200});
     },bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",TIMEZONE:"Europe/Copenhagen"}}));
   db=await mf.getD1Database("DB") as unknown as D1Database;
@@ -42,7 +56,7 @@ before(async()=>{
   await ensureSchema(db);
 });
 after(async()=>{await mf?.dispose();});
-function clear(){requests=[];malicious=false;oversize=false;redirectVideo=false;}
+function clear(){requests=[];malicious=false;oversize=false;redirectVideo=false;largeVideo=false;}
 async function auth(){
   const raw=await makeSession(signer,"GSGrimoire");
   const csrf=await csrfToken(signer,{login:"GSGrimoire",raw} as Session);
@@ -286,4 +300,24 @@ test("Instagram-only attachment survives an activity log failure with a visible 
     assert.equal(saved.instagram?.video,grant.reference);
     assert.equal(saved.approved_at,null);
   }finally{await db.prepare("DROP TRIGGER IF EXISTS block_video_attach_audit").run();}
+});
+
+test("streaming 40 MB GitHub MP4 preparation completes in the local Worker without full-file readback",async()=>{
+  clear();largeVideo=true;
+  const p=await makeDraft();
+  try{
+    const response=await request(p.id,"import-video",{
+      target:"tiktok",expected_updated_at:p.updated_at,
+    });
+    assert.equal(response.status,200,await response.clone().text());
+    const data=await response.json() as {reference:string;updated_at:string};
+    const saved=(await getPost(db,p.id))!;
+    assert.equal(saved.tiktok_video,data.reference);
+    assert.equal(saved.status,"draft");
+    assert.equal(saved.approved_at,null);
+    assert.equal((await uploadStatusForOwner(db,data.reference,"GSGrimoire"))?.bytes,40_000_000);
+    const object=await bucket.head("uploads/"+parseUploadRef(data.reference)!.id+".mp4");
+    assert.equal(object?.size,40_000_000);
+    assert.deepEqual(requests,[TT]);
+  } finally {clear();}
 });
