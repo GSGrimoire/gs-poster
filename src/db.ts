@@ -303,15 +303,20 @@ export async function listPosts(db: D1Database, opts: { status?: PostStatus; lim
   return results.map(fromRow);
 }
 
-/** Load the requested local calendar interval, independent of the newest-post listing.
- * Month view needs the full set, not a silent 500-item truncation. */
-export async function listCalendarPosts(db: D1Database, from: string, to: string, all = false): Promise<Post[]> {
+/** Month pages cap response size without silently discarding high-volume days.
+ * One extra row detects whether another page is available. */
+export const MONTH_CALENDAR_PAGE_SIZE = 750;
+export async function listCalendarPosts(
+  db: D1Database, from: string, to: string, all = false, offset = 0,
+): Promise<Post[]> {
   await ensureSchema(db);
   const sql = POST_SELECT + " WHERE COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) >= ?"
     + " AND COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) < ?"
     + " ORDER BY COALESCE(p.scheduled_at, p.approved_at, p.created_at), p.id"
-    + (all ? "" : " LIMIT 500");
-  const { results } = await db.prepare(sql).bind(from, to).all<Row>();
+    + " LIMIT ? OFFSET ?";
+  const limit = all ? MONTH_CALENDAR_PAGE_SIZE + 1 : 500;
+  const pageOffset = all && Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+  const { results } = await db.prepare(sql).bind(from,to,limit,pageOffset).all<Row>();
   return results.map(fromRow);
 }
 
