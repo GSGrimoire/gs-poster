@@ -246,7 +246,7 @@ test("private video readback corruption blocks readiness and never changes galle
     assert.equal((await getPost(db,p.id))!.approved_at,null);
     const latest=await db.prepare("SELECT status FROM uploads WHERE created_by='GSGrimoire' ORDER BY created_at DESC LIMIT 1")
       .first<{status:string}>();
-    assert.equal(latest?.status,"uploading");
+    assert.equal(latest?.status,"failed","confirmed removal after corrupt readback frees quota without reopening the token");
   }finally{globalThis.fetch=origFetch;}
 });
 
