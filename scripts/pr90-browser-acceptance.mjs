@@ -271,7 +271,9 @@ try {
     await mobile.goto(ORIGIN+"/post/"+owned.id);
     const box=mobile.locator('.tiles[data-media="facebook"]');
     const before=await box.locator(":scope > [data-index]").evaluateAll(ns=>ns.map(n=>n.querySelector("img")?.src));
-    await box.locator('[data-move="1"]:not([disabled])').first().click();
+    const move=box.locator('[data-move="1"]:not([disabled])').first();
+    await move.focus();
+    await mobile.keyboard.press("Enter");
     const after=await box.locator(":scope > [data-index]").evaluateAll(ns=>ns.map(n=>n.querySelector("img")?.src));
     assert.notDeepEqual(before,after);
     await assertUnapproved(db,owned.id);
