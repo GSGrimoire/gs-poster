@@ -29,6 +29,11 @@ const waitFor=async(fn,reason,ms=10000)=>{
   throw Error("Timed out: "+reason);
 };
 await mkdir(OUT,{recursive:true});
+const watchdog=setTimeout(()=>{
+  console.error("BROWSER_ACCEPTANCE_WATCHDOG: a Chromium action stalled; inspect the last START marker.");
+  process.exit(2);
+},180000);
+watchdog.unref();
 const report={commit:process.env.PR90_HEAD_SHA||process.env.GITHUB_SHA||"local",environment:"isolated Miniflare + Chromium (not Cloudflare staging)",scenarios:[]};
 const bundle=await build({entryPoints:["test/fixtures/web-entry.ts"],bundle:true,format:"esm",platform:"neutral",
   target:"es2022",write:false,external:["cloudflare:*","node:*"],
@@ -91,6 +96,8 @@ try {
       }
     });
     const page=await context.newPage();
+    page.setDefaultTimeout(6000);
+    page.setDefaultNavigationTimeout(8000);
     page.on("pageerror",e=>errors.push("Browser script: "+e.message));
     return page;
   }
@@ -104,13 +111,14 @@ try {
       }
     });
     await source.dragTo(target,{sourcePosition:{x:12,y:12},targetPosition:{x:12,y:12},
-      force:true,timeout:10000});
+      force:true,timeout:6000});
     const events=await page.evaluate(()=>window.__acceptDragEvents||[]);
     console.log("DRAG",label,events.filter(x=>!x.startsWith("dragover")).join(","));
     assert.ok(events.some(x=>x.startsWith("dragstart")),"missing actual dragstart: "+label);
     assert.ok(events.some(x=>x.startsWith("drop")),"missing actual drop: "+label);
   }
   async function scenario(name,page,fn){
+    console.log("START",name);
     const clean=name.replace(/[^a-z0-9-]+/gi,"-").toLowerCase();
     const item={name,status:"pass"};
     try {await fn();}catch(e){item.status="fail";item.error=String(e.stack||e);console.error("FAIL",name,item.error);}
@@ -266,6 +274,7 @@ try {
   await writeFile(OUT+"/results.json",JSON.stringify(report,null,2)+"\n");
   console.log("BROWSER_ACCEPTANCE_RESULTS",JSON.stringify({passed:report.total-report.scenarios.filter(x=>x.status==="fail").length,failed:report.failed,errors:errors.length}));
   if(report.failed)process.exitCode=1;
+  clearTimeout(watchdog);
 } finally {
   if(browser)await browser.close();
   await mf.dispose();
