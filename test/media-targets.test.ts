@@ -33,7 +33,7 @@ test("Bluesky videos require a safe MP4 source and descriptive alt", () => {
     .some((x) => x.includes("both gallery images and a video")));
   assert.ok(checkBluesky({ caption: "New trailer", images: [], video: { url: videoUrl, alt: "" }, patreon: null })
     .some((x) => x.includes("accessibility")));
-  assert.equal(INITIAL_VIDEO_MAX_BYTES, 20_000_000);
+  assert.equal(INITIAL_VIDEO_MAX_BYTES, 50_000_000);
 });
 
 test("Bluesky video creates a video post and separate linked Patreon card", async () => {
