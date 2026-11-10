@@ -44,6 +44,16 @@ test("isolated staging config never contains production bindings or publishing t
   }finally{rmSync(cwd,{recursive:true,force:true});}
 });
 
+test("a premerge labelled pull request uses the reviewed head branch, not the synthetic merge ref",()=>{
+  const allowed=run({GITHUB_REF:"refs/pull/90/merge",
+    GITHUB_HEAD_REF:"feature/bluesky-gallery-redraft-video50-20261109"});
+  try{assert.equal(allowed.result.status,0,allowed.result.stderr);}
+  finally{rmSync(allowed.cwd,{recursive:true,force:true});}
+  const wrong=run({GITHUB_REF:"refs/pull/90/merge",GITHUB_HEAD_REF:"main"});
+  try{assert.notEqual(wrong.result.status,0);}
+  finally{rmSync(wrong.cwd,{recursive:true,force:true});}
+});
+
 test("staging generation refuses production names, missing confirmation, wrong branch and invalid identifiers",()=>{
   const cases=[
     {PR90_WORKER_NAME:"gs-poster"},
