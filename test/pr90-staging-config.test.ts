@@ -16,6 +16,7 @@ const baseEnv={
   PR90_LOGIN:"TestAccount",
   PR90_STAGING_CONFIRM:"ISOLATED_STAGING_NO_PUBLISH",
   GITHUB_ACTIONS:"true",
+  GITHUB_HEAD_REF:"", // Do not inherit GitHub's PR env into branch-negative cases.
   GITHUB_REF:"refs/heads/feature/bluesky-gallery-redraft-video50-20261109",
 };
 function run(overrides:Record<string,string>={}){
