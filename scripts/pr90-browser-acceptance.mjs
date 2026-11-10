@@ -29,7 +29,7 @@ const waitFor=async(fn,reason,ms=10000)=>{
   throw Error("Timed out: "+reason);
 };
 await mkdir(OUT,{recursive:true});
-const report={commit:process.env.GITHUB_SHA||"local",environment:"isolated Miniflare + Chromium (not Cloudflare staging)",scenarios:[]};
+const report={commit:process.env.PR90_HEAD_SHA||process.env.GITHUB_SHA||"local",environment:"isolated Miniflare + Chromium (not Cloudflare staging)",scenarios:[]};
 const bundle=await build({entryPoints:["test/fixtures/web-entry.ts"],bundle:true,format:"esm",platform:"neutral",
   target:"es2022",write:false,external:["cloudflare:*","node:*"],
   conditions:["workerd","worker","browser"],mainFields:["module","main"],logLevel:"silent"});
@@ -96,6 +96,20 @@ try {
   }
   const desktop=await pageFor(false);
   const mobile=await pageFor(true);
+  async function drag(page,source,target,label){
+    await page.evaluate(()=>{
+      window.__acceptDragEvents=[];
+      for(const type of ["dragstart","dragover","drop","dragend"]){
+        document.addEventListener(type,e=>window.__acceptDragEvents.push(type+":"+e.target.tagName),true);
+      }
+    });
+    await source.dragTo(target,{sourcePosition:{x:12,y:12},targetPosition:{x:12,y:12},
+      force:true,timeout:10000});
+    const events=await page.evaluate(()=>window.__acceptDragEvents||[]);
+    console.log("DRAG",label,events.filter(x=>!x.startsWith("dragover")).join(","));
+    assert.ok(events.some(x=>x.startsWith("dragstart")),"missing actual dragstart: "+label);
+    assert.ok(events.some(x=>x.startsWith("drop")),"missing actual drop: "+label);
+  }
   async function scenario(name,page,fn){
     const clean=name.replace(/[^a-z0-9-]+/gi,"-").toLowerCase();
     const item={name,status:"pass"};
@@ -126,7 +140,7 @@ try {
     await desktop.goto(ORIGIN+"/post/"+owned.id);
     const picker=desktop.locator(".bs-copy-picker");
     if(!(await picker.evaluate(e=>e.open)))await picker.locator("summary").click();
-    await desktop.locator('.bs-source-item[data-pool-index="1"]').dragTo(desktop.locator("#bs-copy-drop"));
+    await drag(desktop,desktop.locator('.bs-source-item[data-pool-index="1"]'),desktop.locator("#bs-copy-drop"),"Bluesky source copy");
     assert.equal(await desktop.locator('[name="bs_add_alt_1"]').count(),1);
     await desktop.locator('[name="bs_add_alt_1"]').fill("Second browser image");
     await desktop.locator("#bs-copy-save").click();
@@ -155,7 +169,7 @@ try {
     await desktop.goto(ORIGIN+"/post/"+owned.id);
     const tiles=desktop.locator('.tiles[data-media="facebook"] > [data-index]');
     const before=await tiles.evaluateAll(ns=>ns.map(n=>n.querySelector("img")?.src));
-    await tiles.first().dragTo(tiles.last());
+    await drag(desktop,tiles.first(),tiles.last(),"Facebook card reorder");
     const after=await tiles.evaluateAll(ns=>ns.map(n=>n.querySelector("img")?.src));
     assert.notDeepEqual(after,before,"drag must visibly change DOM order");
     await assertUnapproved(db,owned.id);
@@ -175,8 +189,12 @@ try {
     await desktop.goto(ORIGIN+"/calendar?view=week&week="+localDay(future));
     const card=desktop.locator('.calendar-post[draggable="true"][data-id="'+timed.id+'"]');
     assert.equal(await card.count(),1,"future draft must be draggable");
-    const slot=desktop.locator(".calendar-slot:not(.disabled)").last();
-    await card.dragTo(slot);
+    const pos=await card.evaluate(e=>({day:e.closest(".calendar-day").dataset.day,
+      halfHour:Math.floor(parseFloat(e.style.top)/30)}));
+    const slot=desktop.locator('.calendar-day[data-day="'+pos.day+'"] .calendar-slot')
+      .nth(pos.halfHour<47?pos.halfHour+1:pos.halfHour-1);
+    assert.equal(await slot.getAttribute("aria-disabled"),null);
+    await drag(desktop,card,slot,"Week future draft reschedule");
     assert.equal(await desktop.locator("#cal-dialog[open]").count(),1,"drag must show a review dialog, not publish");
     await assertUnapproved(db,timed.id);
   });
@@ -209,7 +227,7 @@ try {
     assert.equal(await tiles.count(),3);
     await tiles.nth(0).locator('input[placeholder="Describe what is visible"]').fill("Alt for first");
     await tiles.nth(0).getByRole("checkbox",{name:"TikTok for one.png"}).uncheck();
-    await tiles.nth(0).dragTo(tiles.nth(2));
+    await drag(desktop,tiles.nth(0),tiles.nth(2),"New draft image reorder");
     const first=desktop.locator('#new-images-preview .new-file').filter({hasText:"one.png"});
     assert.equal(await first.locator('input[placeholder="Describe what is visible"]').inputValue(),"Alt for first");
     assert.equal(await first.getByRole("checkbox",{name:"TikTok for one.png"}).isChecked(),false);
