@@ -232,14 +232,14 @@ async function storeVideoInParts(
   let piece = new Uint8Array(VIDEO_PART_BYTES);
   let filled = 0, total = 0, headerFilled = 0;
   const header = new Uint8Array(12);
-  let upload: R2MultipartUpload | null = null;
+  const state: {upload:R2MultipartUpload|null} = {upload:null};
   let commitAttempted = false;
   const savePart = async (data: Uint8Array) => {
-    if (!upload) upload = await env.UPLOADS!.createMultipartUpload(key(ref), {
+    if (!state.upload) state.upload = await env.UPLOADS!.createMultipartUpload(key(ref), {
       httpMetadata:{contentType:"video/mp4"},
     });
     const hash = await digestPart(data);
-    const part = await upload.uploadPart(completedParts.length + 1,data);
+    const part = await state.upload.uploadPart(completedParts.length + 1,data);
     completedParts.push(part);
     fingerprints.push({bytes:data.byteLength,sha256:hash});
   };
@@ -276,14 +276,14 @@ async function storeVideoInParts(
     if (declared !== null && declared !== total)
       throw new UploadError("Content size is invalid.",413);
     if (filled) await savePart(piece.subarray(0,filled));
-    if (!upload || !completedParts.length) throw new Error("No video parts were stored.");
+    if (!state.upload || !completedParts.length) throw new Error("No video parts were stored.");
     // Never retry or abort after an ambiguous multipart commit attempt.
     commitAttempted = true;
-    await upload.complete(completedParts);
+    await state.upload.complete(completedParts);
     return {bytes:total,parts:fingerprints};
   } catch (error) {
-    if (upload && !commitAttempted) {
-      try { await upload.abort(); } catch { /* incomplete parts expire separately */ }
+    if (state.upload && !commitAttempted) {
+      try { await state.upload.abort(); } catch { /* incomplete parts expire separately */ }
     }
     throw error;
   } finally {
