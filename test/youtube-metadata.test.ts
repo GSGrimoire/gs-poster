@@ -78,3 +78,8 @@ test("studio URL only accepts a canonical video identifier", () => {
   assert.equal(youtubeStudioVideoUrl("AbC_123-yZ9"), "https://studio.youtube.com/video/AbC_123-yZ9/edit");
   assert.throws(() => youtubeStudioVideoUrl("AbC_123-yZ9/../../x"), /Invalid/);
 });
+
+test("existing GS Grimoire house rules apply to YouTube copy", () => {
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "A Song — A Release" }).errors.join(" "), /em dash/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, description: good.description + "\nMade with Suno" }).errors.join(" "), /generative tool/);
+});
