@@ -27,6 +27,10 @@ Cloudflare Workers are well suited to coordination, approval, private storage an
 
 The official YouTube Data API Required Minimum Functionality document states that an upload client must allow the user to choose **public, private or unlisted** visibility, in addition to setting title and description. The first coding slice here deliberately exposes no uploader or user interface, and its metadata helper produces *private-only* payloads. **Do not launch the uploader until the review interface and approved lifecycle satisfy that visibility-choice rule without bypassing the owner's explicit approval and scheduling policy.** A private-first staging step followed by explicit visibility choice may be a viable design, but must be verified during review.
 
+**API audit lock.** The `videos.insert` reference states that videos uploaded from unverified API projects created after 28 July 2020 are restricted to private viewing until the project passes a YouTube API compliance audit. Plan the audit (or accept that every upload stays private until it passes) before relying on any visibility choice in the GS Poster interface.
+
+**Validator scope.** `validFreePatreonPostUrl` checks only that the link is a canonical HTTPS Patreon `/posts/` URL. It cannot tell whether the post is free or public; the owner confirms that at review.
+
 Official documentation:
 - https://developers.google.com/youtube/terms/required-minimum-functionality
 - https://developers.google.com/youtube/data/reference/rest/v3/videos/insert

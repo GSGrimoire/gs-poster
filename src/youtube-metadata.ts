@@ -54,15 +54,38 @@ const encoder = new TextEncoder();
 const videoIdPattern = /^[a-zA-Z0-9_-]{11}$/;
 const forbiddenYouTubeText = /[<>]/;
 const unsafeControl = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-const firstLinkPattern = /https?:\/\/[^\s<>]+/i;
+/** Bidirectional overrides/isolates can make a displayed link differ from the real one. */
+const bidiControl = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+/** Unpaired UTF-16 surrogates are not valid Unicode text. */
+const loneSurrogate = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+/** Invisible characters are allowed but worth a human look. */
+const invisible = /[\u00ad\u200b-\u200d\u2060\ufeff]/;
+const linkPattern = /https?:\/\/[^\s<>]+/gi;
+/** Sentence punctuation that commonly follows a link and is not part of it. */
+const trailingPunctuation = /[.,;:!?)\]}'"]+$/;
+
+function unsupportedText(value: string): boolean {
+  return forbiddenYouTubeText.test(value) || unsafeControl.test(value) ||
+    bidiControl.test(value) || loneSurrogate.test(value);
+}
+
+/** Every http(s) link in the text, with trailing sentence punctuation removed. */
+function descriptionLinks(text: string): string[] {
+  return Array.from(text.matchAll(linkPattern), (m) => m[0].replace(trailingPunctuation, ""));
+}
 
 /** Only an HTTPS link to a Patreon post can satisfy the product call to action. */
 export function validFreePatreonPostUrl(value: string): boolean {
   try {
+    if (typeof value !== "string") return false;
     const url = new URL(value);
-    return url.protocol === "https:" &&
+    // Require the canonical serialized form, so whitespace, tabs, newlines,
+    // case variants or default ports that the URL parser silently drops
+    // cannot make the reviewed string differ from the parsed destination.
+    return url.href === value &&
+      url.protocol === "https:" &&
       (url.hostname === "patreon.com" || url.hostname === "www.patreon.com") &&
-      !url.username && !url.password &&
+      !url.username && !url.password && !url.port && !url.search && !url.hash &&
       /^\/posts\/[^/]+(?:\/)?$/.test(url.pathname);
   } catch { return false; }
 }
@@ -77,27 +100,44 @@ export function youtubeTagCharacters(tags: readonly string[]): number {
 export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): YouTubeMetadataCheck {
   const errors: string[] = [];
   const warnings: string[] = [];
+  // Drafts will arrive as JSON from the editor or connector, so check the
+  // runtime shape instead of trusting the TypeScript interface.
+  const shapeErrors: string[] = [];
+  if (typeof draft?.title !== "string") shapeErrors.push("YouTube title must be text.");
+  if (typeof draft?.description !== "string") shapeErrors.push("YouTube description must be text.");
+  if (typeof draft?.patreonPostUrl !== "string") shapeErrors.push("Patreon post URL must be text.");
+  if (draft?.tags != null && (!Array.isArray(draft.tags) || draft.tags.some((tag) => typeof tag !== "string")))
+    shapeErrors.push("YouTube tags must be a list of text values.");
+  if (draft?.playlistId != null && typeof draft.playlistId !== "string")
+    shapeErrors.push("YouTube playlist identifier must be text.");
+  if (shapeErrors.length) return { errors: shapeErrors, warnings };
+
   const title = draft.title.trim();
   const description = draft.description.trim();
 
   if (!title) errors.push("YouTube title is required.");
   if (Array.from(title).length > YOUTUBE_TITLE_MAX_CHARACTERS)
     errors.push(`YouTube title exceeds ${YOUTUBE_TITLE_MAX_CHARACTERS} characters.`);
-  if (/\r|\n/.test(title) || forbiddenYouTubeText.test(title) || unsafeControl.test(title))
+  if (/[\t\r\n]/.test(title) || unsupportedText(title))
     errors.push("YouTube title contains unsupported characters.");
 
   if (!description) errors.push("YouTube description is required.");
   if (encoder.encode(description).byteLength > YOUTUBE_DESCRIPTION_MAX_BYTES)
     errors.push(`YouTube description exceeds ${YOUTUBE_DESCRIPTION_MAX_BYTES} UTF-8 bytes.`);
-  if (forbiddenYouTubeText.test(description) || unsafeControl.test(description))
+  if (unsupportedText(description))
     errors.push("YouTube description contains unsupported characters.");
+  if (invisible.test(title) || invisible.test(description))
+    warnings.push("Title or description contains invisible characters (zero-width or soft hyphen).");
 
   if (!validFreePatreonPostUrl(draft.patreonPostUrl)) {
     errors.push("Free Song Sunday needs a valid HTTPS Patreon /posts/ link.");
   } else {
-    if (!description.includes(draft.patreonPostUrl))
+    // Compare whole links, not substrings: ".../posts/x" must not be
+    // satisfied by a different post such as ".../posts/xyz".
+    const links = descriptionLinks(description);
+    if (!links.includes(draft.patreonPostUrl))
       errors.push("YouTube description must include the reviewed Patreon post URL.");
-    const firstLink = description.match(firstLinkPattern)?.[0];
+    const firstLink = links[0];
     if (firstLink && firstLink !== draft.patreonPostUrl)
       warnings.push("The first description link is not the reviewed Patreon post.");
   }
@@ -116,8 +156,14 @@ export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): Y
   warnings.push(...houseRules.warnings);
 
   const tags = draft.tags ?? [];
-  if (tags.some((tag) => !tag.trim() || tag !== tag.trim() || forbiddenYouTubeText.test(tag) || unsafeControl.test(tag)))
-    errors.push("YouTube tags must be nonempty, trimmed, and contain supported characters.");
+  if (tags.some((tag) => !tag.trim() || tag !== tag.trim() || /[,"\t\r\n]/.test(tag) || unsupportedText(tag)))
+    errors.push("YouTube tags must be nonempty, trimmed, and contain no commas, quotes or unsupported characters.");
+  if (tags.length) {
+    // Tags are public metadata too: the house rules (no tool names, prices,
+    // retired tiers) apply to them as well as to the title and description.
+    const tagRules = checkMessage(tags.join("\n"), { hasImages: true });
+    errors.push(...tagRules.errors.map((e) => `Tags: ${e}`));
+  }
   if (youtubeTagCharacters(tags) > YOUTUBE_TAGS_MAX_CHARACTERS)
     errors.push(`YouTube tags exceed ${YOUTUBE_TAGS_MAX_CHARACTERS} characters.`);
   if (tags.some((tag) => tag.length > 100)) warnings.push("Very long tags are unlikely to help discovery.");

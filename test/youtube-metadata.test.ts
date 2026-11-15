@@ -83,3 +83,47 @@ test("existing GS Grimoire house rules apply to YouTube copy", () => {
   assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "A Song \u2014 A Release" }).errors.join(" "), /em dash/);
   assert.match(validateYouTubeMusicVideoDraft({ ...good, description: good.description + "\nMade with Suno" }).errors.join(" "), /generative tool/);
 });
+
+test("the reviewed Patreon URL must appear as a whole link, not a prefix", () => {
+  const otherPost = good.description.replace(good.patreonPostUrl, good.patreonPostUrl + "999");
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, description: otherPost }).errors.join(" "), /must include/);
+  const withFullStop = { ...good, description: "Listen here: " + good.patreonPostUrl + "." };
+  const check = validateYouTubeMusicVideoDraft(withFullStop);
+  assert.deepEqual(check.errors, []);
+  assert.ok(!check.warnings.join(" ").includes("first description link"));
+});
+
+test("Patreon URL must be canonical: no port, query, fragment or parser-stripped whitespace", () => {
+  for (const url of [
+    "https://patreon.com:8443/posts/forest-ruins-123456",
+    "https://www.patreon.com/posts/forest-ruins-123456?ref=x",
+    "https://www.patreon.com/posts/forest-ruins-123456#x",
+    " https://www.patreon.com/posts/forest-ruins-123456",
+    "https://www.patreon.com/po\tsts/forest-ruins-123456",
+    "https://WWW.PATREON.COM/posts/forest-ruins-123456",
+  ]) assert.equal(validFreePatreonPostUrl(url), false, JSON.stringify(url));
+});
+
+test("tags follow house rules and cannot smuggle separators", () => {
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, tags: ["suno"] }).errors.join(" "), /Tags:.*generative tool/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, tags: ["a,b"] }).errors.join(" "), /commas/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, tags: ['say "hi"'] }).errors.join(" "), /quotes/);
+});
+
+test("bidi controls, lone surrogates and tabs are rejected; invisible characters warn", () => {
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "Free \u202eyadnuS" }).errors.join(" "), /unsupported/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "Song\ud800" }).errors.join(" "), /unsupported/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "a\tb" }).errors.join(" "), /unsupported/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, description: good.description + "\u2066x\u2069" }).errors.join(" "), /unsupported/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, description: good.description + "\u200b" }).warnings.join(" "), /invisible/);
+});
+
+test("JSON-shaped input with wrong types returns errors instead of throwing", () => {
+  const bad = (patch: Record<string, unknown>) =>
+    validateYouTubeMusicVideoDraft({ ...good, ...patch } as unknown as YouTubeMusicVideoDraft).errors.join(" ");
+  assert.match(bad({ title: 42 }), /title must be text/);
+  assert.match(bad({ tags: "abc" }), /tags must be a list/);
+  assert.match(bad({ tags: [1] }), /tags must be a list/);
+  assert.match(bad({ playlistId: 123 }), /playlist identifier must be text/);
+  assert.throws(() => buildPrivateYouTubeMusicVideoMetadata({ ...good, title: 42 } as unknown as YouTubeMusicVideoDraft), /title must be text/);
+});
