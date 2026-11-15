@@ -7,6 +7,8 @@
  * boundary and independently checkpoint every external side effect.
  */
 
+import { checkMessage } from "./validate.ts";
+
 export const YOUTUBE_TITLE_MAX_CHARACTERS = 100;
 export const YOUTUBE_DESCRIPTION_MAX_BYTES = 5_000;
 export const YOUTUBE_TAGS_MAX_CHARACTERS = 500;
@@ -108,6 +110,10 @@ export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): Y
     errors.push("Confirm rights to upload the song and artwork before preparing an upload.");
   if (draft.containsSyntheticMedia != null && typeof draft.containsSyntheticMedia !== "boolean")
     errors.push("Synthetic-media disclosure must be explicitly true or false when provided.");
+
+  const houseRules = checkMessage(`${title}\n${description}`, { hasImages: true });
+  errors.push(...houseRules.errors);
+  warnings.push(...houseRules.warnings);
 
   const tags = draft.tags ?? [];
   if (tags.some((tag) => !tag.trim() || tag !== tag.trim() || forbiddenYouTubeText.test(tag) || unsafeControl.test(tag)))
