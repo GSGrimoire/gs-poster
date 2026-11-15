@@ -36,7 +36,7 @@ Official documentation:
 
 ## Foundation included in this branch
 
-- `src/youtube-metadata.ts`: pure metadata model and validation for a Free Song Sunday YouTube video. Enforces YouTube title length, description byte length, supported characters, bounded tags, explicit audience declaration, copyright confirmation, a reviewed HTTPS Patreon post URL, optional playlist ID and synthetic-media declaration.
+- `src/youtube-metadata.ts`: pure metadata model and validation for a Free Song Sunday YouTube video. Enforces YouTube title length, description byte length, supported characters, bounded tags, explicit audience declaration, copyright confirmation, a reviewed HTTPS Patreon post URL, optional playlist ID and synthetic-media declaration. Reuses the central `src/validate.ts` house-rule checks for user-facing copy.
 - `buildPrivateYouTubeMusicVideoMetadata`: produces a private-only YouTube insert *body*, not an authorization or upload. No tokens, session, video bytes, network requests, publishing or scheduling APIs.
 - `youtubeStudioVideoUrl`: only produces Studio links from canonical video identifiers.
 - `test/youtube-metadata.test.ts`: validation, security-negative, disclosure and private-only tests.
