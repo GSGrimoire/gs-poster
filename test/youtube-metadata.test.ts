@@ -80,6 +80,6 @@ test("studio URL only accepts a canonical video identifier", () => {
 });
 
 test("existing GS Grimoire house rules apply to YouTube copy", () => {
-  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "A Song — A Release" }).errors.join(" "), /em dash/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "A Song \u2014 A Release" }).errors.join(" "), /em dash/);
   assert.match(validateYouTubeMusicVideoDraft({ ...good, description: good.description + "\nMade with Suno" }).errors.join(" "), /generative tool/);
 });
