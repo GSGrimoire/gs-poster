@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildPrivateYouTubeMusicVideoMetadata,
+  YOUTUBE_INSERT_PARTS,
   validFreePatreonPostUrl,
   validateYouTubeMusicVideoDraft,
   youtubeStudioVideoUrl,
@@ -17,6 +18,7 @@ const good: YouTubeMusicVideoDraft = {
   tags: ["tabletop roleplaying", "fantasy ambience", "background music"],
   madeForKids: false,
   rightsConfirmed: true,
+  containsSyntheticMedia: true,
 };
 
 test("valid Free Song Sunday metadata produces a private-only video insert body", () => {
@@ -29,13 +31,22 @@ test("valid Free Song Sunday metadata produces a private-only video insert body"
   assert.ok(!("publishAt" in body.status));
   assert.ok(!("playlistId" in body.snippet), "playlist membership is a separate approved side effect");
   assert.equal(body.snippet.description, good.description);
-  assert.equal(body.status.containsSyntheticMedia, undefined);
+  assert.equal(body.status.containsSyntheticMedia, true);
+  // Omitting status.privacyStatus now defaults to public on YouTube, so the
+  // body must always carry it and the adapter must always send the status part.
+  assert.deepEqual(Object.keys(body.status).sort(), ["containsSyntheticMedia", "privacyStatus", "selfDeclaredMadeForKids"]);
+  assert.equal(YOUTUBE_INSERT_PARTS, "snippet,status");
 });
 
-test("explicit disclosure can be carried without inferring it", () => {
-  const body = buildPrivateYouTubeMusicVideoMetadata({ ...good, containsSyntheticMedia: true });
-  assert.equal(body.status.containsSyntheticMedia, true);
+test("the synthetic-content answer is explicit, never inferred or left out", () => {
+  const body = buildPrivateYouTubeMusicVideoMetadata({ ...good, containsSyntheticMedia: false });
+  assert.equal(body.status.containsSyntheticMedia, false);
   assert.equal(body.status.privacyStatus, "private");
+  for (const value of [null, undefined, "yes"]) {
+    const draft = { ...good, containsSyntheticMedia: value } as unknown as YouTubeMusicVideoDraft;
+    assert.match(validateYouTubeMusicVideoDraft(draft).errors.join(" "), /synthetic content question/);
+    assert.throws(() => buildPrivateYouTubeMusicVideoMetadata(draft), /synthetic content question/);
+  }
 });
 
 test("title, description and tags obey YouTube limits", () => {
@@ -126,4 +137,30 @@ test("JSON-shaped input with wrong types returns errors instead of throwing", ()
   assert.match(bad({ tags: [1] }), /tags must be a list/);
   assert.match(bad({ playlistId: 123 }), /playlist identifier must be text/);
   assert.throws(() => buildPrivateYouTubeMusicVideoMetadata({ ...good, title: 42 } as unknown as YouTubeMusicVideoDraft), /title must be text/);
+});
+
+test("leading or trailing tabs and line breaks in the raw title are rejected, not trimmed away", () => {
+  for (const title of ["\tForest Ruins", "Forest Ruins\t", "\nForest Ruins", "Forest Ruins\r\n", "Forest\u2028Ruins", "Forest Ruins\u0085"])
+    assert.match(validateYouTubeMusicVideoDraft({ ...good, title }).errors.join(" "), /unsupported/, JSON.stringify(title));
+  assert.deepEqual(validateYouTubeMusicVideoDraft({ ...good, title: "  Forest Ruins  " }).errors, []);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "Forest \u061cRuins" }).errors.join(" "), /unsupported/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, tags: ["a\u2028b"] }).errors.join(" "), /tags must be/);
+});
+
+test("a title or description made only of invisible characters counts as empty", () => {
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, title: "\u200b\u2060" }).errors.join(" "), /title is required/);
+  assert.match(validateYouTubeMusicVideoDraft({ ...good, description: "\u200b" }).errors.join(" "), /description is required/);
+});
+
+test("a Patreon slug ending in sentence punctuation is refused up front", () => {
+  for (const url of ["https://www.patreon.com/posts/forest-ruins-123456.", "https://www.patreon.com/posts/forest-ruins-123456)"])
+    assert.equal(validFreePatreonPostUrl(url), false, url);
+  assert.ok(validFreePatreonPostUrl("https://www.patreon.com/posts/forest-ruins-123456/"));
+});
+
+test("emoji-heavy titles near the limit warn instead of passing silently", () => {
+  const title = "\u{1F3B5}".repeat(60);
+  const check = validateYouTubeMusicVideoDraft({ ...good, title });
+  assert.deepEqual(check.errors, []);
+  assert.match(check.warnings.join(" "), /emoji count double/);
 });
