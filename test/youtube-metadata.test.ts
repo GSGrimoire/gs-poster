@@ -11,6 +11,7 @@ import {
   youtubeStudioVideoUrl,
   youtubeTagCharacters,
   type YouTubeMusicVideoDraft,
+  type YouTubeCurrentMutableStatus,
 } from "../src/youtube-metadata.ts";
 
 const good: YouTubeMusicVideoDraft = {
@@ -22,6 +23,15 @@ const good: YouTubeMusicVideoDraft = {
   visibility: "public",
   madeForKids: false,
   rightsConfirmed: true,
+  containsSyntheticMedia: true,
+};
+
+const currentStatus: YouTubeCurrentMutableStatus = {
+  privacyStatus: "private",
+  license: "youtube",
+  embeddable: true,
+  publicStatsViewable: true,
+  selfDeclaredMadeForKids: false,
   containsSyntheticMedia: true,
 };
 
@@ -180,21 +190,48 @@ test("D2: visibility is an explicit choice of public, unlisted or private; publi
     const draft = { ...good, visibility } as unknown as YouTubeMusicVideoDraft;
     assert.match(validateYouTubeMusicVideoDraft(draft).errors.join(" "), /visibility explicitly/);
     assert.throws(() => buildPrivateYouTubeMusicVideoMetadata(draft), /visibility explicitly/);
-    assert.throws(() => buildYouTubeReleaseUpdate(draft, "AbC_123-yZ9"), /visibility explicitly/);
+    assert.throws(() => buildYouTubeReleaseUpdate(draft, "AbC_123-yZ9", currentStatus), /visibility explicitly/);
   }
 });
 
 test("D2: the release update applies the approved visibility and repeats the whole status", () => {
-  assert.deepEqual(buildYouTubeReleaseUpdate(good, "AbC_123-yZ9"), {
+  assert.deepEqual(buildYouTubeReleaseUpdate(good, "AbC_123-yZ9", currentStatus), {
     id: "AbC_123-yZ9",
-    status: { privacyStatus: "public", selfDeclaredMadeForKids: false, containsSyntheticMedia: true },
+    status: { privacyStatus: "public", selfDeclaredMadeForKids: false, containsSyntheticMedia: true, license: "youtube", embeddable: true, publicStatsViewable: true },
   });
-  assert.equal(buildYouTubeReleaseUpdate({ ...good, visibility: "unlisted" }, "AbC_123-yZ9")?.status.privacyStatus, "unlisted");
-  assert.equal(buildYouTubeReleaseUpdate({ ...good, visibility: "private" }, "AbC_123-yZ9"), null);
-  assert.throws(() => buildYouTubeReleaseUpdate(good, "not-a-video-id!"), /Invalid YouTube video identifier/);
-  assert.throws(() => buildYouTubeReleaseUpdate({ ...good, rightsConfirmed: false }, "AbC_123-yZ9"), /Confirm rights/);
+  assert.equal(buildYouTubeReleaseUpdate({ ...good, visibility: "unlisted" }, "AbC_123-yZ9", currentStatus)?.status.privacyStatus, "unlisted");
+  assert.equal(buildYouTubeReleaseUpdate({ ...good, visibility: "private" }, "AbC_123-yZ9", currentStatus), null);
+  assert.throws(() => buildYouTubeReleaseUpdate(good, "not-a-video-id!", currentStatus), /Invalid YouTube video identifier/);
+  assert.throws(() => buildYouTubeReleaseUpdate({ ...good, rightsConfirmed: false }, "AbC_123-yZ9", currentStatus), /Confirm rights/);
 });
 
 test("D3: one OAuth scope, wide enough for the playlist step", () => {
   assert.equal(YOUTUBE_OAUTH_SCOPE, "https://www.googleapis.com/auth/youtube");
+});
+
+test("release preserves all mutable status preferences instead of resetting them", () => {
+  const existing: YouTubeCurrentMutableStatus = {
+    ...currentStatus, license: "creativeCommon", embeddable: false, publicStatsViewable: false,
+  };
+  assert.deepEqual(buildYouTubeReleaseUpdate(good, "AbC_123-yZ9", existing)?.status, {
+    privacyStatus: "public", selfDeclaredMadeForKids: false, containsSyntheticMedia: true,
+    license: "creativeCommon", embeddable: false, publicStatsViewable: false,
+  });
+});
+
+test("release fails closed on missing or changed video status", () => {
+  const fails = (status: unknown) => assert.throws(
+    () => buildYouTubeReleaseUpdate(good, "AbC_123-yZ9", status as YouTubeCurrentMutableStatus),
+    /reconcile before release/,
+  );
+  fails(undefined);
+  fails({ ...currentStatus, privacyStatus: "public" });
+  fails({ ...currentStatus, privacyStatus: "unlisted" });
+  fails({ ...currentStatus, license: undefined });
+  fails({ ...currentStatus, embeddable: undefined });
+  fails({ ...currentStatus, publicStatsViewable: undefined });
+  fails({ ...currentStatus, publishAt: "2026-11-20T12:00:00Z" });
+  fails({ ...currentStatus, selfDeclaredMadeForKids: true });
+  fails({ ...currentStatus, containsSyntheticMedia: false });
+  assert.equal(buildYouTubeReleaseUpdate({ ...good, visibility: "private" }, "AbC_123-yZ9", currentStatus), null);
 });
