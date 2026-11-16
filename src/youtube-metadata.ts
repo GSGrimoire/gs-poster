@@ -96,13 +96,31 @@ export interface YouTubePrivateInsertBody {
   };
 }
 
-/** Body of the later `videos.update` (part=status) that applies the approved visibility. */
+/**
+ * Mutable status obtained by an owner-authorized videos.list request for the
+ * exact video immediately before release. The fields below are required to
+ * avoid erasing existing video preferences during a status-part update.
+ */
+export interface YouTubeCurrentMutableStatus {
+  privacyStatus: YouTubeVisibility;
+  license: "youtube" | "creativeCommon";
+  embeddable: boolean;
+  publicStatsViewable: boolean;
+  selfDeclaredMadeForKids?: boolean;
+  containsSyntheticMedia?: boolean;
+  publishAt?: string | null;
+}
+
+/** Body of the later `videos.update` (part=status) that applies approved visibility. */
 export interface YouTubeReleaseUpdateBody {
   id: string;
   status: {
     privacyStatus: "public" | "unlisted";
     selfDeclaredMadeForKids: boolean;
     containsSyntheticMedia: boolean;
+    license: "youtube" | "creativeCommon";
+    embeddable: boolean;
+    publicStatsViewable: boolean;
   };
 }
 
@@ -260,25 +278,46 @@ export function buildPrivateYouTubeMusicVideoMetadata(draft: YouTubeMusicVideoDr
 }
 
 /**
- * Build the `videos.update` body (send with part=status) that applies the
- * PIN-approved visibility to an already uploaded, processed video. Returns
- * null when the approved visibility is private: nothing more to send.
+ * Build the `videos.update` body (part=status) for a processed private video.
+ * Returns null for private approval, which needs no external release call.
  *
- * The whole status block is repeated on purpose: `videos.update` replaces the
- * part it is given, so leaving the audience or synthetic-content answer out
- * could reset it.
+ * YouTube replaces mutable properties in the entire specified status part.
+ * The adapter must obtain a fresh owner-authenticated videos.list status for
+ * this exact video, verify ownership/approved job identity, and pass the
+ * snapshot here. Otherwise license, embedding and statistics settings could
+ * silently revert to defaults. An incomplete or changed snapshot fails closed.
+ * Re-check the snapshot at the external-call boundary; manual Studio changes
+ * after that read still require reconciliation.
  */
-export function buildYouTubeReleaseUpdate(draft: YouTubeMusicVideoDraft, videoId: string): YouTubeReleaseUpdateBody | null {
+export function buildYouTubeReleaseUpdate(
+  draft: YouTubeMusicVideoDraft,
+  videoId: string,
+  currentStatus: YouTubeCurrentMutableStatus,
+): YouTubeReleaseUpdateBody | null {
   const check = validateYouTubeMusicVideoDraft(draft);
   if (check.errors.length) throw new Error(check.errors.join(" "));
-  if (!videoIdPattern.test(videoId)) throw new Error("Invalid YouTube video identifier.");
+  if (typeof videoId !== "string" || !videoIdPattern.test(videoId))
+    throw new Error("Invalid YouTube video identifier.");
   if (draft.visibility === "private") return null;
+  if (!currentStatus || currentStatus.privacyStatus !== "private" ||
+      (currentStatus.license !== "youtube" && currentStatus.license !== "creativeCommon") ||
+      typeof currentStatus.embeddable !== "boolean" ||
+      typeof currentStatus.publicStatsViewable !== "boolean" ||
+      currentStatus.publishAt != null ||
+      (currentStatus.selfDeclaredMadeForKids !== undefined &&
+       currentStatus.selfDeclaredMadeForKids !== draft.madeForKids) ||
+      (currentStatus.containsSyntheticMedia !== undefined &&
+       currentStatus.containsSyntheticMedia !== draft.containsSyntheticMedia))
+    throw new Error("YouTube status differs from the approved private upload or is incomplete; reconcile before release.");
   return {
     id: videoId,
     status: {
       privacyStatus: draft.visibility,
       selfDeclaredMadeForKids: draft.madeForKids as boolean,
       containsSyntheticMedia: draft.containsSyntheticMedia as boolean,
+      license: currentStatus.license,
+      embeddable: currentStatus.embeddable,
+      publicStatsViewable: currentStatus.publicStatsViewable,
     },
   };
 }
