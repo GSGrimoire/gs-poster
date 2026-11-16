@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildPrivateYouTubeMusicVideoMetadata,
+  buildYouTubeReleaseUpdate,
+  YOUTUBE_DEFAULT_VISIBILITY,
+  YOUTUBE_OAUTH_SCOPE,
   YOUTUBE_INSERT_PARTS,
   validFreePatreonPostUrl,
   validateYouTubeMusicVideoDraft,
@@ -16,6 +19,7 @@ const good: YouTubeMusicVideoDraft = {
   patreonPostUrl: "https://www.patreon.com/posts/forest-ruins-123456",
   playlistId: "PLabcdef123456",
   tags: ["tabletop roleplaying", "fantasy ambience", "background music"],
+  visibility: "public",
   madeForKids: false,
   rightsConfirmed: true,
   containsSyntheticMedia: true,
@@ -163,4 +167,34 @@ test("emoji-heavy titles near the limit warn instead of passing silently", () =>
   const check = validateYouTubeMusicVideoDraft({ ...good, title });
   assert.deepEqual(check.errors, []);
   assert.match(check.warnings.join(" "), /emoji count double/);
+});
+
+test("D2: the insert is always private, whatever visibility was approved", () => {
+  for (const visibility of ["public", "unlisted", "private"] as const)
+    assert.equal(buildPrivateYouTubeMusicVideoMetadata({ ...good, visibility }).status.privacyStatus, "private");
+});
+
+test("D2: visibility is an explicit choice of public, unlisted or private; public is the default", () => {
+  assert.equal(YOUTUBE_DEFAULT_VISIBILITY, "public");
+  for (const visibility of [undefined, null, "", "Public", "scheduled"]) {
+    const draft = { ...good, visibility } as unknown as YouTubeMusicVideoDraft;
+    assert.match(validateYouTubeMusicVideoDraft(draft).errors.join(" "), /visibility explicitly/);
+    assert.throws(() => buildPrivateYouTubeMusicVideoMetadata(draft), /visibility explicitly/);
+    assert.throws(() => buildYouTubeReleaseUpdate(draft, "AbC_123-yZ9"), /visibility explicitly/);
+  }
+});
+
+test("D2: the release update applies the approved visibility and repeats the whole status", () => {
+  assert.deepEqual(buildYouTubeReleaseUpdate(good, "AbC_123-yZ9"), {
+    id: "AbC_123-yZ9",
+    status: { privacyStatus: "public", selfDeclaredMadeForKids: false, containsSyntheticMedia: true },
+  });
+  assert.equal(buildYouTubeReleaseUpdate({ ...good, visibility: "unlisted" }, "AbC_123-yZ9")?.status.privacyStatus, "unlisted");
+  assert.equal(buildYouTubeReleaseUpdate({ ...good, visibility: "private" }, "AbC_123-yZ9"), null);
+  assert.throws(() => buildYouTubeReleaseUpdate(good, "not-a-video-id!"), /Invalid YouTube video identifier/);
+  assert.throws(() => buildYouTubeReleaseUpdate({ ...good, rightsConfirmed: false }, "AbC_123-yZ9"), /Confirm rights/);
+});
+
+test("D3: one OAuth scope, wide enough for the playlist step", () => {
+  assert.equal(YOUTUBE_OAUTH_SCOPE, "https://www.googleapis.com/auth/youtube");
 });

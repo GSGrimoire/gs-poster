@@ -5,6 +5,22 @@
  * makes network requests, creates a job, or authorizes publication. The
  * future YouTube adapter must remain behind the existing owner/PIN approval
  * boundary and independently checkpoint every external side effect.
+ *
+ * Owner decisions, Gus, 16 November 2026 (full text in
+ * docs/YOUTUBE_FREE_SONG_SUNDAY_PIPELINE.md, "Owner decisions"):
+ *  D1 GS Poster is the release tool, not a production studio. Finished media
+ *     is made elsewhere (Claude, ChatGPT, GS Reels) and pushed here.
+ *     GS Poster owns the YouTube upload; there is no second uploader.
+ *  D2 YouTube is released by PIN approval like every other platform. The
+ *     owner chooses public, unlisted or private; public is the default.
+ *  D3 GS Poster handles the playlist itself and may hold the wide `youtube`
+ *     OAuth scope that this needs.
+ *
+ * How D2 is carried out safely: the video is always INSERTED as private
+ * (buildPrivateYouTubeMusicVideoMetadata), and only after YouTube has
+ * processed it does a separate, checkpointed `videos.update` apply the
+ * approved visibility (buildYouTubeReleaseUpdate). A lost or unclear insert
+ * response can then only ever leave a private video behind.
  */
 
 import { checkMessage } from "./validate.ts";
@@ -20,6 +36,20 @@ export const YOUTUBE_TAGS_MAX_CHARACTERS = 500;
  */
 export const YOUTUBE_INSERT_PARTS = "snippet,status";
 
+/** D2: the three choices YouTube requires an upload client to offer. */
+export const YOUTUBE_VISIBILITIES = ["public", "unlisted", "private"] as const;
+export type YouTubeVisibility = typeof YOUTUBE_VISIBILITIES[number];
+/** D2: what the editor preselects. The saved draft must still state it. */
+export const YOUTUBE_DEFAULT_VISIBILITY: YouTubeVisibility = "public";
+
+/**
+ * D3: the one OAuth scope the adapter requests. `youtube.upload` alone can
+ * upload but cannot add to a playlist; `youtube` covers both, and also lets
+ * the holder edit and delete the channel's videos. Store its refresh token
+ * only as a Worker secret, never in D1, logs or any tool response.
+ */
+export const YOUTUBE_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube";
+
 export interface YouTubeMusicVideoDraft {
   /** Reviewed, audience-facing title, not an internal release label. */
   title: string;
@@ -30,6 +60,11 @@ export interface YouTubeMusicVideoDraft {
   /** Optional target playlist. This is not automatically added by this module. */
   playlistId?: string | null;
   tags?: string[];
+  /**
+   * D2: the visibility the owner approves with the PIN. Explicit on every
+   * saved draft; the editor preselects YOUTUBE_DEFAULT_VISIBILITY.
+   */
+  visibility: YouTubeVisibility;
   /** Deliberate audience declaration by the owner; never inferred. */
   madeForKids: boolean | null;
   /** Owner confirms they have rights to upload the audio and imagery. */
@@ -56,6 +91,16 @@ export interface YouTubePrivateInsertBody {
   };
   status: {
     privacyStatus: "private";
+    selfDeclaredMadeForKids: boolean;
+    containsSyntheticMedia: boolean;
+  };
+}
+
+/** Body of the later `videos.update` (part=status) that applies the approved visibility. */
+export interface YouTubeReleaseUpdateBody {
+  id: string;
+  status: {
+    privacyStatus: "public" | "unlisted";
     selfDeclaredMadeForKids: boolean;
     containsSyntheticMedia: boolean;
   };
@@ -166,6 +211,8 @@ export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): Y
 
   if (draft.playlistId != null && !/^[a-zA-Z0-9_-]{1,150}$/.test(draft.playlistId))
     errors.push("YouTube playlist identifier is invalid.");
+  if (!(YOUTUBE_VISIBILITIES as readonly unknown[]).includes(draft.visibility))
+    errors.push("Choose YouTube visibility explicitly: public, unlisted or private.");
   if (draft.madeForKids !== true && draft.madeForKids !== false)
     errors.push("YouTube audience selection must be explicit.");
   if (draft.rightsConfirmed !== true)
@@ -193,9 +240,10 @@ export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): Y
 }
 
 /**
- * Build the *private-only* outbound metadata for a later approved upload.
- * The future adapter must gate this behind owner approval and must not turn
- * private into public, unlisted, or scheduled without an explicit review.
+ * Build the outbound `videos.insert` metadata. It is ALWAYS private, whatever
+ * visibility was approved: the approved visibility is applied afterwards by
+ * buildYouTubeReleaseUpdate, once the video ID is stored and processing has
+ * succeeded. The adapter must gate both calls behind the PIN approval.
  */
 export function buildPrivateYouTubeMusicVideoMetadata(draft: YouTubeMusicVideoDraft): YouTubePrivateInsertBody {
   const check = validateYouTubeMusicVideoDraft(draft);
@@ -209,6 +257,30 @@ export function buildPrivateYouTubeMusicVideoMetadata(draft: YouTubeMusicVideoDr
     containsSyntheticMedia: draft.containsSyntheticMedia as boolean,
   };
   return { snippet, status };
+}
+
+/**
+ * Build the `videos.update` body (send with part=status) that applies the
+ * PIN-approved visibility to an already uploaded, processed video. Returns
+ * null when the approved visibility is private: nothing more to send.
+ *
+ * The whole status block is repeated on purpose: `videos.update` replaces the
+ * part it is given, so leaving the audience or synthetic-content answer out
+ * could reset it.
+ */
+export function buildYouTubeReleaseUpdate(draft: YouTubeMusicVideoDraft, videoId: string): YouTubeReleaseUpdateBody | null {
+  const check = validateYouTubeMusicVideoDraft(draft);
+  if (check.errors.length) throw new Error(check.errors.join(" "));
+  if (!videoIdPattern.test(videoId)) throw new Error("Invalid YouTube video identifier.");
+  if (draft.visibility === "private") return null;
+  return {
+    id: videoId,
+    status: {
+      privacyStatus: draft.visibility,
+      selfDeclaredMadeForKids: draft.madeForKids as boolean,
+      containsSyntheticMedia: draft.containsSyntheticMedia as boolean,
+    },
+  };
 }
 
 /** Build a canonical owner-facing URL only from a validated YouTube video ID. */
