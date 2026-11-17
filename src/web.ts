@@ -29,7 +29,8 @@ import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.
 import { importTikTokLinkedImage, TikTokImportError } from "./tiktok-import.ts";
 import { prepareLinkedVideo, VideoPrepareError, type VideoPrepareTarget } from "./video-import.ts";
 import { fetchImage } from "./media.ts";
-import { fetchVideo } from "./video.ts";
+import { fetchVideo, openVideoStream, privateVideoSize, privateVideoRange } from "./video.ts";
+import { FACEBOOK_VIDEO_TRANSPORT_MAX_BYTES } from "./video-limits.ts";
 import { assertFacebookVideoSize } from "./facebook.ts";
 import {
   getFacebookUploadProgress, resumeFailedFacebookUploads, abandonFacebookUpload,
@@ -665,7 +666,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
         <label><input type="checkbox" name="target_facebook" value="1" checked> Publish to Facebook</label>
         <label for="message">Facebook caption</label>
         <textarea id="message" name="message">${esc(message)}</textarea>
-        <p class="hint">${p.video?"Video (Facebook limit: 20 MB; private storage and other targets: up to 50 MB)":p.images.length+" images"}</p></section>`:
+        <p class="hint">${p.video?"Video (Facebook limit: 20 MB; private storage: up to 300 MB)":p.images.length+" images"}</p></section>`:
         `<input type="hidden" name="message" value="${esc(message)}">`}
         ${bs?`<section class="platform-preview"><h3>Bluesky approval</h3>
         <label><input type="checkbox" name="target_bluesky" value="1" checked> Publish to Bluesky</label>
@@ -925,6 +926,8 @@ async function draftImageAction(
       if (version !== current.updated_at) return fail("The draft changed. Reload.",409);
       if (!(await isStoredOwnerVideo(env.DB,reference,session.login)))
         return fail("This private video is not stored or does not belong to your account.");
+      if (facebook && ((await privateVideoSize(env,reference)) ?? Infinity)>FACEBOOK_VIDEO_TRANSPORT_MAX_BYTES)
+        return fail("Facebook's current publishing transport accepts only 20 MB. Deselect Facebook for this video.");
       const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version,tiktok,instagram);
       if (!updated) return fail("A target already has media or the draft changed. Reload.",409);
       const logged=await audit(env.DB,session.login,"draft-video-attached",id,
@@ -1309,7 +1312,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
     // Human review only authorizes media that is actually readable now.
     if (instagramSelected) {
       try {
-        if (current.instagram!.video) await fetchVideo(env, current.instagram!.video);
+        if (current.instagram!.video) {
+          const preview=await openVideoStream(env,current.instagram!.video);
+          await preview.body.cancel();
+        }
         else for (const item of current.instagram!.items) await fetchImage(env, item.url);
       } catch (error) {
         return postPage(env, session, id, { error: "Instagram media could not be loaded: " +
@@ -1327,7 +1333,10 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
         }
       }
       if (bluesky.video) {
-        try { await fetchVideo(env, bluesky.video.url); }
+        try {
+          const preview=await openVideoStream(env,bluesky.video.url);
+          await preview.body.cancel();
+        }
         catch (error) {
           return postPage(env, session, id, {
             error: "Bluesky video could not be loaded: " +
@@ -1391,68 +1400,52 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
   }
 }
 
-/** Signed-in video preview with HTTP byte ranges for native playback. */
+/** Signed-in video preview: stream the original or a bounded 4 MiB R2 range. */
 async function videoProxy(req: Request, env: Env, id: string, target: string): Promise<Response> {
-  const p = await getPost(env.DB,id);
-  const reference = target === "facebook" ? p?.video : target==="tiktok" ? (p?tiktokMedia(p).video:null) : target==="instagram" ? p?.instagram?.video : (p?.bluesky ?? p?.bluesky_paused)?.video?.url;
-  if (!reference) return new Response("Not found",{status:404});
+  const p=await getPost(env.DB,id);
+  const reference=target==="facebook"?p?.video:target==="tiktok"?(p?tiktokMedia(p).video:null):
+    target==="instagram"?p?.instagram?.video:(p?.bluesky??p?.bluesky_paused)?.video?.url;
+  if(!reference)return new Response("Not found",{status:404});
+  const headers=new Headers({"Content-Type":"video/mp4","Accept-Ranges":"bytes",
+    "Cache-Control":"private, max-age=300","X-Content-Type-Options":"nosniff"});
   try {
-    const bytes = await fetchVideo(env,reference);
-    const range = req.headers.get("range");
-    const headers = new Headers({"Content-Type":"video/mp4","Accept-Ranges":"bytes",
-      "Cache-Control":"private, max-age=300","X-Content-Type-Options":"nosniff"});
-    if (range) {
-      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
-      if (!match) return new Response(null,{status:416,headers:{"Content-Range":"bytes */"+bytes.length}});
-      const start=Number(match[1]), end=match[2]?Math.min(Number(match[2]),bytes.length-1):bytes.length-1;
-      if (start>=bytes.length || end<start)
-        return new Response(null,{status:416,headers:{"Content-Range":"bytes */"+bytes.length}});
-      headers.set("Content-Range","bytes "+start+"-"+end+"/"+bytes.length);
-      headers.set("Content-Length",String(end-start+1));
-      return new Response(bytes.slice(start,end+1),{status:206,headers});
+    const size=await privateVideoSize(env,reference);
+    const range=req.headers.get("range");
+    if(size!==null && range){
+      const match=/^bytes=(\d+)-(\d*)$/.exec(range);
+      if(!match)return new Response(null,{status:416,headers:{"Content-Range":"bytes */"+size}});
+      const start=Number(match[1]);
+      const requestedEnd=match[2]?Number(match[2]):size-1;
+      if(!Number.isSafeInteger(start)||!Number.isSafeInteger(requestedEnd)||start>=size||requestedEnd<start)
+        return new Response(null,{status:416,headers:{"Content-Range":"bytes */"+size}});
+      const end=Math.min(requestedEnd,size-1,start+4*1024*1024-1);
+      const bytes=await privateVideoRange(env,reference,start,end-start+1);
+      headers.set("Content-Range","bytes "+start+"-"+end+"/"+size);
+      headers.set("Content-Length",String(bytes.length));
+      return new Response(bytes,{status:206,headers});
     }
-    headers.set("Content-Length",String(bytes.length));
-    return new Response(bytes,{headers});
-  } catch(error) {
-    return new Response(error instanceof Error ? error.message : "Could not load video",{status:502});
+    const source=await openVideoStream(env,reference);
+    if(source.size!==null)headers.set("Content-Length",String(source.size));
+    return new Response(source.body,{headers});
+  }catch(error){
+    return new Response(error instanceof Error?error.message:"Could not load video",{status:502});
   }
 }
 
-/** Private download of the original MP4 for manual Instagram Reels.
- * No transcoding or posting. The user must verify actual codec, dimensions and duration.
- */
-async function instagramVideo(env: Env,id:string):Promise<Response> {
+/** Private, streamed download of the original MP4 for manual Instagram Reels. */
+async function instagramVideo(env:Env,id:string):Promise<Response>{
   const p=await getPost(env.DB,id);
   if(!p?.instagram?.video)return new Response("Not found",{status:404});
-  try {
-    const bytes=await fetchVideo(env,p.instagram.video);
-    return new Response(bytes,{headers:{"Content-Type":"video/mp4",
-      "Content-Length":String(bytes.byteLength),
+  try{
+    const source=await openVideoStream(env,p.instagram.video);
+    const headers=new Headers({"Content-Type":"video/mp4",
       "Content-Disposition":'attachment; filename="instagram-'+id+'-reel.mp4"',
-      "Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"}});
+      "Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"});
+    if(source.size!==null)headers.set("Content-Length",String(source.size));
+    return new Response(source.body,{headers});
   }catch(error){
     return new Response(error instanceof Error?error.message:"Could not prepare Instagram video",
       {status:502,headers:{"Cache-Control":"no-store"}});
-  }
-}
-
-/** The finished Instagram JPEG for one saved photo, rendered on the server
- * from the saved frame and crop/pad settings. Signed-in editors only.
- * Sends nothing to Instagram. */
-async function instagramPhoto(env: Env, id: string, n: number): Promise<Response> {
-  const p = await getPost(env.DB, id);
-  const item = p?.instagram?.items[n];
-  if (!p?.instagram || !item) return new Response("Not found", { status: 404 });
-  if (!env.IMAGES) return new Response("Image renderer unavailable", { status: 503 });
-  try {
-    const img = await fetchImage(env, item.url);
-    const jpeg = await renderInstagram(env.IMAGES, new Uint8Array(img.bytes), p.instagram.frame, item);
-    return new Response(jpeg, { headers: {
-      "Content-Type": "image/jpeg", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
-      "Content-Disposition": `inline; filename="instagram-${id}-${n + 1}.jpg"`,
-    } });
-  } catch (e) {
-    return new Response(e instanceof Error ? e.message : "Could not render the photo", { status: 502 });
   }
 }
 
