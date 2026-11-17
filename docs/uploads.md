@@ -13,9 +13,9 @@ Usage:
    the post using the existing GitHub sign-in and approval PIN.
 
 ### Limits
-- One-time bearer link valid for 10 minutes; only a hash of the secret is stored.
-- JPG, PNG, GIF up to 10 MiB; MP4 up to 50,000,000 bytes.
-- Header signature and exact request-length checks.
+- One-time bearer link valid for 10 minutes for images and 60 minutes for MP4; only a hash of the secret is stored.
+- JPG, PNG, GIF up to 10 MiB; MP4 up to 300,000,000 bytes, sent in 5 MiB parts when above 50,000,000 bytes.
+- Header signature and exact request-length checks. Large videos use sequential R2 multipart transfers, server-held ETags and final range-hash verification.
 - Up to 60 upload links per rolling hour, and 3 GiB of stored/reserved uploads.
 - The D1 quota is allocated atomically so simultaneous links cannot exceed either limit.
 - Upload records count 47 days to allow a two-day margin beyond the 45-day R2
@@ -30,7 +30,7 @@ Usage:
   budget alert. Cloudflare alerts do not suspend billable usage.
 - Files remain private in Cloudflare R2, with lifecycle deletion after 45 days.
 - Old references cannot be used after their object expires.
-- The Worker does not provide a public GET download endpoint.
+- The Worker does not provide a public GET download endpoint. Expired, idle multipart sessions are aborted only after R2 confirms the abort; uncertain completion retains its quota reservation.
 
 ### Required configuration
 1. Enable R2 on the Cloudflare account. A payment method may be requested.
