@@ -10,5 +10,5 @@ export function pr90StagingAllowed(method:string,pathname:string):boolean {
   if (method==="PUT") return /^\/upload\/[a-f0-9]{32}\/[A-Za-z0-9_-]{20,64}$/.test(pathname);
   if (method!=="POST") return false;
   if (pathname==="/new") return true; // Draft creation is not approval.
-  return /^\/post\/p_[a-z0-9]+\/(?:save|return-to-drafts|upload-link|attach-image|video-link|attach-video|import-tiktok-image|import-video)$/.test(pathname);
+  return /^\/post\/p_[a-z0-9]+\/(?:save|return-to-drafts|reschedule|upload-link|attach-image|video-link|attach-video|import-tiktok-image|import-video)$/.test(pathname);
 }
