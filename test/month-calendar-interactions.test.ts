@@ -1,7 +1,6 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {renderMonthCalendar,MONTH_CALENDAR_JS} from "../src/calendar.ts";
-import {calendarReturnAfterMove} from "../src/web.ts";
+import {renderMonthCalendar,MONTH_CALENDAR_JS,calendarReturnAfterMove} from "../src/calendar.ts";
 import type {Post} from "../src/db.ts";
 import type {Env} from "../src/env.ts";
 
