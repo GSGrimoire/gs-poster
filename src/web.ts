@@ -1449,6 +1449,26 @@ async function instagramVideo(env:Env,id:string):Promise<Response>{
   }
 }
 
+/** The finished Instagram JPEG for one saved photo, rendered on the server
+ * from the saved frame and crop/pad settings. Signed-in editors only.
+ * Sends nothing to Instagram. */
+async function instagramPhoto(env: Env, id: string, n: number): Promise<Response> {
+  const p = await getPost(env.DB, id);
+  const item = p?.instagram?.items[n];
+  if (!p?.instagram || !item) return new Response("Not found", { status: 404 });
+  if (!env.IMAGES) return new Response("Image renderer unavailable", { status: 503 });
+  try {
+    const img = await fetchImage(env, item.url);
+    const jpeg = await renderInstagram(env.IMAGES, new Uint8Array(img.bytes), p.instagram.frame, item);
+    return new Response(jpeg, { headers: {
+      "Content-Type": "image/jpeg", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": `inline; filename="instagram-${id}-${n + 1}.jpg"`,
+    } });
+  } catch (e) {
+    return new Response(e instanceof Error ? e.message : "Could not render the photo", { status: 502 });
+  }
+}
+
 async function mediaProxy(env: Env, id: string, n: number, thumbnail = false, platform:string|null=null): Promise<Response> {
   const p = await getPost(env.DB, id);
   const url = platform==="pool"?(p?postPhotos(p)[n]:null):
