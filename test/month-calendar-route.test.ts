@@ -4,7 +4,7 @@ import {build} from "esbuild";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {createPost,ensureSchema,getPost} from "../src/db.ts";
 import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
-import {toLocalInput} from "../src/time.ts";
+import {toLocalInput,localToUtc} from "../src/time.ts";
 import type {Env} from "../src/env.ts";
 
 const ORIGIN="https://gs-poster.test";
@@ -61,9 +61,7 @@ test("signed-in Month renders drag and click actions, rejects wrong PIN and pres
   assert.equal(result.status,302);
   assert.equal(result.headers.get("location"),"/calendar?view=month&month="+month);
   const saved=(await getPost(db,post.id))!;
-  assert.equal(saved.scheduled_at,new Date(newAt.getTime()).toISOString().slice(0,0)+
-    // Resolve wall-clock with the same production conversion as the route.
-    (await import("../src/time.ts")).localToUtc(proposed,ZONE).toISOString());
+  assert.equal(saved.scheduled_at,localToUtc(proposed,ZONE).toISOString());
   assert.equal(saved.status,"draft");
   assert.equal(saved.approved_at,null,"drag-to-day must not approve or publish");
   result=await send("1234",post.updated_at,"/calendar?view=month&month="+month);
