@@ -5,12 +5,22 @@
 import original from "./index.ts";
 import type {Env} from "./env.ts";
 import {pr90StagingAllowed} from "./pr90-staging-policy.ts";
+import {getPost} from "./db.ts";
 
 export default {
   async fetch(request:Request,env:Env,context:ExecutionContext):Promise<Response> {
     if ((env as Env & {STAGING_NO_PUBLISH?:string}).STAGING_NO_PUBLISH!=="1")
       return new Response("Staging configuration incomplete.",{status:503});
     const path=new URL(request.url).pathname;
+    // Stage accepts calendar moves ONLY for an unapproved draft. Do not let
+    // isolated staging call a provider-side reschedule even if a test seed has
+    // mistakenly imported an already-approved post.
+    const move=/^\/post\/(p_[a-z0-9]+)\/reschedule$/.exec(path);
+    if (request.method==="POST" && move) {
+      const post=await getPost(env.DB,move[1]);
+      if (!post || post.approved_at || (post.status!=="draft" && post.status!=="rejected"))
+        return new Response("Only unapproved staging drafts can be moved.",{status:403});
+    }
     if (!pr90StagingAllowed(request.method,path))
       return new Response("Publication and integration actions are disabled in isolated staging.",
         {status:403,headers:{"Cache-Control":"no-store","X-GS-Staging-No-Publish":"1"}});
