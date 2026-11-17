@@ -219,10 +219,11 @@ export async function startTikTokInboxTransfer(
   const size=await privateVideoSize(env,media);
   if(!size||size>PRIVATE_VIDEO_MAX_BYTES)
     throw new Error("TikTok requires a readable, private MP4 no larger than 300 MB.");
-  // TikTok accepts a single 64 MB upload or sequential 10 MB chunks, where
-  // the final chunk absorbs the trailing bytes.
-  const chunkSize=size<=64_000_000?size:10_000_000;
-  const chunkCount=size<=64_000_000?1:Math.floor(size/chunkSize);
+  // TikTok accepts 5-64 MB chunks. Use a 20 MB maximum here because
+  // privateVideoRange intentionally refuses larger in-memory reads.
+  // For multi-part transfers, the last chunk absorbs any trailing bytes.
+  const chunkSize=size<=20_000_000?size:10_000_000;
+  const chunkCount=size<=20_000_000?1:Math.floor(size/chunkSize);
   await ensureTikTokInboxSchema(env.DB);
   // Claim the same saved version before the external call.
   const now = await claimTikTokTransfer(env.DB, postId, expectedVersion, media, actor, "MEDIA_UPLOAD", "VIDEO");
