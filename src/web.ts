@@ -9,7 +9,7 @@ import { markTikTokInboxApproved, markTikTokCreatorPublished, reopenTikTokInboxD
 import { checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { POSTER_FAVICON } from "./favicon.ts";
-import { CALENDAR_JS, renderCalendar, renderMonthCalendar, weekStart, weekRange, monthStart, monthRange } from "./calendar.ts";
+import { CALENDAR_JS, MONTH_CALENDAR_JS, renderCalendar, renderMonthCalendar, weekStart, weekRange, monthStart, monthRange } from "./calendar.ts";
 import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
 import { NEW_DRAFT_JS } from "./new-draft-client.ts";
 import { CHAT_UPLOAD_JS } from "./chat-upload.ts";
@@ -67,6 +67,19 @@ const redirect = (location: string, headers?: Headers): Response => {
 
 function safeNext(next: string | null): string {
   return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+}
+
+/** Only return to the precise planner page after a successful PIN-gated move. */
+export function calendarReturnAfterMove(returnTo: string, id: string): string {
+  const week = /^\/calendar\?(?:view=week&)?week=(\d{4}-\d{2}-\d{2})$/.exec(returnTo);
+  if (week) {
+    try { weekStart(week[1]); return returnTo; } catch { /* invalid date */ }
+  }
+  const month = /^\/calendar\?view=month&month=(\d{4}-(?:0[1-9]|1[0-2]))(?:&month_page=([1-9]\d{0,2}))?$/.exec(returnTo);
+  if (month) {
+    try { monthStart(month[1]); return returnTo; } catch { /* invalid month */ }
+  }
+  return "/post/" + id;
 }
 
 function sameOrigin(req: Request): boolean {
@@ -138,6 +151,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const uploadAction = /^\/post\/(p_[a-z0-9]+)\/(upload-link|attach-image|video-link|attach-video|import-tiktok-image|import-video)$/.exec(path);
   if (uploadAction && req.method === "POST") return draftImageAction(req, env, session, uploadAction[1], uploadAction[2]);
   if (path === "/calendar.js" && req.method === "GET") return new Response(CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+  if (path === "/calendar-month.js" && req.method === "GET") return new Response(MONTH_CALENDAR_JS, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   // Server clock and schedule rules for the editor's "Earliest valid time" button (#61). Read-only.
   if (path === "/earliest-time" && req.method === "GET") {
     const photos = Math.max(0, Math.min(1000, Number(url.searchParams.get("photos")) || 0));
@@ -422,7 +436,7 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     view==="month"?(monthPage-1)*MONTH_CALENDAR_PAGE_SIZE:0);
   const csrf = await csrfToken(env,session);
   const calendar = view==="month" ? renderMonthCalendar(env,calendarPosts.slice(0,MONTH_CALENDAR_PAGE_SIZE),month,now,
-    {page:monthPage,hasNext:calendarPosts.length>MONTH_CALENDAR_PAGE_SIZE})
+    {page:monthPage,hasNext:calendarPosts.length>MONTH_CALENDAR_PAGE_SIZE},csrf)
     : renderCalendar(env,calendarPosts,csrf,start,now);
   const draftSearch = normalizedSearch(params.get("q") ?? "");
   const drafts = await searchPosts(env.DB,"drafts",draftSearch,viewPage(params,"drafts_page"));
@@ -1230,7 +1244,7 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       if (error) return postPage(env, session, id, { error }, 400);
       await reschedulePost(env, id, next, current.updated_at, session.login);
       const returnTo = String(form.get("return_to") || "");
-      return redirect(returnTo.startsWith("/calendar?week=") ? safeNext(returnTo) : "/post/" + id);
+      return redirect(calendarReturnAfterMove(returnTo,id));
     }
     if (action === "cancel") {
       await cancelScheduled(env, id, session.login);
