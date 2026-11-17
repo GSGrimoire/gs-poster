@@ -4,7 +4,7 @@
  */
 import type {Env} from "./env.ts";
 import {fetchImage} from "./media.ts";
-import {fetchVideo} from "./video.ts";
+import {openVideoStream} from "./video.ts";
 import {parseUploadRef} from "./upload.ts";
 import {randomToken,sha256} from "./session.ts";
 
@@ -92,9 +92,10 @@ export async function serveTikTokMedia(req:Request,env:Env):Promise<Response> {
   });
   try {
     if(row.kind==="video"){
-      const video=await fetchVideo(env,row.media_ref);
-      return new Response(video,{headers:{...extra,"Content-Type":"video/mp4",
-        "Content-Length":String(video.length)}});
+      const video=await openVideoStream(env,row.media_ref);
+      const mediaHeaders=new Headers({...extra,"Content-Type":"video/mp4"});
+      if(video.size!==null)mediaHeaders.set("Content-Length",String(video.size));
+      return new Response(video.body,{headers:mediaHeaders});
     }
     if(!env.IMAGES)throw new Error("Image conversion unavailable");
     const img=await fetchImage(env,row.media_ref);

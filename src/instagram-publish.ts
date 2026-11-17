@@ -23,7 +23,7 @@ import type { Env } from "./env.ts";
 import { audit, ensureSchema, getPost, INSTAGRAM_JOBS_DDL } from "./db.ts";
 import { graphGet, graphPost } from "./facebook.ts";
 import { fetchImage } from "./media.ts";
-import { fetchVideo } from "./video.ts";
+import { openVideoStream } from "./video.ts";
 import { randomToken, sha256 } from "./session.ts";
 import { esc } from "./html.ts";
 import { checkMessage } from "./validate.ts";
@@ -278,8 +278,10 @@ export async function serveInstagramMedia(req: Request, env: Env): Promise<Respo
   try {
     if (grant.kind === "video") {
       if (!job.video) return notFound();
-      const bytes = await fetchVideo(env, job.video);
-      return new Response(bytes, { headers: { ...headers, "Content-Type": type, "Content-Length": String(bytes.byteLength) } });
+      const video = await openVideoStream(env,job.video);
+      const responseHeaders = new Headers({ ...headers, "Content-Type": type });
+      if(video.size!==null)responseHeaders.set("Content-Length",String(video.size));
+      return new Response(video.body,{headers:responseHeaders});
     }
     const item = job.items[grant.item_index];
     if (!item) return notFound();

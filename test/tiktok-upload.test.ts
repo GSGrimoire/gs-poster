@@ -84,9 +84,15 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
   const fakeBytes=new Uint8Array(6*1024*1024);
   fakeBytes.set([0,0,0,24,102,116,121,112,105,115,111,109],0);
   env.UPLOADS={
-    get:async(key:string)=>{
+    head:async(key:string)=>{
       assert.equal(key,"uploads/"+"a".repeat(32)+".mp4");
-      return {arrayBuffer:async()=>fakeBytes.buffer};
+      return {size:fakeBytes.length};
+    },
+    get:async(key:string,options?:{range?:{offset:number;length:number}})=>{
+      assert.equal(key,"uploads/"+"a".repeat(32)+".mp4");
+      const range=options?.range;
+      const bytes=range?fakeBytes.slice(range.offset,range.offset+range.length):fakeBytes;
+      return {arrayBuffer:async()=>bytes.buffer};
     }
   } as unknown as R2Bucket;
   const p=await createPost(env.DB,{

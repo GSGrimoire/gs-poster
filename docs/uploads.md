@@ -1,21 +1,21 @@
 # Private file uploads for GS Poster
 
 The OAuth-protected Model Context Protocol tool `request_upload(filename)` issues a
-10-minute, one-use HTTPS PUT link for a JPG, PNG, GIF, or MP4 file. A successful
+one-use private HTTPS upload link (10 minutes for images, 60 minutes for MP4 files) for a JPG, PNG, GIF, or MP4 file. A successful
 upload returns a private `upload://<id>.<extension>` reference that can be
 used in draft image fields. It is **not** a publication action.
 
 Usage:
 1. Call `request_upload` with the file's extension and copy its returned curl command.
-2. Replace `<path-to-file>` with an accessible local file path and run it.
+2. For images and videos up to 50 MB, replace `<path-to-file>` with a local file path and run the single-request command. For larger MP4 videos, open `upload_page_url` in a browser and upload in 5 MiB chunks. Do not use a single large PUT.
 3. Check that the response reports `ok: true`.
 4. Put the `upload://` reference in `draft_post`, then review and approve
    the post using the existing GitHub sign-in and approval PIN.
 
 ### Limits
-- One-time bearer link valid for 10 minutes; only a hash of the secret is stored.
-- JPG, PNG, GIF up to 10 MiB; MP4 up to 50,000,000 bytes.
-- Header signature and exact request-length checks.
+- One-time bearer link valid for 10 minutes for images and 60 minutes for MP4; only a hash of the secret is stored.
+- JPG, PNG, GIF up to 10 MiB; MP4 up to 300,000,000 bytes, sent in 5 MiB parts when above 50,000,000 bytes.
+- Header signature and exact request-length checks. Large videos use sequential R2 multipart transfers, server-held ETags and final range-hash verification.
 - Up to 60 upload links per rolling hour, and 3 GiB of stored/reserved uploads.
 - The D1 quota is allocated atomically so simultaneous links cannot exceed either limit.
 - Upload records count 47 days to allow a two-day margin beyond the 45-day R2
@@ -30,7 +30,7 @@ Usage:
   budget alert. Cloudflare alerts do not suspend billable usage.
 - Files remain private in Cloudflare R2, with lifecycle deletion after 45 days.
 - Old references cannot be used after their object expires.
-- The Worker does not provide a public GET download endpoint.
+- The Worker does not provide a public GET download endpoint. Expired, idle multipart sessions are aborted only after R2 confirms the abort; uncertain completion retains its quota reservation.
 
 ### Required configuration
 1. Enable R2 on the Cloudflare account. A payment method may be requested.

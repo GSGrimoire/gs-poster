@@ -5,7 +5,7 @@
 import type { Env } from "./env.ts";
 import type { BlueskyDraft } from "./db.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
-import { checkVideoUrl, fetchVideo } from "./video.ts";
+import { checkVideoUrl, openVideoStream } from "./video.ts";
 
 const XRPC = "https://bsky.social/xrpc/";
 export const BSKY_IMAGE_LIMIT = 1_950_000; // below the protocol's 2,000,000-byte limit
@@ -175,11 +175,16 @@ export async function publishBluesky(env: Env, id: string, draft: BlueskyDraft):
   let videoBlob: unknown = undefined;
   if (draft.video) {
     // First stage support: Bluesky processes a direct blob asynchronously after publication.
-    const bytes = await fetchVideo(env, draft.video.url);
+    // Stream the original 300 MB-capable MP4 to the PDS without ever
+    // buffering it in the 128 MB Worker isolate.
+    const source = await openVideoStream(env, draft.video.url);
     const uploaded = await api("com.atproto.repo.uploadBlob", {
-      method: "POST", headers: { ...bearer(session), "Content-Type": "video/mp4" },
-      body: bytes,
-    });
+      method: "POST",
+      headers: { ...bearer(session), "Content-Type": "video/mp4",
+        ...(source.size === null ? {} : { "Content-Length": String(source.size) }) },
+      body: source.body,
+      duplex: "half",
+    } as RequestInit & {duplex:"half"});
     if (!uploaded.blob) throw new Error("Bluesky did not return a video blob.");
     videoBlob = uploaded.blob;
   }
