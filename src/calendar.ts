@@ -24,6 +24,19 @@ export function weekRange(start: string, zone: string) {
   };
 }
 
+/** Only return to a validated calendar URL after a successful PIN-gated move. */
+export function calendarReturnAfterMove(returnTo: string, id: string): string {
+  const week = /^\/calendar\?(?:view=week&)?week=(\d{4}-\d{2}-\d{2})$/.exec(returnTo);
+  if (week) {
+    try { weekStart(week[1]); return returnTo; } catch { /* invalid date */ }
+  }
+  const month = /^\/calendar\?view=month&month=(\d{4}-(?:0[1-9]|1[0-2]))(?:&month_page=([1-9]\d{0,2}))?$/.exec(returnTo);
+  if (month) {
+    try { monthStart(month[1]); return returnTo; } catch { /* invalid month */ }
+  }
+  return "/post/" + id;
+}
+
 /** Month inputs use YYYY-MM, and day calculations stay in UTC until zone conversion. */
 export function monthStart(month: string): string {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Invalid calendar month");
