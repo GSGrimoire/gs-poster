@@ -51,12 +51,10 @@ export const CHAT_UPLOAD_JS=String.raw`
     busy=true;send.disabled=true;input.disabled=true;
     message("Uploading securely to private GS Poster storage...");
     try {
-      const result=await fetch(window.location.pathname,{
-        method:"PUT",body:selected,credentials:"omit",redirect:"manual",referrerPolicy:"no-referrer",
+      const response=await window.gsUploadFile(window.location.pathname,selected,(part,total)=>{
+        message("Uploading private media: "+Math.round(100*part/total)+"% ("+part+"/"+total+" parts)");
       });
-      const response=await result.json().catch(()=>({}));
-      if(!result.ok||!response.ok||!response.reference)
-        throw Error(response.error||"Upload was not confirmed ("+result.status+").");
+      if(!response.ok||!response.reference)throw Error("Upload was not confirmed.");
       form.hidden=true;success.hidden=false;reference.value=response.reference;
       message("Upload complete. Return to your Claude or ChatGPT conversation and continue the draft.");
       if(window.history?.replaceState)window.history.replaceState(null,"","/upload-complete");
@@ -99,7 +97,7 @@ export async function browserUploadPage(req:Request,env:Env):Promise<Response> {
     </style>
     <form class="step-card" id="chat-upload-form" data-ext="${esc(info.ext)}" data-max="${info.maxBytes}">
       <div class="step-heading"><span class="step-number">1</span><div><h3>Select your media</h3>
-      <p class="hint">This one-use link accepts a ${esc(info.ext.toUpperCase())} file, up to ${(info.maxBytes/1048576).toFixed(1)} MB.</p></div></div>
+      <p class="hint">This private link accepts a ${esc(info.ext.toUpperCase())} file, up to ${(info.maxBytes/1000000).toFixed(0)} MB. Videos over 50 MB upload in verified 5 MiB parts.</p></div></div>
       <div role="button" tabindex="0" id="chat-upload-drop" aria-label="Choose or drop the media file">Drop your file here or select it</div>
       <label for="chat-upload-file">Select file</label>
       <input type="file" id="chat-upload-file" accept="${esc(accept)}">
@@ -116,6 +114,7 @@ export async function browserUploadPage(req:Request,env:Env):Promise<Response> {
       <p class="choice-advice">This is not a public URL. The original file stays private until you separately approve publishing.</p>
     </section>
     <p role="status" aria-live="polite" id="chat-upload-status" class="form-info"></p>
+    <script src="/large-upload-client.js" defer></script>
     <script src="/upload-client.js" defer></script>
   `;
   const response=html(page("Upload media to GS Poster",body));
