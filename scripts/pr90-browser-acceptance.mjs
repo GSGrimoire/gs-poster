@@ -220,6 +220,42 @@ try {
     assert.equal(await desktop.locator("#cal-dialog[open]").count(),1,"drag must show a review dialog, not publish");
     await assertUnapproved(db,timed.id);
   });
+  await scenario("desktop-month-drag-opens-reviewed-date-dialog",desktop,async()=>{
+    const sourceDay=localDay(future);
+    const destDay=localDay(new Date(future.getTime()-86400_000));
+    await desktop.goto(ORIGIN+"/calendar?view=month&month="+sourceDay.slice(0,7));
+    const card=desktop.locator('.calendar-month-post[draggable="true"][data-id="'+timed.id+'"]');
+    assert.equal(await card.count(),1);
+    const originalTime=(await card.getAttribute("data-when")).slice(10);
+    const day=desktop.locator('.calendar-month-day[data-day="'+destDay+'"]');
+    assert.equal(await day.count(),1);
+    const prior=(await getPost(db,timed.id)).scheduled_at;
+    await drag(desktop,card,day,"Month pending draft moved to another day");
+    assert.equal(await desktop.locator("#month-cal-dialog[open]").count(),1);
+    assert.equal(await desktop.locator("#month-cal-form [name=when]").inputValue(),destDay+originalTime);
+    assert.equal(await desktop.locator("#month-cal-form").getAttribute("action"),"/post/"+timed.id+"/reschedule");
+    assert.equal((await getPost(db,timed.id)).scheduled_at,prior,"drag alone cannot reschedule");
+    await desktop.locator("#month-cal-dismiss").click();
+    assert.equal(await desktop.locator("#month-cal-dialog[open]").count(),0);
+    await assertUnapproved(db,timed.id);
+  });
+  await scenario("mobile-month-move-button-and-clickable-day",mobile,async()=>{
+    const sourceDay=localDay(future);
+    const destDay=localDay(new Date(future.getTime()-86400_000));
+    await mobile.goto(ORIGIN+"/calendar?view=month&month="+sourceDay.slice(0,7));
+    const card=mobile.locator('.calendar-month-post[data-id="'+timed.id+'"]');
+    const move=card.locator("xpath=following-sibling::button");
+    assert.equal(await move.count(),1,"Month must expose a touch-usable Move button");
+    await move.click();
+    assert.equal(await mobile.locator("#month-cal-dialog[open]").count(),1);
+    assert.equal(await mobile.locator("#month-cal-form [name=when]").inputValue(),
+      await card.getAttribute("data-when"));
+    await mobile.locator("#month-cal-dismiss").click();
+    await assertUnapproved(db,timed.id);
+    await mobile.locator('.calendar-month-day[data-day="'+destDay+'"]').evaluate(el=>el.click());
+    await waitFor(()=>Promise.resolve(mobile.url().includes("view=week&week="+destDay)),
+      "clicking empty Month day opens Week planner");
+  });
   await scenario("desktop-month-pagination-and-day-navigation",desktop,async()=>{
     await desktop.goto(ORIGIN+"/calendar?view=month&month=2031-04");
     assert.equal(await desktop.locator(".calendar-month-post").count(),750);
