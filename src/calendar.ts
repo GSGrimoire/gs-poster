@@ -464,7 +464,7 @@ export function renderMonthCalendar(
 }
 
 /** Month planner interactions. No POST until the user confirms the PIN form. */
-export const MONTH_CALENDAR_JS = \`
+export const MONTH_CALENDAR_JS = String.raw`
 (() => {
   const grid=document.querySelector(".calendar-month-grid");
   const dialog=document.getElementById("month-cal-dialog");
@@ -480,9 +480,9 @@ export const MONTH_CALENDAR_JS = \`
     });
   }
   function review(card,day) {
-    if(!card || !/^\\d{4}-\\d{2}-\\d{2}$/.test(day))return;
+    if(!card || !/^\d{4}-\d{2}-\d{2}$/.test(day))return;
     const saved=card.dataset.when;
-    if(!/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}$/.test(saved||""))return;
+    if(!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(saved||""))return;
     form.action="/post/"+encodeURIComponent(card.dataset.id)+"/reschedule";
     form.elements.namedItem("expected_updated_at").value=card.dataset.version;
     // Keep the original local clock time when moving between dates.
@@ -555,4 +555,4 @@ export const MONTH_CALENDAR_JS = \`
   document.getElementById("month-cal-dismiss").addEventListener("click",()=>dialog.close());
   dialog.addEventListener("close",clearDrag);
 })();
-\`;
+`;
