@@ -9,6 +9,7 @@ import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {createPost,ensureSchema,getPost} from "../src/db.ts";
 import {markTikTokCreatorPublished} from "../src/history.ts";
 import {ensureFacebookQueue} from "../src/facebook-queue.ts";
+import {approveAndPublish,retryFailedFacebook} from "../src/publish.ts";
 import {ensureTikTokSchema,sealTikTokTokens} from "../src/tiktok.ts";
 import {ensureTikTokInboxSchema} from "../src/tiktok-inbox.ts";
 import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
@@ -409,4 +410,44 @@ test("a draft save during TikTok preflight prevents the stale transfer and canno
   assert.equal(await transfer(p.id),null);
   assert.equal((await getPost(db,p.id))!.status,"draft");
   assert.match(await page(p.id),/Edited title/);
+});
+
+test("oversized Facebook video blocks mixed TikTok approval before any transfer or approval claim",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft({facebook:true,video:true,scheduledH:3});
+  const huge=new Uint8Array(20_000_001);
+  huge.set([0,0,0,20,102,116,121,112,105,115,111,109]);
+  await r2.put("uploads/"+p.video!.slice(9),huge);
+  const response=await approve(p,{target_facebook:"1"});
+  const pageText=await response.text();
+  assert.equal(response.status,400,pageText.slice(0,1000));
+  assert.match(pageText,/Facebook video must be between 1 byte and 20 MB/);
+  assert.equal(tiktokCalls().length,0,"a Facebook size error cannot send a selected TikTok sibling");
+  assert.equal(facebookCalls().length,0,"Meta must never be contacted");
+  assert.equal(await transfer(p.id),null);
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.status,"draft");
+  assert.equal(saved.approved_at,null);
+  assert.equal(saved.fb_post_id,null);
+});
+
+test("direct approve and failed Facebook retry also refuse oversized video before claiming a post",async()=>{
+  await reset();
+  const p=await ttDraft({facebook:true,video:true,scheduledH:3});
+  const huge=new Uint8Array(20_000_001);
+  huge.set([0,0,0,20,102,116,121,112,105,115,111,109]);
+  await r2.put("uploads/"+p.video!.slice(9),huge);
+  const privateEnv={DB:db,UPLOADS:r2,TIMEZONE:"Europe/Copenhagen"} as Env;
+  await assert.rejects(approveAndPublish(privateEnv,p.id,{
+    message:p.message,scheduledAt:new Date(p.scheduled_at!),actor:"test",
+    facebookEnabled:true,bluesky:null,expectedUpdatedAt:p.updated_at,
+  }),/20 MB/);
+  assert.equal((await getPost(db,p.id))!.status,"draft");
+  assert.equal((await getPost(db,p.id))!.approved_at,null);
+  await db.prepare("UPDATE posts SET status='failed',approved_at=? WHERE id=?")
+    .bind(new Date().toISOString(),p.id).run();
+  await assert.rejects(retryFailedFacebook(privateEnv,p.id,"test"),/20 MB/);
+  assert.equal((await getPost(db,p.id))!.status,"failed");
+  assert.equal((await getPost(db,p.id))!.fb_post_id,null);
+  assert.equal(facebookCalls().length,0);
 });

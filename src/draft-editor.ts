@@ -131,6 +131,30 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
       : base.video && form.get("remove_bs_video")!=="1"
         ? {url:base.video.url,alt:text(form,"bs_video_alt",base.video.alt).trim()} : null;
     if(copyFbVideo && cur.video)bsImages=[];
+    // Only copy images already attached to this post. Indices are resolved
+    // server-side against the saved media pool, never trusted as new URLs.
+    const addRaw=String(form.get("bs_add_photos")??"");
+    if(addRaw){
+      const pool=postPhotos(cur);
+      // Bound the field before allocating or parsing an untrusted list.
+      if(addRaw.length>15)errors.push("Invalid Bluesky photo selection.");
+      const parts=addRaw.length>15?[]:addRaw.split(",");
+      const indices=parts.map(Number);
+      if(!blueskyOn || parts.length>4 || !parts.every(x=>/^\d{1,3}$/.test(x)) ||
+          new Set(indices).size!==indices.length ||
+          indices.some(i=>!Number.isSafeInteger(i)||i<0||i>=pool.length))
+        errors.push("Invalid Bluesky photo selection. Reload and choose photos from this post.");
+      else if(bsVideo || copyFbVideo)
+        errors.push("Remove the Bluesky video and save before copying photos.");
+      else {
+        const existing=new Set(bsImages.map(i=>i.url));
+        if(indices.some(i=>existing.has(pool[i])) || bsImages.length+indices.length>4)
+          errors.push("Bluesky accepts at most four distinct photos. Remove unwanted photos first.");
+        else for(const i of indices)bsImages.push({
+          url:pool[i],alt:text(form,"bs_add_alt_"+i,"").trim(),
+        });
+      }
+    }
     for (const a of [...bsImages.map((x) => x.alt), ...(bsVideo ? [bsVideo.alt] : [])])
       if (blueskyOn && a.length > MAX_ALT) errors.push(`Alternative text is limited to ${MAX_ALT} characters.`);
     const patreonUrl = text(form, "bs_patreon_url", base.patreon?.url ?? "").trim();
@@ -225,11 +249,11 @@ export interface EditorView {
   createdLine: string;
 }
 
-function tile(src: string, alt: string, removeName: string, extra = "", index?: number): string {
+function tile(src: string, alt: string, removeName: string, extra = "", index?: number, copyIndex?: number): string {
   const moves = index === undefined ? "" : `<div class="tile-move"><span class="tile-pos" aria-hidden="true">${index + 1}</span>
       <button type="button" data-move="-1" aria-label="Move ${esc(alt)} earlier">&#8249;</button>
       <button type="button" data-move="1" aria-label="Move ${esc(alt)} later">&#8250;</button></div>`;
-  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}" draggable="true"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
+  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}" draggable="true"`}${copyIndex === undefined ? "" : ` data-copy-index="${copyIndex}"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
     <span class="tile-ratio" data-ratio-badge hidden></span></div>${moves}
     <label class="tile-remove"><input type="checkbox" name="${esc(removeName)}" value="1"> Remove</label>${extra}</figure>`;
 }
@@ -299,17 +323,17 @@ export function renderDraftEditor(v: EditorView): string {
   const states = targetStates(p);
   const fbMedia = p.video
     ? video(`/video/${p.id}/facebook`, "remove_fb_video")
-    : p.images.map((_, i) => tile(`/media/${p.id}/${i}`, `Facebook photo ${i + 1}`, "remove_fb_" + i, "", p.images.length > 1 ? i : undefined)).join("");
+    : p.images.map((url, i) => tile(`/media/${p.id}/${i}`, `Facebook photo ${i + 1}`, "remove_fb_" + i, "", p.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
   const bsMedia = bs?.video
     ? video(`/video/${p.id}/bluesky`, "remove_bs_video",
       `<label>Describe the video<input type="text" name="bs_video_alt" maxlength="${MAX_ALT}" value="${esc(bs.video.alt)}"></label>`)
     : (bs?.images ?? []).map((img, i) => tile(`/media/${p.id}/${i}?platform=bluesky`, `Bluesky photo ${i + 1}`, "remove_bs_" + i,
-      `<label>Describe the image<input type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined)).join("");
+      `<label>Describe the image<input type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined, pool.indexOf(img.url))).join("");
   const ttMedia = ttShared
     ? `<p class="hint shared-note">TikTok is currently using legacy shared Facebook media. Enabling TikTok and saving makes its gallery independent.</p>`
     : tt.video
       ? video(`/video/${p.id}/tiktok`, "remove_tt_video")
-      : tt.images.map((_, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined)).join("");
+      : tt.images.map((url, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
   const empty = '<p class="hint">Nothing yet.</p>';
   const when = p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), v.tz) : "";
   const releaseTargets = [
@@ -361,6 +385,7 @@ export function renderDraftEditor(v: EditorView): string {
       <div class="eyebrow">Release</div>
       <h3>${!fbBs && !igOk ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
       ${releaseTargets}
+      ${p.facebook_enabled && p.video ? '<p class="hint">Facebook video limit: 20 MB. Private video uploads allow up to 50 MB for other platforms. A larger video cannot be approved for Facebook until you replace it or deselect Facebook.</p>' : ''}
       ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
       ${v.mediaLooksPending ? `<label><input type="checkbox" name="publish_without_media" value="1"> The name says media is pending, but Facebook has none. Publish without media anyway.</label>` : ""}
@@ -495,6 +520,15 @@ export function renderDraftEditor(v: EditorView): string {
 .tile.dragging,.ig-item.dragging{opacity:.45}
 .tile.drop-target,.ig-item.drop-target{outline:2px dashed var(--accent2);outline-offset:2px}
 .ig-drag{cursor:grab;user-select:none;border:1px dashed var(--line);border-radius:6px;padding:4px 7px;font:600 12px system-ui,sans-serif}
+.bs-copy-drop{border:2px dashed var(--line);border-radius:9px;padding:14px;margin:10px 0;text-align:center;font:13px system-ui,sans-serif}
+.bs-copy-drop:focus-visible,.bs-copy-drop.drop-target{border-color:var(--accent2);background:color-mix(in srgb,var(--accent2) 10%,var(--panel))}
+.bs-source-pool{display:grid;grid-template-columns:repeat(auto-fill,minmax(95px,1fr));gap:8px;margin:10px 0}
+.bs-source-item{border:1px solid var(--line);padding:6px;border-radius:8px;display:grid;gap:5px;cursor:grab;min-width:0}
+.bs-source-item img{width:100%;height:85px;object-fit:contain;background:#0002}
+.bs-source-item button{font-size:12px;padding:5px}
+.bs-staged-item{border:1px solid var(--line);padding:8px;border-radius:8px;display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;margin:7px 0}
+.bs-staged-item img{width:72px;height:82px;object-fit:contain}
+.bs-staged-item input{width:100%}
 .tile-move button{padding:2px 9px;font-size:15px;line-height:1.2}
 .tile-move button:disabled{opacity:.35}
 .tile-pos{font:650 12px system-ui,sans-serif;color:var(--muted);margin-right:auto}
@@ -543,6 +577,7 @@ export function renderDraftEditor(v: EditorView): string {
           <label for="ed-message" class="cap-label">Caption</label>
           <textarea id="ed-message" name="message" maxlength="${FB_MAX}" data-max="${FB_MAX}" data-caption="facebook">${esc(p.message)}</textarea>
           <div class="field-meter"></div>
+          <p class="hint">${p.video ? "Facebook video limit: 20 MB, even though private storage and other targets allow up to 50 MB." : "Drag photos to change their order, or use the arrow buttons."}</p>
           <div class="tiles" data-media="facebook" data-order="order_fb">${fbMedia || empty}</div>
           ${!p.video && p.images.length > 1 ? `<input type="hidden" name="order_fb" value="${Array.from({ length: p.images.length }, (_, i) => i).join(",")}">` : ""}
         </article>
@@ -593,7 +628,21 @@ export function renderDraftEditor(v: EditorView): string {
           <textarea id="ed-bs" name="bs_caption" data-max="${BSKY_TEXT_LIMIT}" data-graphemes="1" data-caption="bluesky" placeholder="A short companion caption">${esc(bs?.caption ?? "")}</textarea>
           <div class="field-meter"></div>
           ${p.video ? `<div class="row"><button type="button" id="bs-copy-fb-video">Use Facebook video for Bluesky</button><input type="hidden" name="bs_copy_fb_video" id="bs-copy-fb-video-flag" value="0"></div><label for="bs-copy-video-alt">Video description for Bluesky when copying<input id="bs-copy-video-alt" type="text" name="bs_copy_video_alt" maxlength="1000" value="${esc(bs?.video?.alt??"")}" placeholder="Describe the action in the video"></label>` : ""}
+          <p class="hint">Drag photos within this gallery to reorder them, or use the arrows.</p>
           <div class="tiles" data-media="bluesky" data-order="order_bs">${bsMedia || empty}</div>
+          ${pool.length ? `<details class="bs-copy-picker"${on.bluesky && (bs?.images.length ?? 0) === 0 ? " open" : ""}><summary>Copy existing photos to Bluesky</summary>
+            <p class="hint">Drag a photo from another platform into the drop area, or choose Copy below. Originals stay on their current platforms. Bluesky allows four photos and each needs alternative text.</p>
+            <div id="bs-copy-drop" class="bs-copy-drop" tabindex="0">Drop an existing photo here to copy it into Bluesky</div>
+            <div class="bs-source-pool" id="bs-source-pool">
+              ${pool.map((url,i)=>`<div class="bs-source-item" draggable="true" data-pool-index="${i}">
+                <img src="/media/${p.id}/${i}?platform=pool" loading="lazy" alt="Existing photo ${i+1}">
+                <button type="button" data-copy-bs="${i}">Copy photo ${i+1}</button></div>`).join("")}
+            </div>
+            <input type="hidden" id="bs-add-photos" name="bs_add_photos" value="">
+            <div id="bs-copy-staged" class="bs-copy-staged" aria-live="polite"></div>
+            <button type="button" id="bs-copy-save" disabled>Copy selected photos to Bluesky</button>
+            <p class="hint" id="bs-copy-status" role="status" aria-live="polite">Choose photos, describe each one, then press Copy selected photos.</p>
+          </details>` : `<p class="hint">Attach a photo to this post to make it available for Bluesky.</p>`}
           ${on.bluesky && bs?.video?.url && parseGitHubUrl(bs.video.url) ? `<div class="row"><button type="button" data-prepare-video="bluesky">Prepare Bluesky video privately</button></div>` : ""}
           ${bs && !bs.video && bs.images.length > 1 ? `<input type="hidden" name="order_bs" value="${Array.from({ length: bs.images.length }, (_, i) => i).join(",")}">` : ""}
           <details${bs?.patreon ? " open" : ""}><summary>Patreon link card (optional)</summary>
@@ -619,6 +668,7 @@ export function renderDraftEditor(v: EditorView): string {
           <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. After saving, prepare any linked GitHub photos for TikTok using the action below.</p>` : ""}
           ${p.video ? `<div class="row"><button type="button" id="tt-copy-fb-video">Use Facebook video for TikTok</button></div>
           <p class="hint">Replaces the TikTok gallery with a separate reference to the existing Facebook video. Facebook remains unchanged. Save first, then prepare linked GitHub video privately for TikTok.</p>` : ""}
+          <p class="hint">Drag photos within this gallery to reorder them, or use the arrows.</p>
           <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
           ${on.tiktok && !ttShared && tt.video && parseGitHubUrl(tt.video) ? `<div class="row"><button type="button" data-prepare-video="tiktok">Prepare TikTok video privately</button></div>` : ""}
           ${p.tiktok_enabled && ttImportIndices.length ? `<div class="row"><button type="button" id="tt-import" data-indices="${esc(JSON.stringify(ttImportIndices))}">Prepare ${ttImportIndices.length} linked photo${ttImportIndices.length === 1 ? "" : "s"} for TikTok</button></div>
@@ -662,14 +712,20 @@ export function renderDraftEditor(v: EditorView): string {
     ${v.xCard ?? ""}
     ${release}
     ${v.tiktokCard}
-    <details class="ed-card"><summary>Reject and send back to the assistant</summary>
+    ${p.status === "rejected" ? `<form method="post" action="/post/${id}/return-to-drafts" class="ed-card">
+      <input type="hidden" name="csrf" value="${esc(v.csrf)}">
+      <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
+      <h3>Return rejected post to drafts</h3>
+      <p class="hint">Keeps the captions and media, changes the status to Draft, and sends nothing. A separate approval is still required.</p>
+      <button type="submit">Return to drafts</button>
+    </form>` : `<details class="ed-card"><summary>Reject and send back to the assistant</summary>
       <form method="post" action="/post/${id}/reject">
         <input type="hidden" name="csrf" value="${esc(v.csrf)}">
         <label for="reason">What should change? (optional)</label>
         <input id="reason" type="text" name="reason" maxlength="500">
         <div class="row"><button class="danger">Reject</button></div>
       </form>
-    </details>
+    </details>`}
   </aside>
   </div>
 </div>
@@ -774,7 +830,9 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         hashtags: (text.match(/(^|[^\p{L}\p{N}_&])#[\p{L}\p{N}_]+/gu) || []).length, lowRes: igApi.lowRes() };
     }
     const tiles = kept(mediaBox(card));
-    const photos = tiles.filter(t => t.dataset.tile === "photo");
+    const staged = id === "bluesky"
+      ? Array.from(card.querySelectorAll("#bs-copy-staged [data-staged]")) : [];
+    const photos = [...tiles.filter(t => t.dataset.tile === "photo"), ...staged];
     let text = card.querySelector("[data-caption]")?.value || "";
     if (id === "tiktok" && !text.trim()) text = document.getElementById("ed-message")?.value || "";
     return {
@@ -1141,9 +1199,10 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   // CSRF and version-fenced save runs and returns JSON. One save at a time;
   // edits made while one is in flight are saved next. A refused save keeps
   // every edit on the page. Saving never approves or publishes.
-  const STRUCTURAL = /^(p_|remove_|order_|tt_copy_fb$|bs_copy_fb_video$|ig_video_source$|tiktok_title$|tiktok_caption$|when$)/;
+  const STRUCTURAL = /^(p_|remove_|order_|bs_add_photos$|tt_copy_fb$|bs_copy_fb_video$|ig_video_source$|tiktok_title$|tiktok_caption$|when$)/;
   const structural = snap => JSON.stringify(JSON.parse(snap).filter(([k]) => STRUCTURAL.test(k)));
   let timer = null, inflight = false, stopped = false, needsReload = false;
+  let copyConfirmed = false;
   function setVersion(v) {
     document.querySelectorAll('input[name="expected_updated_at"]').forEach(i => { i.value = v; });
     const panel = document.getElementById("draft-media-panel");
@@ -1154,7 +1213,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     // Platforms, removed media or the time changed: reload so the release
     // panel lists exactly what is saved. Not while the time field is in use.
     const focused = document.activeElement;
-    if (focused === when || focused?.name === "tiktok_title" || focused?.name === "tiktok_caption") {
+    if (focused === when || focused?.name === "tiktok_title" || focused?.name === "tiktok_caption" || focused?.name?.startsWith("bs_add_alt_")) {
       focused.addEventListener("blur", maybeReload, { once: true }); return;
     }
     submitting = true;
@@ -1167,11 +1226,18 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   }
   async function autosave() {
     if (stopped || !dirty()) { refresh(); return; }
+    // The new Bluesky photo list is an append-only one-shot operation.
+    // Do not autosave it repeatedly while descriptions are being typed.
+    if (bsAddField?.value && !copyConfirmed) {
+      saveState = "Choose Copy selected photos to save the Bluesky gallery.";
+      refresh(); return;
+    }
     if (inflight || window.gsMediaBusy) { schedule(); return; }
     inflight = true;
     saveState = "Saving...";
     refresh();
     const sent = snapshot(), before = baseline;
+    let copied = false;
     try {
       const r = await fetch(form.action, { method: "POST", body: new FormData(form), credentials: "same-origin",
         headers: { "X-GS-Autosave": "1", Accept: "application/json" } });
@@ -1182,17 +1248,24 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         baseline = sent;
         saveState = "";
         preflightStale = true;
+        copied = copyConfirmed && !!bsAddField?.value;
         if (structural(before) !== structural(sent)) needsReload = true;
         document.dispatchEvent(new CustomEvent("gs-saved"));
       } else {
         // 409: changed elsewhere or no longer a draft. Stop, keep the edits.
         if (r.status === 409) stopped = true;
+        copyConfirmed = false;
         saveState = "Save failed: " + (body.error || "the server answered " + r.status + ".") + (stopped ? " Your text is still on this page: copy what you need before reloading." : "");
       }
     } catch {
-      saveState = "Save failed: no connection. Your changes are still here and will be saved when you edit again.";
+      const uncertainCopy = copyConfirmed && !!bsAddField?.value;
+      copyConfirmed = false;
+      saveState = uncertainCopy
+        ? "Save failed: connection lost. Reload and inspect Bluesky before retrying the photo copy."
+        : "Save failed: no connection. Your changes are still here and will be saved when you edit again.";
     } finally {
       inflight = false;
+      if (copied) { submitting = true; location.reload(); return; }
       refresh();
       if (!stopped && dirty() && !saveState) schedule();
       maybeReload();
@@ -1202,7 +1275,11 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   form.addEventListener("change", () => schedule());
   // The Save button saves now instead of a full page post; without JavaScript
   // the form still posts normally.
-  form.addEventListener("submit", e => { e.preventDefault(); clearTimeout(timer); autosave(); });
+  form.addEventListener("submit", e => {
+    e.preventDefault(); clearTimeout(timer);
+    if (bsAddField?.value) copyConfirmed = true;
+    autosave();
+  });
   // Enter inside the media uploader must not submit the editor form.
   document.getElementById("draft-media-panel")?.addEventListener("keydown", e => {
     if (e.key === "Enter" && e.target instanceof HTMLInputElement) e.preventDefault();
@@ -1238,14 +1315,102 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     const again = tile.querySelector('[data-move="' + btn.dataset.move + '"]');
     (again && !again.disabled ? again : tile.querySelector("[data-move]:not([disabled])"))?.focus();
   });
+  // Stage existing saved media only. The browser submits pool indices; the
+  // server resolves them from the current post and validates the count.
+  const bsStaged = document.getElementById("bs-copy-staged");
+  const bsAddField = document.getElementById("bs-add-photos");
+  const bsStatus = document.getElementById("bs-copy-status");
+  const bsCopySave = document.getElementById("bs-copy-save");
+  bsCopySave?.addEventListener("click", () => {
+    const missing = Array.from(bsStaged.querySelectorAll('input[name^="bs_add_alt_"]'))
+      .find(input => !input.value.trim());
+    if (missing) {
+      bsStatus.textContent = "Describe each selected photo before copying.";
+      missing.focus(); return;
+    }
+    copyConfirmed = true;
+    clearTimeout(timer);
+    autosave();
+  });
+  function stageBlueskyPhoto(index) {
+    const source = document.querySelector('.bs-source-item[data-pool-index="' + index + '"]');
+    if (!source || !bsStaged || !bsAddField) return;
+    if (!form.querySelector('input[name="p_bluesky"]')?.checked) {
+      bsStatus.textContent = "Select Bluesky in Platforms first."; return;
+    }
+    const video = form.querySelector('[name="remove_bs_video"]');
+    if (video && !video.checked) {
+      bsStatus.textContent = "Remove the Bluesky video and save before adding photos."; return;
+    }
+    const present = Array.from(form.querySelectorAll('[data-media="bluesky"] [data-tile="photo"]'))
+      .filter(t => !t.querySelector('.tile-remove input')?.checked);
+    const selected = Array.from(bsStaged.querySelectorAll("[data-staged]"));
+    if (present.some(t => t.dataset.copyIndex === String(index)) ||
+        selected.some(t => t.dataset.staged === String(index))) {
+      bsStatus.textContent = "This photo is already selected for Bluesky."; return;
+    }
+    if (present.length + selected.length >= 4) {
+      bsStatus.textContent = "Bluesky allows four photos. Remove one before copying another."; return;
+    }
+    const item = document.createElement("div");
+    item.className = "bs-staged-item"; item.dataset.staged = String(index);
+    const thumb = document.createElement("img");
+    thumb.src = source.querySelector("img").src;
+    thumb.alt = "Selected photo " + (index + 1);
+    const fields = document.createElement("div");
+    const label = document.createElement("label");
+    label.textContent = "Alternative text for copied photo " + (index + 1);
+    const alt = document.createElement("input");
+    alt.type = "text"; alt.maxLength = 1000; alt.name = "bs_add_alt_" + index;
+    alt.placeholder = "Describe what this image shows";
+    label.append(alt);
+    const remove = document.createElement("button");
+    remove.type = "button"; remove.textContent = "Undo copy";
+    remove.addEventListener("click", () => { item.remove(); syncStaged(); });
+    fields.append(label, remove);
+    item.append(thumb, fields);
+    bsStaged.append(item);
+    bsStatus.textContent = "Photo staged. Describe it, then press Copy selected photos.";
+    syncStaged();
+    alt.focus();
+  }
+  function syncStaged() {
+    if (!bsAddField || !bsStaged) return;
+    bsAddField.value = Array.from(bsStaged.querySelectorAll("[data-staged]"))
+      .map(t => t.dataset.staged).join(",");
+    if (bsCopySave) bsCopySave.disabled = !bsAddField.value;
+    bsAddField.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  form.addEventListener("click", e => {
+    const button = e.target.closest("[data-copy-bs]");
+    if (button) stageBlueskyPhoto(Number(button.dataset.copyBs));
+  });
   let dragTile = null;
+  const bsDrop = document.getElementById("bs-copy-drop");
+  bsDrop?.addEventListener("dragover", e => {
+    if (!dragTile || !("copyIndex" in dragTile.dataset || "poolIndex" in dragTile.dataset)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    bsDrop.classList.add("drop-target");
+  });
+  bsDrop?.addEventListener("dragleave", () => bsDrop.classList.remove("drop-target"));
+  bsDrop?.addEventListener("drop", e => {
+    if (!dragTile) return;
+    e.preventDefault(); e.stopPropagation();
+    const index = Number(dragTile.dataset.copyIndex ?? dragTile.dataset.poolIndex);
+    bsDrop.classList.remove("drop-target");
+    dragTile.classList.remove("dragging");
+    dragTile = null;
+    if (Number.isSafeInteger(index)) stageBlueskyPhoto(index);
+  });
   form.addEventListener("dragstart", e => {
-    const tile = e.target.closest('.tiles[data-order] > [data-index][draggable="true"]');
+    const tile = e.target.closest('.tiles[data-order] > [data-index][draggable="true"]') ||
+      e.target.closest('.bs-source-item[draggable="true"]');
     if (!tile || !e.dataTransfer) return;
     dragTile = tile;
     tile.classList.add("dragging");
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", tile.dataset.index);
+    e.dataTransfer.setData("text/plain", String(tile.dataset.index ?? tile.dataset.poolIndex));
   });
   form.addEventListener("dragover", e => {
     if (!dragTile) return;
@@ -1274,6 +1439,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     if (dragTile) dragTile.classList.remove("dragging");
     dragTile = null;
     form.querySelectorAll(".tiles > .drop-target").forEach(x => x.classList.remove("drop-target"));
+    bsDrop?.classList.remove("drop-target");
   });
   form.querySelectorAll("[data-order]").forEach(box => {
     const tiles = box.querySelectorAll(":scope > [data-index]");

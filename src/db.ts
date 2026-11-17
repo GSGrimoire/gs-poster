@@ -303,13 +303,20 @@ export async function listPosts(db: D1Database, opts: { status?: PostStatus; lim
   return results.map(fromRow);
 }
 
-/** Load a specific week by effective calendar time instead of the newest 200 records. */
-export async function listCalendarPosts(db: D1Database, from: string, to: string): Promise<Post[]> {
+/** Month pages cap response size without silently discarding high-volume days.
+ * One extra row detects whether another page is available. */
+export const MONTH_CALENDAR_PAGE_SIZE = 750;
+export async function listCalendarPosts(
+  db: D1Database, from: string, to: string, all = false, offset = 0,
+): Promise<Post[]> {
   await ensureSchema(db);
   const sql = POST_SELECT + " WHERE COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) >= ?"
     + " AND COALESCE(p.scheduled_at, CASE WHEN p.status = 'published' THEN p.approved_at END, p.created_at) < ?"
-    + " ORDER BY COALESCE(p.scheduled_at, p.approved_at, p.created_at) LIMIT 500";
-  const { results } = await db.prepare(sql).bind(from, to).all<Row>();
+    + " ORDER BY COALESCE(p.scheduled_at, p.approved_at, p.created_at), p.id"
+    + " LIMIT ? OFFSET ?";
+  const limit = all ? MONTH_CALENDAR_PAGE_SIZE + 1 : 500;
+  const pageOffset = all && Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+  const { results } = await db.prepare(sql).bind(from,to,limit,pageOffset).all<Row>();
   return results.map(fromRow);
 }
 

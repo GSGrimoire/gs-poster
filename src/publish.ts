@@ -6,7 +6,7 @@ import type { Env } from "./env.ts";
 import {getTikTokInboxTransfer} from "./tiktok-inbox.ts";
 import { audit, rejectDraft, claimForPublish, claimDueBluesky, claimFailedBluesky, dueBlueskyIds, getPost, listPosts, setBlueskyStatus, updatePost, updateCalendarTime, updateCalendarCaptions, reopenCancelledDraft, reopenFailedDraft, type Post, type ApprovalSnapshot, tiktokMedia } from "./db.ts";
 import { publishBluesky } from "./bluesky.ts";
-import { createFeedPost, createPageVideo, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
+import { createFeedPost, createPageVideo, assertFacebookVideoSize, getPageVideoInfo, deleteFbPost, getPostInfo, uploadUnpublishedPhoto, rescheduleFbPost, editFbCaption, normalizeCaption } from "./facebook.ts";
 import { fetchVideo } from "./video.ts";
 import { fetchImage } from "./media.ts";
 import { BULK_FACEBOOK_THRESHOLD, enqueueFacebookUpload, ensureFacebookQueue } from "./facebook-queue.ts";
@@ -19,6 +19,15 @@ export interface ApproveInput extends ApprovalSnapshot {
 /** Called exclusively by an authenticated human approval on the review site. */
 export async function approveAndPublish(env: Env, id: string, input: ApproveInput): Promise<Post> {
   const db = env.DB;
+  // A Facebook video's 20 MB provider limit must be checked BEFORE approval.
+  // Keep the fetched bytes for the actual send to avoid a second full read.
+  // claimForPublish still fences the post's saved version after this await.
+  const saved = await getPost(db,id);
+  let facebookVideoBytes:Uint8Array|null = null;
+  if (input.facebookEnabled && saved?.video && saved.updated_at === input.expectedUpdatedAt) {
+    facebookVideoBytes = await fetchVideo(env,saved.video);
+    assertFacebookVideoSize(facebookVideoBytes.length);
+  }
   if (!(await claimForPublish(db, id, input))) throw new Error("This post is no longer a draft. It may already have been approved.");
   const post = (await getPost(db, id))!;
   const scheduledUnix = post.scheduled_at ? Math.floor(Date.parse(post.scheduled_at) / 1000) : undefined;
@@ -29,7 +38,8 @@ export async function approveAndPublish(env: Env, id: string, input: ApproveInpu
     try {
       if (post.video) {
         if (post.images.length) throw new Error("Facebook cannot publish a video and gallery in one post.");
-        const bytes = await fetchVideo(env, post.video);
+        const bytes = facebookVideoBytes ?? await fetchVideo(env, post.video);
+        assertFacebookVideoSize(bytes.length);
         // Retain an unknown-response failure as failed for human reconciliation.
         const videoId = await createPageVideo(env, {
           bytes, title: post.label || post.release || "GS Grimoire video",
@@ -153,6 +163,9 @@ export async function retryFailedFacebook(env: Env, id: string, actor: string): 
   if (p.scheduled_at && Date.parse(p.scheduled_at) - Date.now() < 12 * 60_000) {
     throw new Error("The scheduled Facebook time is too close or already passed. Do not retry a stale schedule.");
   }
+  // Do not consume a failed-post retry when its saved video cannot fit Facebook.
+  const facebookRetryBytes = p.video ? await fetchVideo(env,p.video) : null;
+  if (facebookRetryBytes) assertFacebookVideoSize(facebookRetryBytes.length);
   const claim = await updatePost(db, id, { status: "publishing", error: null }, ["failed"]);
   if (!claim) throw new Error("This Facebook retry was already claimed.");
   const scheduledUnix = p.scheduled_at ? Math.floor(Date.parse(p.scheduled_at) / 1000) : undefined;
@@ -160,7 +173,7 @@ export async function retryFailedFacebook(env: Env, id: string, actor: string): 
     let fbPostId: string;
     if (p.video) {
       if (p.images.length) throw new Error("A video and image gallery cannot be combined.");
-      const bytes = await fetchVideo(env,p.video);
+      const bytes = facebookRetryBytes!;
       fbPostId = await createPageVideo(env, {
         bytes, title:p.label || p.release || "GS Grimoire video",
         description:p.message,scheduledUnix,
