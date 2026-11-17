@@ -1,6 +1,7 @@
 /** Private one-time, non-public R2 uploads. Uploading never publishes a post. */
 import type { Env } from "./env.ts";
 import { randomToken, safeEqual, sha256 } from "./session.ts";
+import { PRIVATE_VIDEO_MAX_BYTES, SINGLE_REQUEST_VIDEO_MAX_BYTES, VIDEO_UPLOAD_PART_BYTES, VIDEO_UPLOAD_LINK_MS } from "./video-limits.ts";
 
 export const UPLOAD_RETENTION_DAYS = 45;
 export const UPLOAD_PUT_WINDOW_MS = 10 * 60 * 1000;
@@ -16,7 +17,7 @@ const TYPES: Record<UploadExt, { mime: string; max: number }> = {
   jpeg: { mime: "image/jpeg", max: 10 * 1024 * 1024 },
   png: { mime: "image/png", max: 10 * 1024 * 1024 },
   gif: { mime: "image/gif", max: 10 * 1024 * 1024 },
-  mp4: { mime: "video/mp4", max: 50_000_000 },
+  mp4: { mime: "video/mp4", max: PRIVATE_VIDEO_MAX_BYTES },
 };
 const REF = /^upload:\/\/([a-f0-9]{32})\.(jpg|jpeg|png|gif|mp4)$/;
 const key = (r: UploadRef) => "uploads/" + r.id + "." + r.ext;
@@ -115,7 +116,7 @@ export async function createUpload(env: Env, origin: string, input: { filename: 
   const id = [...crypto.getRandomValues(new Uint8Array(16))]
     .map(v => v.toString(16).padStart(2,"0")).join("");
   const token = randomToken();
-  const expires = new Date(now.getTime() + UPLOAD_PUT_WINDOW_MS).toISOString();
+  const expires = new Date(now.getTime() + (ext === "mp4" ? VIDEO_UPLOAD_LINK_MS : UPLOAD_PUT_WINDOW_MS)).toISOString();
 
   // Check and reserve in ONE SQLite write. Concurrent requests cannot
   // allocate above the space budget or rate limit.
@@ -144,7 +145,7 @@ export async function createUpload(env: Env, origin: string, input: { filename: 
   return {
     reference: formatUploadRef({id,ext}), upload_url: url, method: "PUT",
     expires_at: expires, max_bytes: max, keep_days: UPLOAD_RETENTION_DAYS,
-    curl: 'curl -sS --fail-with-body -T "<path-to-file>" "' + url + '"',
+    curl: 'For MP4 files over 50 MB, open upload_url in a browser and use the chunked uploader. For smaller files: curl -sS --fail-with-body -T "<path-to-file>" "' + url + '"',
   };
 }
 
@@ -173,7 +174,7 @@ function json(body: unknown, status = 200): Response {
 }
 /** A chunk-sized SHA-256 fence, so verification never retains an entire MP4. */
 export interface UploadPartDigest { bytes: number; sha256: string }
-const VIDEO_PART_BYTES = 5 * 1024 * 1024;
+const VIDEO_PART_BYTES = VIDEO_UPLOAD_PART_BYTES;
 async function digestPart(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(digest, n => n.toString(16).padStart(2, "0")).join("");
@@ -189,7 +190,7 @@ export async function verifyStoredUploadParts(
     if (!part.bytes || part.bytes > VIDEO_PART_BYTES) throw new Error("Invalid private media part.");
     const object = await env.UPLOADS.get(key(ref), {range:{offset,length:part.bytes}});
     if (!object || !("body" in object)) throw new Error("Private video readback was not confirmed.");
-    // Each range is at most 5 MiB. Never readUpload() the whole 50 MB file here.
+    // Each range is at most 5 MiB. Never readUpload() the entire 300 MB file here.
     const bytes = new Uint8Array(await object.arrayBuffer());
     if (bytes.byteLength !== part.bytes || await digestPart(bytes) !== part.sha256)
       throw new Error("Private video copy failed the integrity check.");
@@ -348,6 +349,11 @@ export async function handleUploadPut(
     return rejectUnused("Content-Length is required.",411);
   if (length !== null && length > row.max_bytes)
     return rejectUnused("File exceeds allowed size.",413);
+  // Public single PUT remains bounded even when its bearer permits a 300 MB
+  // chunked upload. Trusted internal GitHub imports may stream directly.
+  if (row.ext === "mp4" && length !== null &&
+      length > SINGLE_REQUEST_VIDEO_MAX_BYTES && !options?.internalUnknownLength)
+    return rejectUnused("Videos above 50 MB must use the chunked browser uploader.",413);
   if (!request.body) return rejectUnused("The file is empty.",400);
   const claim = await env.DB.prepare("UPDATE uploads SET status = 'uploading' WHERE id = ? AND status = 'pending' AND expires_at > ?")
     .bind(id,new Date().toISOString()).run();
