@@ -18,8 +18,8 @@ const mp4=(size:number)=>{
   for(let i=12;i<data.length;i+=4096)data[i]=i%251;
   return data;
 };
-const call=(url:string,method:string,body?:BodyInit,headers?:Record<string,string>)=>
-  handleLargeVideoChunk(new Request(url,{method,body,headers}),env);
+const call=(url:string,method:string,body?:BodyInit|Uint8Array,headers?:Record<string,string>)=>
+  handleLargeVideoChunk(new Request(url,{method,body:body as BodyInit | undefined,headers}),env);
 const small=(url:string,bytes:Uint8Array)=>{
   const req=new Request(url,{method:"PUT",body:bytes as unknown as BodyInit,
     headers:{"Content-Length":String(bytes.byteLength)}});
@@ -31,7 +31,7 @@ before(async()=>{
     compatibilityDate:"2026-09-01",compatibilityFlags:["nodejs_compat"],
     d1Databases:["DB"],r2Buckets:["UPLOADS"],
   }));
-  env={DB:await mf.getD1Database("DB"),UPLOADS:await mf.getR2Bucket("UPLOADS")} as Env;
+  env={DB:await mf.getD1Database("DB"),UPLOADS:await mf.getR2Bucket("UPLOADS")} as unknown as Env;
 });
 after(async()=>mf?.dispose());
 test("300 MB grant, legacy single PUT refusal and wrong bearer cannot initiate a multipart",async()=>{
