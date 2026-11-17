@@ -336,6 +336,18 @@ const MONTH_STYLE = `
 .calendar-month-post[data-status="published"]{border-left-color:var(--ok)}
 .calendar-month-post[data-status="rejected"]{border-left-color:var(--err)}
 .calendar-month-post:hover,.calendar-month-post:focus-visible{border-color:var(--accent2);outline-offset:1px}
+.calendar-month-post[draggable=true]{cursor:grab}
+.calendar-month-entry{display:flex;align-items:flex-start;gap:3px;min-width:0}
+.calendar-month-entry>.calendar-month-post{flex:1;min-width:0}
+.calendar-month-move{flex:none;border:1px solid var(--line);border-radius:5px;padding:5px 6px;background:var(--panel);color:var(--text);font:600 11px system-ui,sans-serif;cursor:pointer}
+.calendar-month-move:focus-visible{outline:2px solid var(--accent2)}
+.calendar-month-day{cursor:pointer}
+.calendar-month-day:focus-visible{outline:3px solid var(--accent2);outline-offset:-3px}
+.calendar-month-day.can-drop{background:color-mix(in srgb,var(--accent2) 20%,var(--panel));outline:2px dashed var(--accent2);outline-offset:-3px}
+.calendar-month-grid.is-dragging .calendar-month-post{pointer-events:none}
+.calendar-month-entry.is-dragging{opacity:.45}
+.calendar-month-day .calendar-month-open{font:11px system-ui,sans-serif;color:var(--muted);text-decoration:underline}
+
 .calendar-month-thumb{width:42px;height:48px;object-fit:cover;border-radius:4px;flex:0 0 42px;background:#0002}
 .calendar-month-video{width:42px;height:48px;flex:0 0 42px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent2) 14%,var(--panel));border-radius:4px;font:700 11px system-ui,sans-serif}
 .calendar-month-text{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
@@ -346,10 +358,11 @@ const MONTH_STYLE = `
 .calendar-month-wrap .platform-icon.ig{background:#8943a8;color:white;font-size:8px}
 `;
 
-/** Read-only month overview. The day has no times or publishing controls. */
+/** Month overview: cards open editors; eligible pending posts can be moved after PIN confirmation. */
 export function renderMonthCalendar(
   env: Env, posts: Post[], month: string, now = new Date(),
   paging: {page:number;hasNext:boolean} = {page:1,hasNext:false},
+  csrf = "",
 ): string {
   const first = monthStart(month);
   const {startDay,endDay} = monthRange(month,env.TIMEZONE);
@@ -389,17 +402,29 @@ export function renderMonthCalendar(
         (p.tiktok_enabled ? '<span class="platform-icon tiktok" title="TikTok" aria-label="TikTok">♪</span>' : '') +
         (p.instagram ? '<span class="platform-icon ig" title="Instagram" aria-label="Instagram">IG</span>' : '');
       const unscheduled = !p.scheduled_at && p.status!=="published";
+      const movable = !!csrf && !!p.scheduled_at &&
+        (((p.status==="draft" || p.status==="rejected") && !p.approved_at) ||
+        (p.status==="scheduled" && !!p.approved_at && Date.parse(p.scheduled_at)-now.getTime()>=12*60000));
+      const movableUnscheduled = !!csrf && unscheduled && (p.status==="draft" || p.status==="rejected") && !p.approved_at;
+      const canMove = movable || movableUnscheduled;
+      const localTime = p.scheduled_at ? toLocalInput(new Date(p.scheduled_at),env.TIMEZONE) : day+"T12:00";
       const subtitle = p.status.charAt(0).toUpperCase()+p.status.slice(1) + (unscheduled?" · Unscheduled":"");
-      return '<a class="calendar-month-post" href="/post/'+esc(p.id)+'" data-status="'+esc(p.status)+'" title="'+esc(title)+'">'+
+      return '<div class="calendar-month-entry">'+
+        '<a class="calendar-month-post" href="/post/'+esc(p.id)+'" data-status="'+esc(p.status)+'" title="'+esc(title)+'"'+
+        (canMove ? ' draggable="true" data-id="'+esc(p.id)+'" data-version="'+esc(p.updated_at)+
+          '" data-label="'+esc(title)+'" data-when="'+esc(localTime)+'" data-unscheduled="'+(unscheduled?'1':'0')+'"' : '')+'>'+
         thumb+'<span class="calendar-month-text"><span class="calendar-month-title">'+esc(title)+'</span>'+
         '<span class="calendar-month-meta">'+esc(subtitle)+'</span>'+
-        '<span class="platform-icons">'+platforms+'</span></span></a>';
+        '<span class="platform-icons">'+platforms+'</span></span></a>'+
+        (canMove?'<button type="button" class="calendar-month-move" aria-label="Move '+esc(title)+' to another date">Move</button>':'')+
+        '</div>';
     }).join("");
     const fullDay = dayLabel.format(new Date(day+"T12:00:00Z"));
     cells.push('<section class="calendar-month-day'+(outside?' outside':'')+todayClass+
-      '" data-day="'+day+'" aria-label="'+esc(fullDay)+'">'+
+      '" data-day="'+day+'" tabindex="0" aria-label="'+esc(fullDay)+': select to open week">'+
       '<a class="calendar-month-date" href="/calendar?view=week&amp;week='+day+'" aria-label="View week of '+esc(fullDay)+'">'+
-      String(Number(day.slice(8)))+'</a><div class="calendar-month-posts">'+entries+'</div></section>');
+      String(Number(day.slice(8)))+'</a><div class="calendar-month-posts">'+entries+'</div>'+
+      '<a class="calendar-month-open" href="/calendar?view=week&amp;week='+day+'">Plan this day</a></section>');
   }
   return '<style>'+STYLE+MONTH_STYLE+'</style>'+
     '<div class="calendar-toolbar"><strong>'+esc(displayMonth)+'</strong><div class="calendar-nav">'+
@@ -419,7 +444,115 @@ export function renderMonthCalendar(
         '<strong>Month posts page '+paging.page+'</strong>'+
         (paging.hasNext?'<a href="/calendar?view=month&amp;month='+month+'&amp;month_page='+(paging.page+1)+'">Next posts</a>':'')+
         '</nav><p class="calendar-month-info">High-volume month: some days may continue on another page. No posts are silently omitted.</p>':'')+
-    '<p class="calendar-month-info">Dates use '+esc(env.TIMEZONE)+'. Posts for each displayed day are listed without hours. '+
-    'Unscheduled drafts are shown on their creation date and clearly marked. Select a post to edit or review it; '+
-    'select a day number to see its week and the time-based scheduling tools.</p>';
+    '<p class="calendar-month-info">Dates use '+esc(env.TIMEZONE)+'. Posts are listed by day; unscheduled drafts are marked. '+
+    'Click a post to edit it. Click a day to open its week and select a precise time for a new draft. '+
+    'Drag a pending post to another day or select Move to review its date and time. '+
+    'Nothing is rescheduled or published until you confirm with your PIN.</p>'+
+    (csrf ? '<dialog class="cal-modal" id="month-cal-dialog"><h2>Move <span id="month-cal-moving"></span></h2>'+
+      '<form method="post" id="month-cal-form"><input type="hidden" name="csrf" value="'+esc(csrf)+'">'+
+      '<input type="hidden" name="expected_updated_at">'+
+      '<input type="hidden" name="return_to" value="/calendar?view=month&amp;month='+month+
+        (paging.page>1?'&amp;month_page='+paging.page:'')+'">'+
+      '<label for="month-cal-when">New date and time ('+esc(env.TIMEZONE)+')</label>'+
+      '<input type="datetime-local" name="when" id="month-cal-when" required>'+
+      '<p class="calendar-info" id="month-cal-note">Review the time before saving. Moving an approved schedule may also update its external schedule.</p>'+
+      '<label for="month-cal-pin">Approval PIN</label>'+
+      '<input type="password" name="pin" id="month-cal-pin" required autocomplete="off">'+
+      '<div class="row"><button type="button" id="month-cal-dismiss">Cancel</button>'+
+      '<button class="primary" type="submit">Confirm new time</button></div></form></dialog>'+
+      '<script src="/calendar-month.js" defer></script>' : '');
 }
+
+/** Month planner interactions. No POST until the user confirms the PIN form. */
+export const MONTH_CALENDAR_JS = \`
+(() => {
+  const grid=document.querySelector(".calendar-month-grid");
+  const dialog=document.getElementById("month-cal-dialog");
+  const form=document.getElementById("month-cal-form");
+  if(!grid || !dialog || !form)return;
+  let moving=null;
+  let suppressUntil=0;
+  function clearDrag() {
+    moving=null;
+    grid.classList.remove("is-dragging");
+    grid.querySelectorAll(".calendar-month-entry.is-dragging, .calendar-month-day.can-drop").forEach(el=>{
+      el.classList.remove("is-dragging","can-drop");
+    });
+  }
+  function review(card,day) {
+    if(!card || !/^\\d{4}-\\d{2}-\\d{2}$/.test(day))return;
+    const saved=card.dataset.when;
+    if(!/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}$/.test(saved||""))return;
+    form.action="/post/"+encodeURIComponent(card.dataset.id)+"/reschedule";
+    form.elements.namedItem("expected_updated_at").value=card.dataset.version;
+    // Keep the original local clock time when moving between dates.
+    // For unscheduled drafts, 12:00 is merely a visible, editable suggestion.
+    form.elements.namedItem("when").value=day+saved.slice(10);
+    form.elements.namedItem("pin").value="";
+    document.getElementById("month-cal-moving").textContent=card.dataset.label;
+    document.getElementById("month-cal-note").textContent=card.dataset.unscheduled==="1"
+      ? "This draft was unscheduled. Noon is only a suggested time. Choose the exact time before confirming. Nothing is approved."
+      : "The existing local clock time is preserved. Review the date and time before confirming with your PIN.";
+    dialog.showModal();
+    form.elements.namedItem("when").focus();
+  }
+  grid.addEventListener("dragstart",event=>{
+    const card=event.target.closest(".calendar-month-post[draggable=true]");
+    if(!card || !event.dataTransfer)return;
+    moving=card;
+    grid.classList.add("is-dragging");
+    card.closest(".calendar-month-entry").classList.add("is-dragging");
+    event.dataTransfer.effectAllowed="move";
+    event.dataTransfer.setData("text/plain",card.dataset.id);
+    suppressUntil=Date.now()+650;
+  });
+  grid.addEventListener("dragover",event=>{
+    const day=event.target.closest(".calendar-month-day");
+    if(!moving || !day)return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect="move";
+    grid.querySelectorAll(".calendar-month-day.can-drop").forEach(d=>d.classList.remove("can-drop"));
+    day.classList.add("can-drop");
+  });
+  grid.addEventListener("dragleave",event=>{
+    const day=event.target.closest(".calendar-month-day");
+    if(day && !day.contains(event.relatedTarget))day.classList.remove("can-drop");
+  });
+  grid.addEventListener("drop",event=>{
+    const day=event.target.closest(".calendar-month-day");
+    if(!moving || !day)return;
+    event.preventDefault();
+    event.stopPropagation();
+    const card=moving;
+    clearDrag();
+    suppressUntil=Date.now()+650;
+    review(card,day.dataset.day);
+  });
+  grid.addEventListener("dragend",()=>{
+    clearDrag();
+    suppressUntil=Date.now()+650;
+  });
+  grid.addEventListener("click",event=>{
+    const btn=event.target.closest(".calendar-month-move");
+    if(btn) {
+      const card=btn.closest(".calendar-month-entry")?.querySelector(".calendar-month-post[draggable=true]");
+      const day=btn.closest(".calendar-month-day")?.dataset.day;
+      review(card,day);
+      return;
+    }
+    if(Date.now()<suppressUntil)return;
+    const day=event.target.closest(".calendar-month-day");
+    if(day && !event.target.closest("a,button,input,select,textarea"))
+      window.location.assign("/calendar?view=week&week="+encodeURIComponent(day.dataset.day));
+  });
+  grid.addEventListener("keydown",event=>{
+    if((event.key==="Enter" || event.key===" ") &&
+       event.target.matches(".calendar-month-day")){
+      event.preventDefault();
+      window.location.assign("/calendar?view=week&week="+encodeURIComponent(event.target.dataset.day));
+    }
+  });
+  document.getElementById("month-cal-dismiss").addEventListener("click",()=>dialog.close());
+  dialog.addEventListener("close",clearDrag);
+})();
+\`;
