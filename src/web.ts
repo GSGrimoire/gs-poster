@@ -51,7 +51,7 @@ import {
   sha256,
   type Session,
 } from "./session.ts";
-import { isSameOrigin } from "./origin.ts";
+import { isSameOrigin, safeNext } from "./origin.ts";
 import { formatLocal, localToUtc, toLocalInput } from "./time.ts";
 import { APPROVE_MIN_LEAD_MS, checkMessage, checkWhen, mediaLooksPending } from "./validate.ts";
 import { decideReleaseTime, earliestValidTime, EDITOR_BUFFER_MS } from "./schedule.ts";
@@ -64,10 +64,6 @@ const redirect = (location: string, headers?: Headers): Response => {
   h.set("Cache-Control", "no-store");
   return new Response(null, { status: 302, headers: h });
 };
-
-function safeNext(next: string | null): string {
-  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
-}
 
 function sameOrigin(req: Request): boolean {
   return isSameOrigin(new URL(req.url).origin, req.headers.get("Origin"), req.headers.get("Sec-Fetch-Site"));
@@ -238,7 +234,8 @@ async function callback(req: Request, env: Env): Promise<Response> {
   const h = new Headers();
   h.append("Set-Cookie", sessionCookie(await makeSession(env, user.login)));
   h.append("Set-Cookie", cookie(LOGIN_STATE_COOKIE, "", 0));
-  return redirect(saved.next, h);
+  // Checked again here: a login started before this check existed may still be in KV.
+  return redirect(safeNext(saved.next), h);
 }
 
 // ---------------------------------------------------------------- connecting Claude (OAuth consent)
