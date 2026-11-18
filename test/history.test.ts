@@ -115,15 +115,16 @@ test("History and private drafts require a signed-in owner; the favicon is publi
   const res=await get("/history",false);
   assert.equal(res.status,302);
   assert.match(res.headers.get("location")??"",/\/login\?next=/);
-  const svg=await get("/favicon.svg",false);
-  assert.equal(svg.status,200);
-  assert.match(svg.headers.get("content-type")??"",/image\/svg\+xml/);
-  const icon=await svg.text();
-  assert.match(icon,/<svg/);
-  assert.match(icon,/#a6221c/);
-  assert.match(icon,/megaphone|path/);
-  assert.doesNotMatch(icon,/<script/);
-  assert.match((await (await get("/")).text()),/rel="icon" type="image\/svg\+xml"/);
+  for(const [path,type] of [["/favicon.ico",/image\/x-icon/],["/favicon-32.png",/image\/png/],["/apple-touch-icon.png",/image\/png/],["/brand-logo.png",/image\/png/]] as const){
+    const icon=await get(path,false);
+    assert.equal(icon.status,200,path);
+    assert.match(icon.headers.get("content-type")??"",type);
+    assert.ok((await icon.arrayBuffer()).byteLength>500,path);
+  }
+  assert.equal((await get("/favicon.svg",false)).status===200,false);
+  const home=await (await get("/")).text();
+  assert.match(home,/rel="icon" type="image\/png" sizes="32x32" href="\/favicon-32.png"/);
+  assert.match(home,/<img src="\/brand-logo.png"/);
 });
 
 test("legacy TikTok-only transfers move out of drafts, without publishing or changing mixed targets",async()=>{

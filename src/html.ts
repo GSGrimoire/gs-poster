@@ -1,3 +1,4 @@
+import { BRAND_HEAD } from "./brand.ts";
 /** Tiny HTML helpers and the page shell for the approval site. */
 
 export const esc = (v: unknown): string =>
@@ -15,6 +16,7 @@ a{color:var(--accent2)}
 header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:18px}
 header h1{font:600 20px/1.2 system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase;margin:0}
 header h1 a{color:var(--text);text-decoration:none}
+header h1 a.brand{display:inline-flex;align-items:center;gap:10px}header h1 a.brand img{display:block;width:40px;height:40px;flex:none}
 header .who{font:13px system-ui,sans-serif;color:var(--muted)}
 h2{font:600 13px system-ui,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:28px 0 10px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin:0 0 12px}
@@ -155,8 +157,8 @@ export function page(title: string, body: string, opts: { login?: string; wide?:
     </nav>` : "";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-${opts.public ? "" : '<meta name="robots" content="noindex,nofollow">'}<title>${esc(title)}</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"><style>${CSS}</style></head>
-<body><div class="wrap${opts.wide ? " wide" : ""}"><header><h1><a href="${opts.public ? "/about" : "/"}">GS Poster</a></h1>${who}</header>${nav}<main id="main-content">${body}</main><footer style="border-top:1px solid var(--line);margin-top:28px;padding-top:12px;font:13px system-ui,sans-serif;display:flex;gap:16px;flex-wrap:wrap"><a href="/about">About</a><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a></footer></div></body></html>`;
+${opts.public ? "" : '<meta name="robots" content="noindex,nofollow">'}<title>${esc(title)}</title>${BRAND_HEAD}<style>${CSS}</style></head>
+<body><div class="wrap${opts.wide ? " wide" : ""}"><header><h1><a class="brand" href="${opts.public ? "/about" : "/"}"><img src="/brand-logo.png" width="40" height="40" alt="">GS Poster</a></h1>${who}</header>${nav}<main id="main-content">${body}</main><footer style="border-top:1px solid var(--line);margin-top:28px;padding-top:12px;font:13px system-ui,sans-serif;display:flex;gap:16px;flex-wrap:wrap"><a href="/about">About</a><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a></footer></div></body></html>`;
 }
 
 export const SECURITY_HEADERS: Record<string, string> = {
