@@ -110,7 +110,8 @@ export const INSTAGRAM_JOBS_DDL = `CREATE TABLE IF NOT EXISTS instagram_jobs (
   post_id TEXT PRIMARY KEY, status TEXT NOT NULL, kind TEXT NOT NULL, due_at TEXT NOT NULL, caption TEXT NOT NULL,
   frame TEXT NOT NULL, items TEXT NOT NULL DEFAULT '[]', video TEXT, children TEXT NOT NULL DEFAULT '[]',
   container_id TEXT, processing_since TEXT, media_id TEXT, permalink TEXT, error TEXT,
-  ambiguous INTEGER NOT NULL DEFAULT 0, lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL)`;
+  ambiguous INTEGER NOT NULL DEFAULT 0, lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+  ig_user_id TEXT)`;
 /** Instagram job states that are under way: their time and their post are fixed. */
 const IG_STARTED = "('preparing','processing','sending')";
 /** An approved Instagram job that may still publish (or whose result is unclear):
@@ -212,6 +213,13 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   const igColumns = await db.prepare("PRAGMA table_info(instagram_targets)").all<{name:string}>();
   if (!igColumns.results.some(column => column.name === "video")) {
     try { await db.prepare("ALTER TABLE instagram_targets ADD COLUMN video TEXT").run(); }
+    catch (error) { if (!/duplicate column name/i.test(String(error))) throw error; }
+  }
+  // Approved Instagram jobs record the account they were approved for (issue #86).
+  // Rows from before this column stay NULL, and cron refuses to send them.
+  const igJobColumns = await db.prepare("PRAGMA table_info(instagram_jobs)").all<{name:string}>();
+  if (!igJobColumns.results.some(column => column.name === "ig_user_id")) {
+    try { await db.prepare("ALTER TABLE instagram_jobs ADD COLUMN ig_user_id TEXT").run(); }
     catch (error) { if (!/duplicate column name/i.test(String(error))) throw error; }
   }
   schemaReady = true;
