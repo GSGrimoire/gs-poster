@@ -189,9 +189,12 @@ export async function verifyStoredUploadParts(
   for (const part of parts) {
     if (!part.bytes || part.bytes > VIDEO_PART_BYTES) throw new Error("Invalid private media part.");
     const object = await env.UPLOADS.get(key(ref), {range:{offset,length:part.bytes}});
-    if (!object || !("body" in object)) throw new Error("Private video readback was not confirmed.");
+    const body = object && "body" in object ? object.body : null;
+    if (!body) throw new Error("Private video readback was not confirmed.");
     // Each range is at most 5 MiB. Never readUpload() the entire 300 MB file here.
-    const bytes = new Uint8Array(await object.arrayBuffer());
+    // Read the body once: some R2 bindings (the Miniflare proxy) treat the
+    // "body" lookup as a read, so a later arrayBuffer() would fail.
+    const bytes = new Uint8Array(await new Response(body).arrayBuffer());
     if (bytes.byteLength !== part.bytes || await digestPart(bytes) !== part.sha256)
       throw new Error("Private video copy failed the integrity check.");
     offset += part.bytes;

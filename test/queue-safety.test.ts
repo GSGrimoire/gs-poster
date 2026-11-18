@@ -96,6 +96,7 @@ test("private MP4 references are validated and read without public HTTP requests
   assert.match(checkVideoUrl("upload://"+"a".repeat(32)+".png")??"",/MP4/);
   const bytes = new Uint8Array([0,0,0,20,102,116,121,112,105,115,111,109,0,0,0]);
   const env = { UPLOADS: {
+    head: async () => ({size: bytes.byteLength}),
     get: async () => ({arrayBuffer: async () => bytes.buffer}),
   }} as unknown as Env;
   assert.deepEqual(await fetchVideo(env,ref),bytes);

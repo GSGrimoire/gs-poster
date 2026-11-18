@@ -48,7 +48,7 @@ before(async()=>{
           },
         }),{status:200,headers:{"Content-Length":String(total)}});
       }
-      if(oversize)return new Response(MP4,{status:200,headers:{"Content-Length":String(50_000_001)}});
+      if(oversize)return new Response(MP4,{status:200,headers:{"Content-Length":String(300_000_001)}});
       return new Response(malicious?new Uint8Array([1,2,3,4]):MP4,{status:200});
     },bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",TIMEZONE:"Europe/Copenhagen"}}));
   db=await mf.getD1Database("DB") as unknown as D1Database;

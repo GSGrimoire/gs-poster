@@ -27,7 +27,7 @@ async function getSession(db:D1Database,id:string) {
 const validParts=(state:TransferRow):PartState[]=>{
   const p=JSON.parse(state.parts_json) as PartState[];
   if(!Array.isArray(p)||p.length!==state.next_part-1||
-      p.some((x,i)=>x.partNumber!==i+1||typeof x.etag!=="string"||x.etag.length<1||x.etag.length>160||
+      p.some((x,i)=>x.partNumber!==i+1||typeof x.etag!=="string"||x.etag.length<1||x.etag.length>1024||
         !Number.isInteger(x.bytes)||x.bytes<1||x.bytes>VIDEO_UPLOAD_PART_BYTES||!(/^[a-f0-9]{64}$/.test(x.sha256))))
     throw Error("Invalid multipart record; manual reconciliation required.");
   return p;
