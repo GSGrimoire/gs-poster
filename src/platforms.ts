@@ -103,6 +103,8 @@ export interface TargetState {
   video: boolean;
   /** Descriptions missing, counted only when the platform requires them. */
   missingAlt: number;
+  /** GS Poster requires a public title for a TikTok photo carousel. */
+  missingTitle?: boolean;
   /** Width / height of each photo, when known. */
   ratios?: number[];
   hashtags?: number;
@@ -123,6 +125,7 @@ export function checkTarget(t: TargetState): TargetCheck {
   if (!t.photos && !t.video && !r.textOnly) errors.push(`${r.label} needs photos or a video.`);
   if (limit && t.captionLength > limit) errors.push(`Caption is ${t.captionLength} characters; ${r.label} allows ${limit}.`);
   if (r.altRequired && t.missingAlt) errors.push(`${t.missingAlt} ${t.missingAlt === 1 ? "description is" : "descriptions are"} missing.`);
+  if (t.id === "tiktok" && t.photos > 0 && t.missingTitle) errors.push("Enter a public TikTok carousel title.");
   if (r.maxHashtags && (t.hashtags ?? 0) > r.maxHashtags) errors.push(`${t.hashtags} hashtags; ${r.label} allows ${r.maxHashtags}.`);
   if (!t.captionLength && t.id !== "tiktok") warnings.push("Caption is empty.");
   const off = r.framed ? 0 : (t.ratios ?? []).filter((x) => x < r.aspect.min - 0.01 || x > r.aspect.max + 0.01).length;

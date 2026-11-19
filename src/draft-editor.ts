@@ -102,9 +102,18 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   const copyFacebook = form.get("tt_copy_fb") === "1";
   if (tiktok && copyFacebook && cur.video && !video)
     errors.push("Cannot copy the Facebook video while also removing it.");
-  if (tiktok && (cur.tiktok_images === null || copyFacebook)) {
+  if (tiktok && copyFacebook) {
     tiktokImages = [...images];
     tiktokVideo = video;
+  } else if (tiktok && cur.tiktok_images === null) {
+    // Preserve the legacy Facebook fallback for already enabled drafts.
+    // On first activation, allow another platform to supply the source when
+    // Facebook has no gallery. No private bytes are copied or published.
+    const firstActivation = !cur.tiktok_enabled;
+    const sourcePhotos = firstActivation && !images.length ? postPhotos(cur) : images;
+    tiktokImages = firstActivation ? sourcePhotos.slice(0, 35) : [...sourcePhotos];
+    tiktokVideo = sourcePhotos.length ? null
+      : (video ?? (firstActivation ? postVideos(cur)[0] ?? null : null));
   }
   const ttCaptionRaw = text(form, "tiktok_caption", cur.tiktok_caption ?? "").trim();
   const tiktokCaption = ttCaptionRaw || null;
@@ -134,6 +143,11 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     // Only copy images already attached to this post. Indices are resolved
     // server-side against the saved media pool, never trusted as new URLs.
     const addRaw=String(form.get("bs_add_photos")??"");
+    // On first activation, reuse the existing post media without copying bytes.
+    // Empty alt text is deliberately left for owner review before approval.
+    // A previously configured empty Bluesky gallery is never overwritten.
+    if (blueskyOn && !savedBluesky && !addRaw && !bsVideo && !bsImages.length)
+      bsImages = postPhotos(cur).slice(0, 4).map(url => ({ url, alt: "" }));
     if(addRaw){
       const pool=postPhotos(cur);
       // Bound the field before allocating or parsing an untrusted list.
@@ -178,10 +192,15 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     if (!items) errors.push("Could not read the Instagram photo settings. Reload the page and try again.");
     else {
       const videoSource=text(form,"ig_video_source",base.video??"").trim();
+      // First activation inherits up to ten existing photos, preserving their
+      // full content by padding. Previously saved selections stay independent.
+      const initialItems = instagramOn && !savedInstagram && !videoSource && items.length === 0
+        ? postPhotos(cur).slice(0, INSTAGRAM_MAX_ITEMS).map(url => defaultItem(url, "pad"))
+        : items;
       instagram = {
         caption: text(form,"ig_caption",base.caption),
         frame: text(form,"ig_frame",base.frame) as InstagramFrame,
-        items,
+        items: initialItems,
         ...(videoSource?{video:videoSource}:{}),
       };
       // The form is still saved while Instagram is paused. Validate its
@@ -273,11 +292,12 @@ export function targetStates(p: Post): Record<PlatformId, TargetState> {
     bluesky: { id: "bluesky", captionLength: bs ? textLength(bs.caption) : 0,
       photos: bs?.video ? 0 : (bs?.images.length ?? 0), video: !!bs?.video,
       missingAlt: (bs?.images.filter((i) => !i.alt.trim()).length ?? 0) + (bs?.video && !bs.video.alt.trim() ? 1 : 0) },
-    instagram: { id: "instagram", captionLength: p.instagram?.caption.length ?? 0,
-      photos: p.instagram?.items.length ?? 0, video: !!p.instagram?.video, missingAlt: 0, hashtags: countHashtags(p.instagram?.caption ?? "") },
+    instagram: { id: "instagram", captionLength: (p.instagram ?? p.instagram_paused)?.caption.length ?? 0,
+      photos: (p.instagram ?? p.instagram_paused)?.items.length ?? 0, video: !!(p.instagram ?? p.instagram_paused)?.video,
+      missingAlt: 0, hashtags: countHashtags((p.instagram ?? p.instagram_paused)?.caption ?? "") },
     tiktok: { id: "tiktok", captionLength: (p.tiktok_caption ?? p.message).length,
       photos: ttShared ? (p.video ? 0 : p.images.length) : tt.images.length,
-      video: ttShared ? !!p.video : !!tt.video, missingAlt: 0 },
+      video: ttShared ? !!p.video : !!tt.video, missingAlt: 0, missingTitle: !(p.tiktok_title ?? "").trim() },
   };
 }
 
@@ -297,13 +317,64 @@ function formatLine(id: PlatformId): string {
 
 function checkItems(t: TargetState): string {
   const c = checkTarget(t);
-  if (!c.errors.length && !c.warnings.length) return `<li class="ok">Ready for ${esc(PLATFORMS[t.id].label)}.</li>`;
+  if (!c.errors.length && !c.warnings.length) return `<li class="ok">Media checks passed for ${esc(PLATFORMS[t.id].label)}. Delivery is checked at release.</li>`;
   return [...c.errors.map((e) => `<li class="e">${esc(e)}</li>`), ...c.warnings.map((w) => `<li class="w">${esc(w)}</li>`)].join("");
 }
 
 const photos = (n: number) => (n ? n + (n === 1 ? " photo" : " photos") : "text only");
-const chip = (name: string, label: string, on: boolean) =>
-  `<label class="platform-chip"><input type="checkbox" name="${name}" value="1" data-platform-toggle="${name.slice(2)}"${on ? " checked" : ""}> ${label}</label>`;
+
+/** One horizontal row per platform; inactive targets stay visible. */
+export function renderPlatformOverview(p: Post, states: Record<PlatformId, TargetState>,
+    on: Record<PlatformId, boolean>, sourceCount: number, view: EditorView): string {
+  const rows = PLATFORM_ORDER.map(id => {
+    const rule = PLATFORMS[id], enabled = on[id], state = states[id], checks = checkTarget(state);
+    const media = state.video ? "1 video" : state.photos === 1 ? "1 photo" : state.photos + " photos";
+    const caption = id === "facebook" ? p.message : id === "tiktok" ? p.tiktok_caption ?? p.message
+      : id === "bluesky" ? (p.bluesky ?? p.bluesky_paused)?.caption ?? ""
+      : (p.instagram ?? p.instagram_paused)?.caption ?? "";
+    const excerpt = caption.trim().slice(0, 92);
+    const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered
+      ? view.tiktokPlan.reason
+      : id === "facebook" || id === "bluesky"
+        ? view.releaseProblems.find(message => message.startsWith("Bluesky:") ? id === "bluesky"
+          : message.startsWith("Facebook") ? id === "facebook" : true) ?? ""
+        : "";
+    const issue = checks.errors[0] || releaseIssue;
+    const extra = id === "instagram" && enabled && !view.instagramPlan?.ok
+      ? "Manual download until Instagram is connected and its publishing requirements are met."
+      : enabled && sourceCount > 0 && !state.photos && !state.video
+        ? "No image selected. This platform will send text only if supported."
+        : enabled && sourceCount > rule.maxPhotos && state.photos === rule.maxPhotos
+          ? "Only the first " + rule.maxPhotos + " source images were selected. Review the gallery."
+          : !enabled ? "Select to add this destination. Existing media is offered on first activation." : "";
+    const manual = id === "instagram" && !view.instagramPlan?.ok;
+    const mediaReview = enabled && sourceCount > 0 && !state.photos && !state.video && id !== "facebook";
+    const status = !enabled ? "Not selected" : checks.errors.length
+      ? checks.errors.length + (checks.errors.length === 1 ? " problem" : " problems")
+      : issue ? "Needs setup" : manual ? "Manual" : mediaReview ? "Review media" :
+        checks.warnings.length ? "Prepared, " + checks.warnings.length + (checks.warnings.length === 1 ? " note" : " notes") : "Prepared";
+    return `<div class="platform-overview-row${enabled ? "" : " is-inactive"}${checks.errors.length && enabled ? " has-e" : ""}"
+      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}" data-manual="${manual ? "1" : "0"}" data-has-source="${sourceCount ? "1" : "0"}">
+      <label class="platform-overview-name"><input type="checkbox" name="p_${id}" value="1"
+        data-platform-toggle="${id}"${enabled ? " checked" : ""}> <strong>${esc(rule.label)}</strong></label>
+      <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
+      <div class="platform-overview-check"><strong data-ready="${id}" aria-live="polite">${esc(status)}</strong>
+        <span data-overview-issue="${id}">${esc(issue || extra || checks.warnings[0] || "No outstanding media checks.")}</span>
+        ${issue && extra ? `<span class="platform-overview-extra">${esc(extra)}</span>` : ""}
+        <span class="platform-overview-caption">${esc(excerpt ? "Caption: " + excerpt + (caption.trim().length > 92 ? "…" : "") : "Caption: not yet written")}</span></div>
+      <a data-overview-edit="${id}" href="#target-${id}"${enabled ? "" : " hidden"}>Edit ${esc(rule.label)}</a>
+    </div>`;
+  }).join("");
+  return `<section class="ed-card platform-overview" aria-labelledby="ed-platforms">
+    <h3 id="ed-platforms">Prepare destinations</h3>
+    <p class="hint">All platforms stay visible. Select a destination to reuse existing post media on first activation.
+      Inactive platforms are greyed out and excluded from approval. Previously customized galleries are preserved.
+      Saving and selecting platforms never publishes anything.</p>
+    <ol class="studio-steps" aria-label="Preparation steps"><li>1. Select destinations</li><li>2. Fix each platform\'s requirements</li><li>3. Review and approve with your PIN</li></ol>
+    <div class="platform-overview-list">${rows}</div>
+  </section>`;
+}
+
 
 export function renderDraftEditor(v: EditorView): string {
   const p = v.post;
@@ -445,7 +516,24 @@ export function renderDraftEditor(v: EditorView): string {
 .adder>summary::-webkit-details-marker{display:none}
 .adder[open]{flex-basis:100%}
 .adder[open]>summary{border-style:solid;margin-bottom:12px}
-.targets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;align-items:start;margin-top:12px}
+.studio-steps{list-style:none;display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px;padding:0}
+.studio-steps li{font:12px system-ui,sans-serif;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
+.platform-overview-list{display:grid;gap:8px}
+.platform-overview-row{display:grid;grid-template-columns:minmax(120px,1fr) minmax(72px,.6fr) minmax(190px,2fr) auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg);font:13px system-ui,sans-serif}
+.platform-overview-row.is-inactive{background:color-mix(in srgb,var(--bg) 65%,var(--line));color:var(--muted)}
+.platform-overview-row.is-inactive>*:not(.platform-overview-name){opacity:.65}
+.platform-overview-row.has-e{border-color:var(--err)}
+.platform-overview-name{display:flex!important;align-items:center;gap:8px;margin:0!important;cursor:pointer}
+.platform-overview-name input{margin:0}
+.platform-overview-check{display:grid;gap:4px;min-width:0}
+.platform-overview-check strong{font-weight:650}
+.platform-overview-row.has-e .platform-overview-check strong{color:var(--err)}
+.platform-overview-check span{color:var(--muted);overflow-wrap:anywhere}
+.platform-overview-caption{font-size:12px;opacity:.85}
+.platform-overview-row a{text-align:right;white-space:nowrap}
+.platform-overview-row a[hidden]{display:none}
+@media(max-width:680px){.platform-overview-row{grid-template-columns:minmax(110px,1fr) auto;gap:6px 12px}.platform-overview-check{grid-column:1/-1;grid-row:2}.platform-overview-row a{grid-column:2;grid-row:1}}
+.targets{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start;margin-top:12px}
 .target{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg);display:grid;gap:8px;min-width:0}
 /* A hidden target must not be shown by the author display:grid/flex styles. */
 .targets > .target[hidden],.readiness > li[hidden]{display:none!important}
@@ -495,7 +583,7 @@ export function renderDraftEditor(v: EditorView): string {
 .ig-downloads a{white-space:nowrap}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 @media(max-width:520px){.ig-item{grid-template-columns:1fr}}
-@media(min-width:1180px){.target-ig{grid-column:span 2}}
+/* Platform editors use one full-width column; no legacy Instagram two-column span. */
 .house-title{font:650 14px system-ui,sans-serif;margin:16px 0 0}
 .save-bar{position:sticky;bottom:0;z-index:2;display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 16px;margin-top:6px;background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:14px}
 .save-bar button{flex:0 0 auto}
@@ -552,23 +640,10 @@ export function renderDraftEditor(v: EditorView): string {
     <input type="hidden" name="csrf" value="${esc(v.csrf)}">
     <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
 
-    <section class="ed-card" aria-labelledby="ed-platforms">
-      <h3 id="ed-platforms">Platforms</h3>
-      <div class="platform-chips">
-        ${chip("p_facebook", "Facebook", p.facebook_enabled)}
-        ${chip("p_instagram", "Instagram", !!p.instagram)}
-        ${chip("p_bluesky", "Bluesky", !!p.bluesky)}
-        ${chip("p_tiktok", "TikTok", !!p.tiktok_enabled)}
-      </div>
-      <p class="hint">Unchecked platforms are hidden and excluded from approval. Their saved captions, images and settings are retained when you turn them off.</p>
-    </section>
+    ${renderPlatformOverview(p, states, on, pool.length, v)}
 
     <section class="ed-card targets-card" aria-labelledby="ed-targets">
       <h3 id="ed-targets">Each platform</h3>
-      <ol class="readiness" id="ed-readiness" aria-label="Readiness by platform">
-        ${PLATFORM_ORDER.map((pid) => `<li data-platform="${pid}"${hide(on[pid])}><a href="#target-${pid}">${esc(PLATFORMS[pid].label)}</a>
-          <span data-ready="${pid}">${(() => { const c = checkTarget(states[pid]); return c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems") : c.warnings.length ? "Ready, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Ready"; })()}</span></li>`).join("")}
-      </ol>
       <p class="hint">Thumbnails show the whole picture. They are not the crop a platform will deliver; the notes under each platform say what it does with other shapes.</p>
       <div class="targets" data-rules="${esc(platformRulesJson())}">
         <article class="target" id="target-facebook" data-platform="facebook"${hide(on.facebook)} aria-labelledby="tg-facebook">
@@ -776,6 +851,11 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   function togglePlatform(box) {
     const name = box.dataset.platformToggle;
     form.querySelectorAll('[data-platform="' + name + '"]').forEach(el => { el.hidden = !box.checked; });
+    const overview = form.querySelector('[data-overview-platform="' + name + '"]');
+    overview?.classList.toggle("is-inactive", !box.checked);
+    const edit = overview?.querySelector("[data-overview-edit]");
+    if (edit) edit.hidden = !box.checked;
+    recheck();
   }
   form.querySelectorAll("[data-platform-toggle]").forEach(box => box.addEventListener("change", () => togglePlatform(box)));
   document.getElementById("bs-copy-fb-video")?.addEventListener("click",()=>{
@@ -838,7 +918,9 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     return {
       photos: photos.length, video: tiles.some(t => t.dataset.tile === "video"),
       captionLength: r.graphemes ? glen(text) : text.length,
-      missingAlt: r.altRequired ? tiles.filter(t => { const i = t.querySelector('input[type="text"]'); return i && !i.value.trim(); }).length : 0,
+      missingAlt: r.altRequired ? tiles.filter(t => { const i = t.querySelector('input[type="text"]'); return i && !i.value.trim(); }).length
+        + staged.filter(t => !t.querySelector('input[name^="bs_add_alt_"]')?.value.trim()).length : 0,
+      missingTitle: id === "tiktok" && !document.getElementById("ed-tiktok-title")?.value.trim(),
       ratios: photos.map(t => Number(t.dataset.ratio)).filter(x => x > 0),
     };
   }
@@ -850,6 +932,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     if (!st.photos && !st.video && !r.textOnly) errors.push(r.label + " needs photos or a video.");
     if (limit && st.captionLength > limit) errors.push("Caption is " + st.captionLength + " characters; " + r.label + " allows " + limit + ".");
     if (r.altRequired && st.missingAlt) errors.push(st.missingAlt + (st.missingAlt === 1 ? " description is" : " descriptions are") + " missing.");
+    if (r.id === "tiktok" && st.photos > 0 && st.missingTitle) errors.push("Enter a public TikTok carousel title.");
     if (r.maxHashtags && (st.hashtags || 0) > r.maxHashtags) errors.push(st.hashtags + " hashtags; " + r.label + " allows " + r.maxHashtags + ".");
     if (!st.captionLength && r.id !== "tiktok") warnings.push("Caption is empty.");
     if (st.lowRes) warnings.push(st.lowRes + (st.lowRes === 1 ? " photo is" : " photos are") + " enlarged to fit and may look soft.");
@@ -880,18 +963,31 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       if (list) {
         list.replaceChildren(...(c.errors.length || c.warnings.length
           ? [...c.errors.map(t => [t, "e"]), ...c.warnings.map(t => [t, "w"])]
-          : [["Ready for " + r.label + ".", "ok"]]).map(([t, k]) => { const li = document.createElement("li"); li.className = k; li.textContent = t; return li; }));
+          : [["Media checks passed for " + r.label + ". Delivery is checked at release.", "ok"]]).map(([t, k]) => { const li = document.createElement("li"); li.className = k; li.textContent = t; return li; }));
       }
       card.dataset.state = c.errors.length ? "error" : c.warnings.length ? "warn" : "ok";
       const area = card.querySelector("textarea[data-caption]");
       if (area && c.limit && id !== "facebook") { area.dataset.max = String(c.limit); meter(area); }
-      const pill = form.querySelector('[data-ready="' + id + '"]');
-      if (pill) {
-        pill.textContent = c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
-          : c.warnings.length ? "Ready, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Ready";
-        pill.parentElement.classList.toggle("has-e", !!c.errors.length);
-        pill.parentElement.classList.toggle("has-w", !c.errors.length && !!c.warnings.length);
+      const overview = form.querySelector('[data-overview-platform="' + id + '"]');
+      const enabled = !!form.querySelector('[data-platform-toggle="' + id + '"]')?.checked;
+      if (overview) {
+        overview.classList.toggle("is-inactive", !enabled);
+        overview.classList.toggle("has-e", enabled && !!c.errors.length);
+        const edit = overview.querySelector("[data-overview-edit]");
+        if (edit) edit.hidden = !enabled;
+        const media = overview.querySelector("[data-overview-media]");
+        if (media) media.textContent = st.video ? "1 video" : st.photos === 1 ? "1 photo" : st.photos + " photos";
+        const issue = overview.querySelector("[data-overview-issue]");
+        if (issue && enabled) issue.textContent = c.errors[0] || overview.dataset.releaseIssue ||
+          c.warnings[0] || "No outstanding media checks.";
       }
+      const pill = form.querySelector('[data-ready="' + id + '"]');
+      if (pill) pill.textContent = !enabled ? "Not selected"
+        : c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
+        : overview?.dataset.releaseIssue ? "Needs setup"
+        : overview?.dataset.manual === "1" ? "Manual"
+        : overview?.dataset.hasSource === "1" && !st.photos && !st.video && id !== "facebook" ? "Review media"
+        : c.warnings.length ? "Prepared, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Prepared";
       paintBadges(id, card);
     });
   }

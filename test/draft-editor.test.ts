@@ -113,6 +113,38 @@ test("disabling and re-enabling a platform retains its captions and gallery with
   assert.equal(restored.instagram?.caption,"Saved Instagram words");
 });
 
+
+test("first platform activation inherits source photos without publishing or duplicating uploads",async()=>{
+  const p=await draft({images:6});
+  const result=await call("/post/"+p.id+"/save",{...baseSave(p),p_bluesky:"1",p_instagram:"1",
+    p_tiktok:"1",bs_caption:"Six goblins",tiktok_title:"Six goblins"});
+  assert.equal(result.status,200,await result.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.status,"draft");
+  assert.equal(saved.approved_at,null);
+  assert.deepEqual(saved.images,p.images,"Facebook source gallery stays unchanged");
+  assert.deepEqual(saved.bluesky?.images.map(x=>x.url),p.images.slice(0,4));
+  assert.ok(saved.bluesky?.images.every(x=>x.alt===""),"accessibility descriptions require owner review");
+  assert.deepEqual(saved.tiktok_images,p.images,"TikTok receives independent reference selection");
+  assert.deepEqual(saved.instagram?.items.map(x=>x.url),p.images);
+  assert.ok(saved.instagram?.items.every(x=>x.mode==="pad"),"original photos are not cropped by default");
+  assert.equal(saved.bluesky?.status,"draft");
+  assert.ok(saved.instagram,"Instagram preparation was saved without publishing");
+});
+
+test("late TikTok activation can inherit media from Bluesky when Facebook has none",async()=>{
+  const p=await createPost(db,{message:"The cave map",images:[],video:null,facebook_enabled:false,
+    tiktok_enabled:false,created_by:"test",scheduled_at:null,
+    bluesky:{caption:"Cave",images:[{url:IMG(0),alt:"A cave entrance"}],video:null,patreon:null}});
+  const result=await call("/post/"+p.id+"/save",{expected_updated_at:p.updated_at,
+    p_bluesky:"1",p_tiktok:"1",bs_caption:"Cave",tiktok_title:"The Cave"});
+  assert.equal(result.status,200,await result.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.deepEqual(saved.tiktok_images,[IMG(0)]);
+  assert.deepEqual(saved.images,[]);
+  assert.equal(saved.approved_at,null);
+});
+
 test("TikTok uses a public title and gets a separate image gallery after late activation",async()=>{
   const p=await draft({images:2});
   const selected=await call("/post/"+p.id+"/save",
