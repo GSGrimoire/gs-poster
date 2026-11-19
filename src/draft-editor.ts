@@ -335,7 +335,10 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
     const excerpt = caption.trim().slice(0, 92);
     const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered
       ? view.tiktokPlan.reason
-      : (id === "facebook" || id === "bluesky") && view.releaseProblems.length ? view.releaseProblems[0] : "";
+      : id === "facebook" || id === "bluesky"
+        ? view.releaseProblems.find(message => message.startsWith("Bluesky:") ? id === "bluesky"
+          : message.startsWith("Facebook") ? id === "facebook" : true) ?? ""
+        : "";
     const issue = checks.errors[0] || releaseIssue;
     const extra = id === "instagram" && enabled && !view.instagramPlan?.ok
       ? "Manual download until Instagram is connected and its publishing requirements are met."
