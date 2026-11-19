@@ -1,0 +1,98 @@
+name: PR 90 isolated Cloudflare staging (manual only)
+
+# This workflow can ONLY deploy a separately provisioned, publication-disabled
+# Worker. It does not reference production Cloudflare or OAuth secrets.
+on:
+  # Workflow_dispatch workflows need to exist on main. This explicit label
+  # trigger makes isolated staging possible BEFORE production merge.
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Enter ISOLATED_STAGING_NO_PUBLISH to deploy isolated staging only'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/feature/bluesky-gallery-redraft-video50-20261109' &&
+       inputs.confirmation == 'ISOLATED_STAGING_NO_PUBLISH') ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'pr90-staging-acceptance' &&
+       github.event.pull_request.number == 90 &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.head_ref == 'feature/bluesky-gallery-redraft-video50-20261109')
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    environment: pr90-isolated-staging
+    env:
+      PR90_STAGING_CONFIRM: ${{ github.event_name == 'pull_request' && 'ISOLATED_STAGING_NO_PUBLISH' || inputs.confirmation }}
+      PR90_WORKER_NAME: ${{ vars.PR90_WORKER_NAME }}
+      PR90_D1_DATABASE_ID: ${{ secrets.PR90_D1_DATABASE_ID }}
+      PR90_KV_NAMESPACE_ID: ${{ secrets.PR90_KV_NAMESPACE_ID }}
+      PR90_R2_BUCKET: ${{ vars.PR90_R2_BUCKET }}
+      PR90_LOGIN: ${{ vars.PR90_LOGIN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.PR90_CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.PR90_CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Validate the exact source commit, not GitHub's synthetic merge SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Full source checks
+        run: npm run check
+      - name: Generate verified nonproduction Worker configuration
+        run: node scripts/pr90-staging-config.mjs
+      - name: Dry-run isolated Worker
+        run: npx wrangler deploy --dry-run --config wrangler.pr90-staging.generated.json --outdir dist-staging
+      - name: Deploy only the isolated staging Worker
+        run: npx wrangler deploy --config wrangler.pr90-staging.generated.json
+      - name: Configure nonproduction login secrets only
+        env:
+          PR90_COOKIE: ${{ secrets.PR90_STAGING_COOKIE_SECRET }}
+          PR90_GITHUB_ID: ${{ secrets.PR90_STAGING_GITHUB_CLIENT_ID }}
+          PR90_GITHUB_SECRET: ${{ secrets.PR90_STAGING_GITHUB_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$PR90_COOKIE" && test -n "$PR90_GITHUB_ID" && test -n "$PR90_GITHUB_SECRET"
+          printf '%s' "$PR90_COOKIE" | npx wrangler secret put COOKIE_SECRET --config wrangler.pr90-staging.generated.json
+          printf '%s' "$PR90_GITHUB_ID" | npx wrangler secret put GITHUB_CLIENT_ID --config wrangler.pr90-staging.generated.json
+          printf '%s' "$PR90_GITHUB_SECRET" | npx wrangler secret put GITHUB_CLIENT_SECRET --config wrangler.pr90-staging.generated.json
+      - name: Verify nonpublishing staging boundaries
+        env:
+          PR90_STAGING_ORIGIN: ${{ vars.PR90_STAGING_ORIGIN }}
+        run: node scripts/pr90-staging-public-probe.mjs
+      - name: Record staging evidence metadata
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### PR #90 isolated staging execution'
+            echo
+            echo "- Exact commit: \`$GITHUB_SHA\`"
+            echo "- Branch: \`$GITHUB_REF\`"
+            echo "- This configuration disables cron and blocks all publishing actions."
+            echo "- **Not yet proven here:** 40/49 MB browser upload/import, range readback, storage accounting, Cloudflare 1102/memory and browser interactions."
+            echo "- PR #90 must remain draft until operator uploads live evidence and independent reviewer approves."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect staging probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr90-staging-probe-${{ github.sha }}
+          path: artifacts/pr90-staging/
+          if-no-files-found: warn
+          retention-days: 14

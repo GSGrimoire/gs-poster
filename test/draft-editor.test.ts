@@ -333,3 +333,91 @@ test("Release refuses a saved time that is too close, pointing back to the edito
   assert.match(await res.text(),/Change the time in the editor/);
   assert.equal((await getPost(db,p.id))!.status,"draft");
 });
+
+test("rejected draft has a direct return action in editor and dashboard",async()=>{
+  const p=await draft({bluesky:true});
+  await db.prepare("UPDATE posts SET status='rejected',note=? WHERE id=?")
+    .bind("Revise the caption",p.id).run();
+  const rejected=(await getPost(db,p.id))!;
+  const editor=await (await get("/post/"+p.id)).text();
+  assert.match(editor,/Return rejected post to drafts/);
+  assert.match(editor,new RegExp('action="/post/'+p.id+'/return-to-drafts"'));
+  assert.match(editor,/Revise the caption/);
+  const dashboard=await (await get("/")).text();
+  assert.match(dashboard,new RegExp('action="/post/'+p.id+'/return-to-drafts"'));
+  const res=await call("/post/"+p.id+"/return-to-drafts",{expected_updated_at:rejected.updated_at});
+  assert.equal(res.status,302,await res.clone().text());
+  const restored=(await getPost(db,p.id))!;
+  assert.equal(restored.status,"draft");
+  assert.equal(restored.approved_at,null);
+  assert.equal(restored.note,"Revise the caption","reviewer feedback remains available");
+  assert.deepEqual(restored.bluesky?.images,rejected.bluesky?.images);
+  assert.deepEqual(restored.images,rejected.images);
+  assert.equal((await call("/post/"+p.id+"/return-to-drafts",
+    {expected_updated_at:restored.updated_at})).status,409,"cannot replay after return");
+});
+
+test("return rejected draft refuses forged, stale, cross-origin or approved requests",async()=>{
+  const p=await draft();
+  await db.prepare("UPDATE posts SET status='rejected' WHERE id=?").bind(p.id).run();
+  const rejected=(await getPost(db,p.id))!;
+  const endpoint="/post/"+p.id+"/return-to-drafts";
+  const fields={expected_updated_at:rejected.updated_at};
+  assert.equal((await call(endpoint,fields,{csrf:"invalid-csrf"})).status,403);
+  assert.equal((await call(endpoint,fields,{origin:"https://other.example"})).status,403);
+  assert.equal((await call(endpoint,{expected_updated_at:"2020-01-01T00:00:00.000Z"})).status,409);
+  assert.equal((await getPost(db,p.id))!.status,"rejected");
+  await db.prepare("UPDATE posts SET approved_at=? WHERE id=?")
+    .bind(new Date().toISOString(),p.id).run();
+  assert.equal((await call(endpoint,fields)).status,409);
+  assert.equal((await getPost(db,p.id))!.approved_at===null,false);
+});
+
+test("authenticated planner routes switch between week and month without changing a post",async()=>{
+  const p=await draft({images:3,inHours:3});
+  const parts=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Copenhagen",year:"numeric",month:"2-digit"})
+    .formatToParts(new Date(p.scheduled_at!));
+  const target=parts.find(x=>x.type==="year")!.value+"-"+parts.find(x=>x.type==="month")!.value;
+  const result=await get("/calendar?view=month&month="+target);
+  assert.equal(result.status,200);
+  const html=await result.text();
+  assert.match(html,/calendar-month-grid/);
+  assert.match(html,/aria-current="page">Month/);
+  assert.match(html,new RegExp('href="/post/'+p.id+'"'));
+  assert.match(html,new RegExp('src="/media/'+p.id+'/0\\?thumb=1&amp;platform=facebook"'));
+  assert.doesNotMatch(html,/class="calendar-slot"/,"month has no time slots");
+  const week=await get("/calendar?view=week&week="+target+"-01");
+  assert.equal(week.status,200);
+  assert.match(await week.text(),/class="calendar-now" hidden/);
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.status,"draft");
+  assert.equal(saved.approved_at,null);
+});
+
+test("Month GET does not reconcile a legacy TikTok inbox transfer or approve its draft",async()=>{
+  const p=await createPost(db,{
+    message:"Legacy TikTok inbox transfer",created_by:"test",images:[],tiktok_images:[],
+    tiktok_enabled:true,facebook_enabled:false,scheduled_at:null,
+  });
+  await db.prepare(`CREATE TABLE IF NOT EXISTS tiktok_inbox_transfers
+    (post_id TEXT PRIMARY KEY,status TEXT NOT NULL,publish_id TEXT,media_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL,updated_at TEXT NOT NULL,sent_by TEXT NOT NULL,error TEXT,remote_status TEXT)`).run();
+  await db.prepare(`INSERT INTO tiktok_inbox_transfers
+    (post_id,status,media_ref,created_at,updated_at,sent_by)
+    VALUES (?,'inbox_ready','upload://legacy.mp4',?,?,?)`)
+    .bind(p.id,p.updated_at,p.updated_at,"test").run();
+  const dateParts=new Intl.DateTimeFormat("en-GB",{
+    timeZone:"Europe/Copenhagen",year:"numeric",month:"2-digit",
+  }).formatToParts(new Date(p.created_at));
+  const month=dateParts.find(x=>x.type==="year")!.value+"-"+dateParts.find(x=>x.type==="month")!.value;
+  const monthPage=await get("/calendar?view=month&month="+month);
+  assert.equal(monthPage.status,200);
+  assert.match(await monthPage.text(),/Legacy TikTok inbox transfer/);
+  const unchanged=(await getPost(db,p.id))!;
+  assert.equal(unchanged.status,"draft");
+  assert.equal(unchanged.approved_at,null,"an observational calendar GET cannot mark an inbox attempt approved");
+  // The old Week dashboard still performs its historical reconciliation.
+  const weekPage=await get("/calendar?view=week&week="+month+"-01");
+  assert.equal(weekPage.status,200);
+  assert.equal((await getPost(db,p.id))!.status,"scheduled");
+});

@@ -193,7 +193,7 @@ test("corrupted R2 readback is never marked ready or attached",async()=>{
     assert.deepEqual((await getPost(db,p.id))!.tiktok_images,[GITHUB]);
     const status=await db.prepare("SELECT status FROM uploads WHERE created_by='GSGrimoire' ORDER BY created_at DESC LIMIT 1")
       .first<{status:string}>();
-    assert.equal(status?.status,"uploading","incomplete integrity checks cannot become ready");
+    assert.equal(status?.status,"failed","confirmed removal after corrupt readback cannot become ready or reserve quota");
   } finally { globalThis.fetch=previous; }
 });
 

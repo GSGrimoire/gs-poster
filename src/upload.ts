@@ -16,7 +16,7 @@ const TYPES: Record<UploadExt, { mime: string; max: number }> = {
   jpeg: { mime: "image/jpeg", max: 10 * 1024 * 1024 },
   png: { mime: "image/png", max: 10 * 1024 * 1024 },
   gif: { mime: "image/gif", max: 10 * 1024 * 1024 },
-  mp4: { mime: "video/mp4", max: 20_000_000 },
+  mp4: { mime: "video/mp4", max: 50_000_000 },
 };
 const REF = /^upload:\/\/([a-f0-9]{32})\.(jpg|jpeg|png|gif|mp4)$/;
 const key = (r: UploadRef) => "uploads/" + r.id + "." + r.ext;
@@ -40,7 +40,7 @@ export function looksLike(ext: UploadExt, bytes: Uint8Array): boolean {
 }
 interface UploadRow {
   id: string; token_hash: string; ext: UploadExt; max_bytes: number;
-  status: "pending" | "uploading" | "stored"; created_at: string;
+  status: "pending" | "uploading" | "stored" | "failed"; created_at: string;
   expires_at: string; bytes: number | null; created_by: string | null;
 }
 let schemaReady = false;
@@ -155,18 +155,171 @@ class UploadError extends Error {
     this.status = status;
   }
 }
+/** Carries whether the multipart path conclusively never committed an object.
+ * An abort failure or a possibly completed upload MUST retain its quota fence. */
+class MultipartStoreFailure extends Error {
+  readonly original:unknown;
+  readonly definitelyAbsent:boolean;
+  constructor(original:unknown,definitelyAbsent:boolean) {
+    super(original instanceof Error ? original.message : String(original));
+    this.original=original;
+    this.definitelyAbsent=definitelyAbsent;
+  }
+}
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: {
     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
   } });
 }
+/** A chunk-sized SHA-256 fence, so verification never retains an entire MP4. */
+export interface UploadPartDigest { bytes: number; sha256: string }
+const VIDEO_PART_BYTES = 5 * 1024 * 1024;
+async function digestPart(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, n => n.toString(16).padStart(2, "0")).join("");
+}
+
+/** Read back completed multipart media in bounded ranges before making it draft-ready. */
+export async function verifyStoredUploadParts(
+  env: Env, ref: UploadRef, parts: UploadPartDigest[],
+): Promise<void> {
+  if (!env.UPLOADS || !parts.length) throw new Error("Private upload verification is unavailable.");
+  let offset = 0;
+  for (const part of parts) {
+    if (!part.bytes || part.bytes > VIDEO_PART_BYTES) throw new Error("Invalid private media part.");
+    const object = await env.UPLOADS.get(key(ref), {range:{offset,length:part.bytes}});
+    if (!object || !("body" in object)) throw new Error("Private video readback was not confirmed.");
+    // Each range is at most 5 MiB. Never readUpload() the whole 50 MB file here.
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    if (bytes.byteLength !== part.bytes || await digestPart(bytes) !== part.sha256)
+      throw new Error("Private video copy failed the integrity check.");
+    offset += part.bytes;
+  }
+  const head = await env.UPLOADS.head(key(ref));
+  if (!head || head.size !== offset) throw new Error("Private video size could not be confirmed.");
+}
+
+/** Bound the ACTUAL incoming bytes before allocating the image buffer. */
+async function boundedImageBody(
+  source: ReadableStream<Uint8Array>, max: number, length: number, ext: UploadExt,
+): Promise<Uint8Array> {
+  const reader = source.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      if (next.value.byteLength > max - total || next.value.byteLength > length - total)
+        throw new UploadError("File exceeds allowed size or declared length.", 413);
+      total += next.value.byteLength;
+      chunks.push(next.value);
+    }
+  } finally {
+    try { await reader.cancel(); } catch { /* already closed */ }
+    reader.releaseLock();
+  }
+  if (!total) throw new UploadError("The file is empty.",400);
+  if (total !== length) throw new UploadError("Content size is invalid.",413);
+  const body = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) { body.set(chunk,at); at += chunk.byteLength; }
+  if (!looksLike(ext,body.subarray(0,Math.min(16,total))))
+    throw new UploadError("File header does not match its extension.",415);
+  return body;
+}
+
+/** Multipart keeps only one 5 MiB part and one incoming network chunk in memory.
+ * All non-final parts are 5 MiB, satisfying the R2 multipart minimum.
+ * A missing Content-Length is permitted only for a trusted, internal import.
+ */
+async function storeVideoInParts(
+  env: Env, ref: UploadRef, source: ReadableStream<Uint8Array>, max: number,
+  declared: number | null,
+): Promise<{bytes:number;parts:UploadPartDigest[]}> {
+  const reader = source.getReader();
+  const fingerprints: UploadPartDigest[] = [];
+  const completedParts: Awaited<ReturnType<R2MultipartUpload["uploadPart"]>>[] = [];
+  let piece = new Uint8Array(VIDEO_PART_BYTES);
+  let filled = 0, total = 0, headerFilled = 0;
+  const header = new Uint8Array(12);
+  const state: {upload:R2MultipartUpload|null} = {upload:null};
+  let commitAttempted = false;
+  const savePart = async (data: Uint8Array) => {
+    if (!state.upload) state.upload = await env.UPLOADS!.createMultipartUpload(key(ref), {
+      httpMetadata:{contentType:"video/mp4"},
+    });
+    const hash = await digestPart(data);
+    const part = await state.upload.uploadPart(completedParts.length + 1,data);
+    completedParts.push(part);
+    fingerprints.push({bytes:data.byteLength,sha256:hash});
+  };
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      const bytes = next.value;
+      if (bytes.byteLength > max - total ||
+          (declared !== null && bytes.byteLength > declared - total))
+        throw new UploadError("File exceeds allowed size or declared length.",413);
+      total += bytes.byteLength;
+      if (headerFilled < 12) {
+        const n = Math.min(12-headerFilled,bytes.byteLength);
+        header.set(bytes.subarray(0,n),headerFilled);
+        headerFilled += n;
+        if (headerFilled === 12 && !looksLike("mp4",header))
+          throw new UploadError("File header does not match its extension.",415);
+      }
+      let at = 0;
+      while (at < bytes.byteLength) {
+        const n = Math.min(VIDEO_PART_BYTES-filled,bytes.byteLength-at);
+        piece.set(bytes.subarray(at,at+n),filled);
+        filled += n; at += n;
+        if (filled === VIDEO_PART_BYTES) {
+          await savePart(piece);
+          piece = new Uint8Array(VIDEO_PART_BYTES);
+          filled = 0;
+        }
+      }
+    }
+    if (!total) throw new UploadError("The file is empty.",400);
+    if (headerFilled < 12) throw new UploadError("File header does not match its extension.",415);
+    if (declared !== null && declared !== total)
+      throw new UploadError("Content size is invalid.",413);
+    if (filled) await savePart(piece.subarray(0,filled));
+    if (!state.upload || !completedParts.length) throw new Error("No video parts were stored.");
+    // Never retry or abort after an ambiguous multipart commit attempt.
+    commitAttempted = true;
+    await state.upload.complete(completedParts);
+    return {bytes:total,parts:fingerprints};
+  } catch (error) {
+    // No multipart handle means no completed object was submitted. If a
+    // multipart handle exists, only a CONFIRMED abort frees the quota.
+    // After complete() is attempted, even an exception is ambiguous.
+    let definitelyAbsent = !state.upload && !commitAttempted;
+    if (state.upload && !commitAttempted) {
+      try {
+        await state.upload.abort();
+        definitelyAbsent = true;
+      } catch { /* unknown remote part state: retain reservation */ }
+    }
+    throw new MultipartStoreFailure(error,definitelyAbsent);
+  } finally {
+    try { await reader.cancel(); } catch { /* already finished */ }
+    reader.releaseLock();
+  }
+}
+
 /** PUT /upload/:id/:token is the only unauthenticated write.
- * Native imports may supply a private readback verifier. If it fails,
- * the upload MUST NOT transition to stored. Other upload flows are unchanged.
+ * Native GitHub imports may omit Content-Length and request chunked readback.
+ * The public upload route never supplies these internal options.
  */
 export async function handleUploadPut(
   request: Request, env: Env,
-  options?:{verifyBeforeFinalize?:(reference:UploadRef)=>Promise<void>},
+  options?:{
+    internalUnknownLength?:boolean;
+    verifyBeforeFinalize?:(reference:UploadRef,parts:UploadPartDigest[])=>Promise<void>;
+  },
 ): Promise<Response> {
   const match = /^\/upload\/([a-f0-9]{32})\/([A-Za-z0-9_-]{20,64})$/.exec(new URL(request.url).pathname);
   if (!match) return json({error:"Not found."},404);
@@ -180,53 +333,75 @@ export async function handleUploadPut(
   const row = await env.DB.prepare("SELECT * FROM uploads WHERE id = ?").bind(id).first<UploadRow>();
   if (!row || row.status !== "pending" || row.expires_at <= new Date().toISOString() ||
       !safeEqual(await sha256(token),row.token_hash)) return gone();
+  // Pre-write request rejection is definitive: consume the invalid bearer
+  // grant as failed, freeing reserved bytes without granting a second PUT.
+  // The conditional update cannot invalidate another request's active claim.
+  const rejectUnused=async(message:string,status:number):Promise<Response>=>{
+    await env.DB.prepare("UPDATE uploads SET status='failed' WHERE id=? AND status='pending'")
+      .bind(id).run();
+    return json({error:message},status);
+  };
   const lengthHeader = request.headers.get("content-length");
-  const length = lengthHeader === null ? NaN : Number(lengthHeader);
-  if (!Number.isSafeInteger(length) || length <= 0) return json({error:"Content-Length is required."},411);
-  if (length > row.max_bytes) return json({error:"File exceeds allowed size."},413);
+  const length = lengthHeader === null ? null : Number(lengthHeader);
+  if ((length === null && !options?.internalUnknownLength) ||
+      (length !== null && (!Number.isSafeInteger(length) || length <= 0)))
+    return rejectUnused("Content-Length is required.",411);
+  if (length !== null && length > row.max_bytes)
+    return rejectUnused("File exceeds allowed size.",413);
+  if (!request.body) return rejectUnused("The file is empty.",400);
   const claim = await env.DB.prepare("UPDATE uploads SET status = 'uploading' WHERE id = ? AND status = 'pending' AND expires_at > ?")
     .bind(id,new Date().toISOString()).run();
   if ((claim.meta.changes ?? 0) !== 1) return gone();
+  const ref: UploadRef = {id,ext:row.ext};
   let writeStarted = false;
-  // Once finalization is attempted, a failed response does not tell us
-  // whether the database committed. Never delete a verified R2 object then.
+  // A failed database response may still have committed. Never delete after
+  // attempting to mark stored, and never reuse a token after starting R2.
   let finalizationAttempted = false;
   try {
-    const body = await request.arrayBuffer();
-    if (!body.byteLength) throw new UploadError("The file is empty.",400);
-    if (body.byteLength > row.max_bytes || body.byteLength !== length)
-      throw new UploadError("Content size is invalid.",413);
-    if (!looksLike(row.ext,new Uint8Array(body,0,Math.min(16,body.byteLength))))
-      throw new UploadError("File header does not match its extension.",415);
-    const ref = {id, ext:row.ext};
-    // Once R2 is called, a network failure may be ambiguous: never reuse the token.
-    writeStarted = true;
-    await env.UPLOADS.put(key(ref),body,{httpMetadata:{contentType:TYPES[row.ext].mime}});
-    // The object must be independently verified BEFORE it becomes ready.
-    // An integrity failure leaves status='uploading', which all readiness and
-    // draft-attachment checks reject. Never reopen the consumed bearer token.
-    if(options?.verifyBeforeFinalize)await options.verifyBeforeFinalize(ref);
+    let size: number;
+    let fingerprints: UploadPartDigest[] = [];
+    if (row.ext === "mp4") {
+      // The multipart helper reports whether failures left an object absent.
+      const stored = await storeVideoInParts(env,ref,request.body,row.max_bytes,length);
+      writeStarted = true;
+      size = stored.bytes;
+      fingerprints = stored.parts;
+    } else {
+      if (length === null) throw new UploadError("Content-Length is required.",411);
+      const body = await boundedImageBody(request.body,row.max_bytes,length,row.ext);
+      writeStarted = true;
+      await env.UPLOADS.put(key(ref),body,{httpMetadata:{contentType:TYPES[row.ext].mime}});
+      size = body.byteLength;
+    }
+    // Independent readback must occur before any prepared video becomes ready.
+    if(options?.verifyBeforeFinalize)await options.verifyBeforeFinalize(ref,fingerprints);
     finalizationAttempted = true;
     const mark = await env.DB.prepare("UPDATE uploads SET status = 'stored', bytes = ? WHERE id = ? AND status = 'uploading'")
-      .bind(body.byteLength,id).run();
+      .bind(size,id).run();
     if ((mark.meta.changes ?? 0) !== 1) throw new Error("Failed to finalize the upload record.");
-    return json({ok:true,reference:formatUploadRef(ref),bytes:body.byteLength});
+    return json({ok:true,reference:formatUploadRef(ref),bytes:size});
   } catch (error) {
-    // Do not reopen a token after an attempted R2 write: a retry could
-    // overwrite its object. Failed verified imports are never draft-ready.
-    if (!writeStarted) await env.DB.prepare("UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'uploading'")
-      .bind(id).run();
-    if(writeStarted && !finalizationAttempted && options?.verifyBeforeFinalize && env.UPLOADS){
-      // The database has not been asked to mark this object ready. Cleanup
-      // here cannot remove an upload already finalized by this invocation.
-      try { await env.UPLOADS.delete(key({id,ext:row.ext})); } catch { /* non-ready status wins */ }
+    const cause=error instanceof MultipartStoreFailure ? error.original : error;
+    let definitelyAbsent=!writeStarted &&
+      (!(error instanceof MultipartStoreFailure) || error.definitelyAbsent);
+    if (writeStarted && !finalizationAttempted && options?.verifyBeforeFinalize && env.UPLOADS) {
+      // A verified import whose readback failed is not draft-ready. Only a
+      // CONFIRMED deletion permits the failed terminal state and quota release.
+      try {
+        await env.UPLOADS.delete(key(ref));
+        definitelyAbsent=true;
+      } catch { /* ambiguous object remains reserved and unavailable */ }
     }
-    // After finalization is attempted, even a thrown DB response can mean
-    // the row is already 'stored'. Preserve the verified object. A retry
-    // cannot overwrite it because the one-use token stays consumed. Callers
-    // must inspect the owner-scoped status instead of assuming failure/success.
-    return error instanceof UploadError
-      ? json({error:error.message},error.status)
+    if (definitelyAbsent) {
+      // Failed is terminal, excluded from the 3 GiB reservation sum. Never
+      // reopen a consumed link, even for definitely pre-write input errors.
+      try {
+        await env.DB.prepare("UPDATE uploads SET status='failed' WHERE id=? AND status='uploading'")
+          .bind(id).run();
+      } catch { /* uncertain database state: fail closed, never retry */ }
+    }
+    return cause instanceof UploadError
+      ? json({error:cause.message},cause.status)
       : json({error:"Upload failed. Contact support if the link has been consumed."},500);
   }
 }
@@ -248,7 +423,7 @@ export async function pendingUploadPageInfo(
 
 /** Only the OAuth/GitHub owner may query whether an upload can be used in a draft. */
 export async function uploadStatusForOwner(db:D1Database,reference:string,login:string):
-  Promise<{reference:string;status:"pending"|"uploading"|"stored"|"expired";bytes:number|null;max_bytes:number}|null> {
+  Promise<{reference:string;status:"pending"|"uploading"|"stored"|"failed"|"expired";bytes:number|null;max_bytes:number}|null> {
   const parsed=parseUploadRef(reference);
   if(!parsed||!login.trim())return null;
   await ensureUploads(db);

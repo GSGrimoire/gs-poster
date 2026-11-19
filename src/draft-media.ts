@@ -33,7 +33,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
   </details>
   <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video || post.instagram?.video ? "+ Replace video" : "+ Add video"}</summary>
-  <p class="hint">One MP4, up to 20 MB. A platform can have photos or a video, not both. Nothing is published.</p>
+  <p class="hint">One private MP4, up to 50 MB. Facebook publishing remains limited to 20 MB; choose other platforms for a larger video. A platform can have photos or a video, not both. Nothing is published.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
     <input type="file" id="video-file" accept=".mp4,video/mp4" hidden>
@@ -87,8 +87,8 @@ export const DRAFT_MEDIA_JS = `
   let previewUrl = null;
   function chooseVideo(file) {
     if (running || !file) return;
-    if (!file.name.toLowerCase().endsWith(".mp4") || file.size <= 0 || file.size > 20_000_000) {
-      videoStatus.textContent = "Choose a nonempty MP4 up to 20 MB.";return;
+    if (!file.name.toLowerCase().endsWith(".mp4") || file.size <= 0 || file.size > 50_000_000) {
+      videoStatus.textContent = "Choose a nonempty MP4 up to 50 MB.";return;
     }
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     selectedVideo = file;

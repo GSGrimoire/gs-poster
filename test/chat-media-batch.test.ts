@@ -79,7 +79,7 @@ test("batch upload validates extension and file count without creating public me
  assert.deepEqual(validateChatFilenames([" still.png "]),["still.png"]);
  const {env}=setup();
  const batch=await createChatUploadBatch(env,"https://poster.test","editor",["one.png","two.mp4"]);
- assert.equal(batch.uploads[1].max_bytes,20_000_000);
+ assert.equal(batch.uploads[1].max_bytes,50_000_000);
  assert.ok(batch.uploads.every(x=>!x.upload_page_url.includes("/publish/")));
 });
 test("TikTok-specific caption and hashtags are preserved without modifying Facebook text",()=>{
