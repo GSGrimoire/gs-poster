@@ -360,6 +360,7 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
       <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
       <div class="platform-overview-check"><strong data-ready="${id}">${esc(status)}</strong>
         <span data-overview-issue="${id}">${esc(issue || extra || checks.warnings[0] || "No outstanding media checks.")}</span>
+        ${issue && extra ? `<span class="platform-overview-extra">${esc(extra)}</span>` : ""}
         <span class="platform-overview-caption">${esc(excerpt ? "Caption: " + excerpt + (caption.trim().length > 92 ? "…" : "") : "Caption: not yet written")}</span></div>
       <a data-overview-edit="${id}" href="#target-${id}"${enabled ? "" : " hidden"}>Edit ${esc(rule.label)}</a>
     </div>`;
