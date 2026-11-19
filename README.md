@@ -24,6 +24,16 @@ GS Poster exposes public product and legal information for external platform rev
 
 TikTok Login Kit and manual inbox uploads are implemented, with optional private-only Direct Post tests for videos and photo carousels. TikTok does not follow GS Poster's calendar automatically. All TikTok transfers require explicit approval PIN and only granted TikTok permissions are used. Photos and direct-post videos require URL-prefix verification for short-lived public media links. See [TIKTOK_SETUP.md](./TIKTOK_SETUP.md) and [TIKTOK_APP_REVIEW.md](./TIKTOK_APP_REVIEW.md) for configuration and app-review limitations.
 
+## Production releases while GitHub Actions credits are exhausted
+
+**Owner decision, 19 November 2026:** production releases are permitted now through an authorized deployment mechanism that consumes no GitHub Actions credits. Cloudflare Workers remains available. Do not apply a blanket restriction on production deployment until December, but do not intentionally start credit-consuming GitHub Actions jobs.
+
+The usual GitHub deployment workflow in `.github/workflows/deploy.yml` runs checks and a Wrangler deployment on GitHub-hosted runners after every push to `main`. Therefore **merging a pull request to `main` can still trigger chargeable Actions**. A reviewed commit may instead be released using an already authorized direct Cloudflare mechanism, subject to exactly the same test, review, migration and safety gates. Do not use a direct release as a pretext for bypassing code review or the owner's publishing PIN.
+
+Before deploying, validate the exact source artifact, run `npm run check`, perform the Wrangler dry-run, verify Cloudflare bindings and account permissions, and confirm rollback and post-deployment checks. Treat missing GitHub Actions continuous integration as *not run*, never *passed*. Record the deployed commit/artifact and provider confirmation. If direct deployment access is unavailable, report that specific access blocker rather than assuming Cloudflare availability grants credentials.
+
+GitHub's documented `[skip ci]` marker on the proposed documentation pull request prevents ordinary `pull_request`/`push` jobs without running them, but required checks may stay pending. It does **not** stop independently scheduled workflows. GS Poster's `dependency-audit.yml` has a weekly GitHub-hosted schedule, so zero Actions usage needs an additional audited operational decision to pause that schedule through GitHub's workflow controls. Do not silently disable security monitoring.
+
 ## Who can do what
 
 | | Connected AI assistant (MCP) | Gus (approval site) |
