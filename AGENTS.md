@@ -16,3 +16,8 @@ The Full review begins with an entry-point inventory, trust/threat model, invari
 When multiple ChatGPT sessions collaborate on one change, name them **ChatGPT-1 | Implementer** and **ChatGPT-2 | Independent Reviewer**, or assign unique higher numbered names with clear roles. Put these labels in the first pull-request comment, relevant review, and handoff, alongside the actual GitHub account and exact commit. The implementation session must not independently approve its own changes. Two sessions with the same GitHub identity cannot produce a formal approving review of that account's own pull request. Named sessions are traceability labels, not proof of independent human review.
 
 Keep the GS Poster approval and publishing protections in [CLAUDE.md](CLAUDE.md) unchanged.
+
+## Deployment and GitHub Actions credit constraint
+
+The owner clarified on 19 November 2026 that production releases are permitted now through verified, authorized no-GitHub-Actions-credit routes such as direct Cloudflare Worker deployment. **Do not treat the end of November as a blanket production freeze.** A merge to `main` currently triggers GitHub Actions, so verify its actual trigger and credit impact before merging. Keep all full-review, local test, permission, secrets, approval and deployment-verification gates from [CLAUDE.md](CLAUDE.md). Software deployment is not publication of social-media content.
+
