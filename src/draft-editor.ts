@@ -102,9 +102,18 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   const copyFacebook = form.get("tt_copy_fb") === "1";
   if (tiktok && copyFacebook && cur.video && !video)
     errors.push("Cannot copy the Facebook video while also removing it.");
-  if (tiktok && (cur.tiktok_images === null || copyFacebook)) {
+  if (tiktok && copyFacebook) {
     tiktokImages = [...images];
     tiktokVideo = video;
+  } else if (tiktok && cur.tiktok_images === null) {
+    // Preserve the legacy Facebook fallback for already enabled drafts.
+    // On first activation, allow another platform to supply the source when
+    // Facebook has no gallery. No private bytes are copied or published.
+    const firstActivation = !cur.tiktok_enabled;
+    const sourcePhotos = firstActivation && !images.length ? postPhotos(cur) : images;
+    tiktokImages = firstActivation ? sourcePhotos.slice(0, 35) : [...sourcePhotos];
+    tiktokVideo = sourcePhotos.length ? null
+      : (video ?? (firstActivation ? postVideos(cur)[0] ?? null : null));
   }
   const ttCaptionRaw = text(form, "tiktok_caption", cur.tiktok_caption ?? "").trim();
   const tiktokCaption = ttCaptionRaw || null;
@@ -319,8 +328,9 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
   const rows = PLATFORM_ORDER.map(id => {
     const rule = PLATFORMS[id], enabled = on[id], state = states[id], checks = checkTarget(state);
     const media = state.video ? "1 video" : state.photos === 1 ? "1 photo" : state.photos + " photos";
-    const issue = checks.errors[0] ??
-      (id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered ? view.tiktokPlan.reason : "");
+    const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered
+      ? view.tiktokPlan.reason : "";
+    const issue = checks.errors[0] || releaseIssue;
     const extra = id === "instagram" && enabled && !view.instagramPlan?.ok
       ? "Manual download until Instagram is connected and its publishing requirements are met."
       : enabled && sourceCount > 0 && !state.photos && !state.video
@@ -333,7 +343,7 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
       : issue ? "Needs setup" : id === "instagram" && !view.instagramPlan?.ok ? "Manual" :
         checks.warnings.length ? "Ready, " + checks.warnings.length + (checks.warnings.length === 1 ? " note" : " notes") : "Ready";
     return `<div class="platform-overview-row${enabled ? "" : " is-inactive"}${checks.errors.length && enabled ? " has-e" : ""}"
-      data-overview-platform="${id}">
+      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}">
       <label class="platform-overview-name"><input type="checkbox" name="p_${id}" value="1"
         data-platform-toggle="${id}"${enabled ? " checked" : ""}> <strong>${esc(rule.label)}</strong></label>
       <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
@@ -950,12 +960,13 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         const media = overview.querySelector("[data-overview-media]");
         if (media) media.textContent = st.video ? "1 video" : st.photos === 1 ? "1 photo" : st.photos + " photos";
         const issue = overview.querySelector("[data-overview-issue]");
-        if (issue && enabled && c.errors.length) issue.textContent = c.errors[0];
-        else if (issue && enabled && c.warnings.length) issue.textContent = c.warnings[0];
+        if (issue && enabled) issue.textContent = c.errors[0] || overview.dataset.releaseIssue ||
+          c.warnings[0] || "No outstanding media checks.";
       }
       const pill = form.querySelector('[data-ready="' + id + '"]');
       if (pill) pill.textContent = !enabled ? "Not selected"
         : c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
+        : overview?.dataset.releaseIssue ? "Needs setup"
         : c.warnings.length ? "Ready, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Ready";
       paintBadges(id, card);
     });
