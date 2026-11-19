@@ -292,8 +292,9 @@ export function targetStates(p: Post): Record<PlatformId, TargetState> {
     bluesky: { id: "bluesky", captionLength: bs ? textLength(bs.caption) : 0,
       photos: bs?.video ? 0 : (bs?.images.length ?? 0), video: !!bs?.video,
       missingAlt: (bs?.images.filter((i) => !i.alt.trim()).length ?? 0) + (bs?.video && !bs.video.alt.trim() ? 1 : 0) },
-    instagram: { id: "instagram", captionLength: p.instagram?.caption.length ?? 0,
-      photos: p.instagram?.items.length ?? 0, video: !!p.instagram?.video, missingAlt: 0, hashtags: countHashtags(p.instagram?.caption ?? "") },
+    instagram: { id: "instagram", captionLength: (p.instagram ?? p.instagram_paused)?.caption.length ?? 0,
+      photos: (p.instagram ?? p.instagram_paused)?.items.length ?? 0, video: !!(p.instagram ?? p.instagram_paused)?.video,
+      missingAlt: 0, hashtags: countHashtags((p.instagram ?? p.instagram_paused)?.caption ?? "") },
     tiktok: { id: "tiktok", captionLength: (p.tiktok_caption ?? p.message).length,
       photos: ttShared ? (p.video ? 0 : p.images.length) : tt.images.length,
       video: ttShared ? !!p.video : !!tt.video, missingAlt: 0, missingTitle: !(p.tiktok_title ?? "").trim() },
@@ -328,6 +329,10 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
   const rows = PLATFORM_ORDER.map(id => {
     const rule = PLATFORMS[id], enabled = on[id], state = states[id], checks = checkTarget(state);
     const media = state.video ? "1 video" : state.photos === 1 ? "1 photo" : state.photos + " photos";
+    const caption = id === "facebook" ? p.message : id === "tiktok" ? p.tiktok_caption ?? p.message
+      : id === "bluesky" ? (p.bluesky ?? p.bluesky_paused)?.caption ?? ""
+      : (p.instagram ?? p.instagram_paused)?.caption ?? "";
+    const excerpt = caption.trim().slice(0, 92);
     const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered
       ? view.tiktokPlan.reason : "";
     const issue = checks.errors[0] || releaseIssue;
@@ -338,17 +343,19 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
         : enabled && sourceCount > rule.maxPhotos && state.photos === rule.maxPhotos
           ? "Only the first " + rule.maxPhotos + " source images were selected. Review the gallery."
           : !enabled ? "Select to add this destination. Existing media is offered on first activation." : "";
+    const manual = id === "instagram" && !view.instagramPlan?.ok;
     const status = !enabled ? "Not selected" : checks.errors.length
       ? checks.errors.length + (checks.errors.length === 1 ? " problem" : " problems")
-      : issue ? "Needs setup" : id === "instagram" && !view.instagramPlan?.ok ? "Manual" :
-        checks.warnings.length ? "Ready, " + checks.warnings.length + (checks.warnings.length === 1 ? " note" : " notes") : "Ready";
+      : issue ? "Needs setup" : manual ? "Manual" :
+        checks.warnings.length ? "Prepared, " + checks.warnings.length + (checks.warnings.length === 1 ? " note" : " notes") : "Prepared";
     return `<div class="platform-overview-row${enabled ? "" : " is-inactive"}${checks.errors.length && enabled ? " has-e" : ""}"
-      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}">
+      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}" data-manual="${manual ? "1" : "0"}">
       <label class="platform-overview-name"><input type="checkbox" name="p_${id}" value="1"
         data-platform-toggle="${id}"${enabled ? " checked" : ""}> <strong>${esc(rule.label)}</strong></label>
       <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
       <div class="platform-overview-check"><strong data-ready="${id}">${esc(status)}</strong>
-        <span data-overview-issue="${id}">${esc(issue || extra || checks.warnings[0] || "No outstanding media checks.")}</span></div>
+        <span data-overview-issue="${id}">${esc(issue || extra || checks.warnings[0] || "No outstanding media checks.")}</span>
+        <span class="platform-overview-caption">${esc(excerpt ? "Caption: " + excerpt + (caption.trim().length > 92 ? "…" : "") : "Caption: not yet written")}</span></div>
       <a data-overview-edit="${id}" href="#target-${id}"${enabled ? "" : " hidden"}>Edit ${esc(rule.label)}</a>
     </div>`;
   }).join("");
@@ -513,6 +520,7 @@ export function renderDraftEditor(v: EditorView): string {
 .platform-overview-check strong{font-weight:650}
 .platform-overview-row.has-e .platform-overview-check strong{color:var(--err)}
 .platform-overview-check span{color:var(--muted);overflow-wrap:anywhere}
+.platform-overview-caption{font-size:12px;opacity:.85}
 .platform-overview-row a{text-align:right;white-space:nowrap}
 .platform-overview-row a[hidden]{display:none}
 @media(max-width:680px){.platform-overview-row{grid-template-columns:minmax(110px,1fr) auto;gap:6px 12px}.platform-overview-check{grid-column:1/-1;grid-row:2}.platform-overview-row a{grid-column:2;grid-row:1}}
@@ -967,7 +975,8 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       if (pill) pill.textContent = !enabled ? "Not selected"
         : c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
         : overview?.dataset.releaseIssue ? "Needs setup"
-        : c.warnings.length ? "Ready, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Ready";
+        : overview?.dataset.manual === "1" ? "Manual"
+        : c.warnings.length ? "Prepared, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Prepared";
       paintBadges(id, card);
     });
   }
