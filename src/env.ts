@@ -52,6 +52,10 @@ export interface Env {
   TIKTOK_TOKEN_ENCRYPTION_KEY?: string;
   /** Exact callback registered with TikTok. Defaults to the production workers.dev URL. */
   TIKTOK_REDIRECT_URI?: string;
+  /** Threads API app id and secret (Worker secrets). The sign-in token is
+   * encrypted at rest with a key derived from COOKIE_SECRET. */
+  THREADS_APP_ID?: string;
+  THREADS_APP_SECRET?: string;
 }
 
 export const REQUIRED_SECRETS = [

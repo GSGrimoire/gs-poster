@@ -394,7 +394,7 @@ test("F2: a calendar move is refused, with nothing changed, once Instagram has s
   await db.prepare("UPDATE instagram_jobs SET status = 'preparing' WHERE post_id = ?").bind(p.id).run();
   const cur = (await getPost(db, p.id))!;
   await assert.rejects(reschedulePost(env(), p.id, new Date(Date.now() + 2 * 86400_000), cur.updated_at, "gsgrimoire"),
-    /Instagram has started/);
+    /Instagram or Threads has started/);
   // The same guard sits inside the transaction itself, for a claim that lands after any read.
   assert.equal(await updateCalendarTime(db, p.id, new Date(Date.now() + 3 * 86400_000).toISOString(), cur.updated_at, false), false);
   const after = (await getPost(db, p.id))!;
@@ -413,7 +413,7 @@ test("F2: an approved mixed schedule is refused before Facebook is touched once 
   await db.prepare("UPDATE instagram_jobs SET status = 'processing' WHERE post_id = ?").bind(p.id).run();
   const cur = (await getPost(db, p.id))!;
   await assert.rejects(reschedulePost(env(), p.id, new Date(Date.now() + 2 * 86400_000), cur.updated_at, "gsgrimoire"),
-    /Instagram has started/);
+    /Instagram or Threads has started/);
   assert.equal(calls.length, 0, "no Facebook call was made");
   assert.equal((await getPost(db, p.id))!.scheduled_at, at);
 });
