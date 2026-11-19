@@ -334,7 +334,8 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
       : (p.instagram ?? p.instagram_paused)?.caption ?? "";
     const excerpt = caption.trim().slice(0, 92);
     const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered
-      ? view.tiktokPlan.reason : "";
+      ? view.tiktokPlan.reason
+      : (id === "facebook" || id === "bluesky") && view.releaseProblems.length ? view.releaseProblems[0] : "";
     const issue = checks.errors[0] || releaseIssue;
     const extra = id === "instagram" && enabled && !view.instagramPlan?.ok
       ? "Manual download until Instagram is connected and its publishing requirements are met."
@@ -344,12 +345,13 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
           ? "Only the first " + rule.maxPhotos + " source images were selected. Review the gallery."
           : !enabled ? "Select to add this destination. Existing media is offered on first activation." : "";
     const manual = id === "instagram" && !view.instagramPlan?.ok;
+    const mediaReview = enabled && sourceCount > 0 && !state.photos && !state.video && id !== "facebook";
     const status = !enabled ? "Not selected" : checks.errors.length
       ? checks.errors.length + (checks.errors.length === 1 ? " problem" : " problems")
-      : issue ? "Needs setup" : manual ? "Manual" :
+      : issue ? "Needs setup" : manual ? "Manual" : mediaReview ? "Review media" :
         checks.warnings.length ? "Prepared, " + checks.warnings.length + (checks.warnings.length === 1 ? " note" : " notes") : "Prepared";
     return `<div class="platform-overview-row${enabled ? "" : " is-inactive"}${checks.errors.length && enabled ? " has-e" : ""}"
-      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}" data-manual="${manual ? "1" : "0"}">
+      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}" data-manual="${manual ? "1" : "0"}" data-has-source="${sourceCount ? "1" : "0"}">
       <label class="platform-overview-name"><input type="checkbox" name="p_${id}" value="1"
         data-platform-toggle="${id}"${enabled ? " checked" : ""}> <strong>${esc(rule.label)}</strong></label>
       <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
@@ -977,6 +979,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         : c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
         : overview?.dataset.releaseIssue ? "Needs setup"
         : overview?.dataset.manual === "1" ? "Manual"
+        : overview?.dataset.hasSource === "1" && !st.photos && !st.video && id !== "facebook" ? "Review media"
         : c.warnings.length ? "Prepared, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Prepared";
       paintBadges(id, card);
     });
