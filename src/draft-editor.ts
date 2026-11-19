@@ -312,8 +312,45 @@ function checkItems(t: TargetState): string {
 }
 
 const photos = (n: number) => (n ? n + (n === 1 ? " photo" : " photos") : "text only");
-const chip = (name: string, label: string, on: boolean) =>
-  `<label class="platform-chip"><input type="checkbox" name="${name}" value="1" data-platform-toggle="${name.slice(2)}"${on ? " checked" : ""}> ${label}</label>`;
+
+/** One horizontal row per platform; inactive targets stay visible. */
+export function renderPlatformOverview(p: Post, states: Record<PlatformId, TargetState>,
+    on: Record<PlatformId, boolean>, sourceCount: number, view: EditorView): string {
+  const rows = PLATFORM_ORDER.map(id => {
+    const rule = PLATFORMS[id], enabled = on[id], state = states[id], checks = checkTarget(state);
+    const media = state.video ? "1 video" : state.photos === 1 ? "1 photo" : state.photos + " photos";
+    const issue = checks.errors[0] ??
+      (id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered ? view.tiktokPlan.reason : "");
+    const extra = id === "instagram" && enabled && !view.instagramPlan?.ok
+      ? "Manual download until Instagram is connected and its publishing requirements are met."
+      : enabled && sourceCount > 0 && !state.photos && !state.video
+        ? "No image selected. This platform will send text only if supported."
+        : enabled && sourceCount > rule.maxPhotos && state.photos === rule.maxPhotos
+          ? "Only the first " + rule.maxPhotos + " source images were selected. Review the gallery."
+          : !enabled ? "Select to add this destination. Existing media is offered on first activation." : "";
+    const status = !enabled ? "Not selected" : checks.errors.length
+      ? checks.errors.length + (checks.errors.length === 1 ? " problem" : " problems")
+      : issue ? "Needs setup" : id === "instagram" && !view.instagramPlan?.ok ? "Manual" :
+        checks.warnings.length ? "Ready, " + checks.warnings.length + (checks.warnings.length === 1 ? " note" : " notes") : "Ready";
+    return `<div class="platform-overview-row${enabled ? "" : " is-inactive"}${checks.errors.length && enabled ? " has-e" : ""}"
+      data-overview-platform="${id}">
+      <label class="platform-overview-name"><input type="checkbox" name="p_${id}" value="1"
+        data-platform-toggle="${id}"${enabled ? " checked" : ""}> <strong>${esc(rule.label)}</strong></label>
+      <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
+      <div class="platform-overview-check"><strong data-ready="${id}">${esc(status)}</strong>
+        <span data-overview-issue="${id}">${esc(issue || extra || checks.warnings[0] || "No outstanding media checks.")}</span></div>
+      <a data-overview-edit="${id}" href="#target-${id}"${enabled ? "" : " hidden"}>Edit ${esc(rule.label)}</a>
+    </div>`;
+  }).join("");
+  return `<section class="ed-card platform-overview" aria-labelledby="ed-platforms">
+    <h3 id="ed-platforms">Prepare destinations</h3>
+    <p class="hint">All platforms stay visible. Select a destination to reuse existing post media on first activation.
+      Inactive platforms are greyed out and excluded from approval. Previously customized galleries are preserved.
+      Saving and selecting platforms never publishes anything.</p>
+    <div class="platform-overview-list">${rows}</div>
+  </section>`;
+}
+
 
 export function renderDraftEditor(v: EditorView): string {
   const p = v.post;
@@ -455,7 +492,21 @@ export function renderDraftEditor(v: EditorView): string {
 .adder>summary::-webkit-details-marker{display:none}
 .adder[open]{flex-basis:100%}
 .adder[open]>summary{border-style:solid;margin-bottom:12px}
-.targets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;align-items:start;margin-top:12px}
+.platform-overview-list{display:grid;gap:8px}
+.platform-overview-row{display:grid;grid-template-columns:minmax(120px,1fr) minmax(72px,.6fr) minmax(190px,2fr) auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg);font:13px system-ui,sans-serif}
+.platform-overview-row.is-inactive{background:color-mix(in srgb,var(--bg) 65%,var(--line));color:var(--muted)}
+.platform-overview-row.is-inactive>*:not(.platform-overview-name){opacity:.65}
+.platform-overview-row.has-e{border-color:var(--err)}
+.platform-overview-name{display:flex!important;align-items:center;gap:8px;margin:0!important;cursor:pointer}
+.platform-overview-name input{margin:0}
+.platform-overview-check{display:grid;gap:4px;min-width:0}
+.platform-overview-check strong{font-weight:650}
+.platform-overview-row.has-e .platform-overview-check strong{color:var(--err)}
+.platform-overview-check span{color:var(--muted);overflow-wrap:anywhere}
+.platform-overview-row a{text-align:right;white-space:nowrap}
+.platform-overview-row a[hidden]{display:none}
+@media(max-width:680px){.platform-overview-row{grid-template-columns:minmax(110px,1fr) auto;gap:6px 12px}.platform-overview-check{grid-column:1/-1;grid-row:2}.platform-overview-row a{grid-column:2;grid-row:1}}
+.targets{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start;margin-top:12px}
 .target{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg);display:grid;gap:8px;min-width:0}
 /* A hidden target must not be shown by the author display:grid/flex styles. */
 .targets > .target[hidden],.readiness > li[hidden]{display:none!important}
@@ -562,23 +613,10 @@ export function renderDraftEditor(v: EditorView): string {
     <input type="hidden" name="csrf" value="${esc(v.csrf)}">
     <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
 
-    <section class="ed-card" aria-labelledby="ed-platforms">
-      <h3 id="ed-platforms">Platforms</h3>
-      <div class="platform-chips">
-        ${chip("p_facebook", "Facebook", p.facebook_enabled)}
-        ${chip("p_instagram", "Instagram", !!p.instagram)}
-        ${chip("p_bluesky", "Bluesky", !!p.bluesky)}
-        ${chip("p_tiktok", "TikTok", !!p.tiktok_enabled)}
-      </div>
-      <p class="hint">Unchecked platforms are hidden and excluded from approval. Their saved captions, images and settings are retained when you turn them off.</p>
-    </section>
+    ${renderPlatformOverview(p, states, on, pool.length, v)}
 
     <section class="ed-card targets-card" aria-labelledby="ed-targets">
       <h3 id="ed-targets">Each platform</h3>
-      <ol class="readiness" id="ed-readiness" aria-label="Readiness by platform">
-        ${PLATFORM_ORDER.map((pid) => `<li data-platform="${pid}"${hide(on[pid])}><a href="#target-${pid}">${esc(PLATFORMS[pid].label)}</a>
-          <span data-ready="${pid}">${(() => { const c = checkTarget(states[pid]); return c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems") : c.warnings.length ? "Ready, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Ready"; })()}</span></li>`).join("")}
-      </ol>
       <p class="hint">Thumbnails show the whole picture. They are not the crop a platform will deliver; the notes under each platform say what it does with other shapes.</p>
       <div class="targets" data-rules="${esc(platformRulesJson())}">
         <article class="target" id="target-facebook" data-platform="facebook"${hide(on.facebook)} aria-labelledby="tg-facebook">
@@ -786,6 +824,11 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
   function togglePlatform(box) {
     const name = box.dataset.platformToggle;
     form.querySelectorAll('[data-platform="' + name + '"]').forEach(el => { el.hidden = !box.checked; });
+    const overview = form.querySelector('[data-overview-platform="' + name + '"]');
+    overview?.classList.toggle("is-inactive", !box.checked);
+    const edit = overview?.querySelector("[data-overview-edit]");
+    if (edit) edit.hidden = !box.checked;
+    recheck();
   }
   form.querySelectorAll("[data-platform-toggle]").forEach(box => box.addEventListener("change", () => togglePlatform(box)));
   document.getElementById("bs-copy-fb-video")?.addEventListener("click",()=>{
@@ -897,13 +940,23 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       card.dataset.state = c.errors.length ? "error" : c.warnings.length ? "warn" : "ok";
       const area = card.querySelector("textarea[data-caption]");
       if (area && c.limit && id !== "facebook") { area.dataset.max = String(c.limit); meter(area); }
-      const pill = form.querySelector('[data-ready="' + id + '"]');
-      if (pill) {
-        pill.textContent = c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
-          : c.warnings.length ? "Ready, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Ready";
-        pill.parentElement.classList.toggle("has-e", !!c.errors.length);
-        pill.parentElement.classList.toggle("has-w", !c.errors.length && !!c.warnings.length);
+      const overview = form.querySelector('[data-overview-platform="' + id + '"]');
+      const enabled = !!form.querySelector('[data-platform-toggle="' + id + '"]')?.checked;
+      if (overview) {
+        overview.classList.toggle("is-inactive", !enabled);
+        overview.classList.toggle("has-e", enabled && !!c.errors.length);
+        const edit = overview.querySelector("[data-overview-edit]");
+        if (edit) edit.hidden = !enabled;
+        const media = overview.querySelector("[data-overview-media]");
+        if (media) media.textContent = st.video ? "1 video" : st.photos === 1 ? "1 photo" : st.photos + " photos";
+        const issue = overview.querySelector("[data-overview-issue]");
+        if (issue && enabled && c.errors.length) issue.textContent = c.errors[0];
+        else if (issue && enabled && c.warnings.length) issue.textContent = c.warnings[0];
       }
+      const pill = form.querySelector('[data-ready="' + id + '"]');
+      if (pill) pill.textContent = !enabled ? "Not selected"
+        : c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
+        : c.warnings.length ? "Ready, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Ready";
       paintBadges(id, card);
     });
   }
