@@ -317,7 +317,7 @@ function formatLine(id: PlatformId): string {
 
 function checkItems(t: TargetState): string {
   const c = checkTarget(t);
-  if (!c.errors.length && !c.warnings.length) return `<li class="ok">Ready for ${esc(PLATFORMS[t.id].label)}.</li>`;
+  if (!c.errors.length && !c.warnings.length) return `<li class="ok">Media checks passed for ${esc(PLATFORMS[t.id].label)}. Delivery is checked at release.</li>`;
   return [...c.errors.map((e) => `<li class="e">${esc(e)}</li>`), ...c.warnings.map((w) => `<li class="w">${esc(w)}</li>`)].join("");
 }
 
@@ -963,7 +963,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       if (list) {
         list.replaceChildren(...(c.errors.length || c.warnings.length
           ? [...c.errors.map(t => [t, "e"]), ...c.warnings.map(t => [t, "w"])]
-          : [["Ready for " + r.label + ".", "ok"]]).map(([t, k]) => { const li = document.createElement("li"); li.className = k; li.textContent = t; return li; }));
+          : [["Media checks passed for " + r.label + ". Delivery is checked at release.", "ok"]]).map(([t, k]) => { const li = document.createElement("li"); li.className = k; li.textContent = t; return li; }));
       }
       card.dataset.state = c.errors.length ? "error" : c.warnings.length ? "warn" : "ok";
       const area = card.querySelector("textarea[data-caption]");
