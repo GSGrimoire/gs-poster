@@ -358,7 +358,7 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
       <label class="platform-overview-name"><input type="checkbox" name="p_${id}" value="1"
         data-platform-toggle="${id}"${enabled ? " checked" : ""}> <strong>${esc(rule.label)}</strong></label>
       <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
-      <div class="platform-overview-check"><strong data-ready="${id}">${esc(status)}</strong>
+      <div class="platform-overview-check"><strong data-ready="${id}" aria-live="polite">${esc(status)}</strong>
         <span data-overview-issue="${id}">${esc(issue || extra || checks.warnings[0] || "No outstanding media checks.")}</span>
         ${issue && extra ? `<span class="platform-overview-extra">${esc(extra)}</span>` : ""}
         <span class="platform-overview-caption">${esc(excerpt ? "Caption: " + excerpt + (caption.trim().length > 92 ? "…" : "") : "Caption: not yet written")}</span></div>
@@ -370,6 +370,7 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
     <p class="hint">All platforms stay visible. Select a destination to reuse existing post media on first activation.
       Inactive platforms are greyed out and excluded from approval. Previously customized galleries are preserved.
       Saving and selecting platforms never publishes anything.</p>
+    <ol class="studio-steps" aria-label="Preparation steps"><li>1. Select destinations</li><li>2. Fix each platform\'s requirements</li><li>3. Review and approve with your PIN</li></ol>
     <div class="platform-overview-list">${rows}</div>
   </section>`;
 }
@@ -515,6 +516,8 @@ export function renderDraftEditor(v: EditorView): string {
 .adder>summary::-webkit-details-marker{display:none}
 .adder[open]{flex-basis:100%}
 .adder[open]>summary{border-style:solid;margin-bottom:12px}
+.studio-steps{list-style:none;display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px;padding:0}
+.studio-steps li{font:12px system-ui,sans-serif;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
 .platform-overview-list{display:grid;gap:8px}
 .platform-overview-row{display:grid;grid-template-columns:minmax(120px,1fr) minmax(72px,.6fr) minmax(190px,2fr) auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg);font:13px system-ui,sans-serif}
 .platform-overview-row.is-inactive{background:color-mix(in srgb,var(--bg) 65%,var(--line));color:var(--muted)}
