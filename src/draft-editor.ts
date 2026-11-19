@@ -580,7 +580,7 @@ export function renderDraftEditor(v: EditorView): string {
 .ig-downloads a{white-space:nowrap}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 @media(max-width:520px){.ig-item{grid-template-columns:1fr}}
-@media(min-width:1180px){.target-ig{grid-column:span 2}}
+/* Platform editors use one full-width column; no legacy Instagram two-column span. */
 .house-title{font:650 14px system-ui,sans-serif;margin:16px 0 0}
 .save-bar{position:sticky;bottom:0;z-index:2;display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 16px;margin-top:6px;background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:14px}
 .save-bar button{flex:0 0 auto}
