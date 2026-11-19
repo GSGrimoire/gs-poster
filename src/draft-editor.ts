@@ -134,6 +134,11 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     // Only copy images already attached to this post. Indices are resolved
     // server-side against the saved media pool, never trusted as new URLs.
     const addRaw=String(form.get("bs_add_photos")??"");
+    // On first activation, reuse the existing post media without copying bytes.
+    // Empty alt text is deliberately left for owner review before approval.
+    // A previously configured empty Bluesky gallery is never overwritten.
+    if (blueskyOn && !savedBluesky && !addRaw && !bsVideo && !bsImages.length)
+      bsImages = postPhotos(cur).slice(0, 4).map(url => ({ url, alt: "" }));
     if(addRaw){
       const pool=postPhotos(cur);
       // Bound the field before allocating or parsing an untrusted list.
@@ -178,10 +183,15 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     if (!items) errors.push("Could not read the Instagram photo settings. Reload the page and try again.");
     else {
       const videoSource=text(form,"ig_video_source",base.video??"").trim();
+      // First activation inherits up to ten existing photos, preserving their
+      // full content by padding. Previously saved selections stay independent.
+      const initialItems = instagramOn && !savedInstagram && !videoSource && items.length === 0
+        ? postPhotos(cur).slice(0, INSTAGRAM_MAX_ITEMS).map(url => defaultItem(url, "pad"))
+        : items;
       instagram = {
         caption: text(form,"ig_caption",base.caption),
         frame: text(form,"ig_frame",base.frame) as InstagramFrame,
-        items,
+        items: initialItems,
         ...(videoSource?{video:videoSource}:{}),
       };
       // The form is still saved while Instagram is paused. Validate its
@@ -277,7 +287,7 @@ export function targetStates(p: Post): Record<PlatformId, TargetState> {
       photos: p.instagram?.items.length ?? 0, video: !!p.instagram?.video, missingAlt: 0, hashtags: countHashtags(p.instagram?.caption ?? "") },
     tiktok: { id: "tiktok", captionLength: (p.tiktok_caption ?? p.message).length,
       photos: ttShared ? (p.video ? 0 : p.images.length) : tt.images.length,
-      video: ttShared ? !!p.video : !!tt.video, missingAlt: 0 },
+      video: ttShared ? !!p.video : !!tt.video, missingAlt: 0, missingTitle: !(p.tiktok_title ?? "").trim() },
   };
 }
 
@@ -839,6 +849,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
       photos: photos.length, video: tiles.some(t => t.dataset.tile === "video"),
       captionLength: r.graphemes ? glen(text) : text.length,
       missingAlt: r.altRequired ? tiles.filter(t => { const i = t.querySelector('input[type="text"]'); return i && !i.value.trim(); }).length : 0,
+      missingTitle: id === "tiktok" && !document.getElementById("ed-tiktok-title")?.value.trim(),
       ratios: photos.map(t => Number(t.dataset.ratio)).filter(x => x > 0),
     };
   }
@@ -850,6 +861,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     if (!st.photos && !st.video && !r.textOnly) errors.push(r.label + " needs photos or a video.");
     if (limit && st.captionLength > limit) errors.push("Caption is " + st.captionLength + " characters; " + r.label + " allows " + limit + ".");
     if (r.altRequired && st.missingAlt) errors.push(st.missingAlt + (st.missingAlt === 1 ? " description is" : " descriptions are") + " missing.");
+    if (r.id === "tiktok" && st.photos > 0 && st.missingTitle) errors.push("Enter a public TikTok carousel title.");
     if (r.maxHashtags && (st.hashtags || 0) > r.maxHashtags) errors.push(st.hashtags + " hashtags; " + r.label + " allows " + r.maxHashtags + ".");
     if (!st.captionLength && r.id !== "tiktok") warnings.push("Caption is empty.");
     if (st.lowRes) warnings.push(st.lowRes + (st.lowRes === 1 ? " photo is" : " photos are") + " enlarged to fit and may look soft.");
