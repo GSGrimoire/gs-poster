@@ -909,7 +909,8 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     return {
       photos: photos.length, video: tiles.some(t => t.dataset.tile === "video"),
       captionLength: r.graphemes ? glen(text) : text.length,
-      missingAlt: r.altRequired ? tiles.filter(t => { const i = t.querySelector('input[type="text"]'); return i && !i.value.trim(); }).length : 0,
+      missingAlt: r.altRequired ? tiles.filter(t => { const i = t.querySelector('input[type="text"]'); return i && !i.value.trim(); }).length
+        + staged.filter(t => !t.querySelector('input[name^="bs_add_alt_"]')?.value.trim()).length : 0,
       missingTitle: id === "tiktok" && !document.getElementById("ed-tiktok-title")?.value.trim(),
       ratios: photos.map(t => Number(t.dataset.ratio)).filter(x => x > 0),
     };
