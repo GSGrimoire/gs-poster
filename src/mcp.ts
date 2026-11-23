@@ -361,7 +361,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     "import_chatgpt_files",
     {
       title:"Import ChatGPT attachments privately into GS Poster",
-      description:"Transfer up to 35 original user-selected ChatGPT image or MP4 attachments directly into private GS Poster storage, preserving order and returning upload:// references. This uses ChatGPT's fileParams attachment adapter, not text base64 or GitHub staging. Files may not be available on every ChatGPT client. If missing or unsupported, use request_uploads and private browser upload pages. Imports never create or publish a post.",
+      description:"Transfer up to 35 original user-selected ChatGPT image or MP4 attachments directly into private GS Poster storage, preserving order and returning upload:// references. This uses ChatGPT's fileParams attachment adapter, not text base64 or GitHub staging. Files may not be available on every ChatGPT client. If import fails and an unapproved draft already exists, open its review_url and use Add video or Add photos there to upload and attach in one signed-in page. Use request_uploads only if there is no accessible draft editor. Imports never create or publish a post.",
       inputSchema:z.object({
         files:z.array(z.object({
           download_url:z.string().min(1),
@@ -384,7 +384,7 @@ export function buildServer(env: Env, origin: string): McpServer {
       return ok({
         ...result,
         next:result.stopped_reason
-          ?"Retain confirmed upload references and inspect recoverable references using check_upload. Use request_uploads only for unconfirmed missing files; never re-upload a confirmed stored file."
+          ?"Retain confirmed upload references and inspect recoverable references using check_upload. For an existing draft, prefer its signed-in Add photos or Add video browser uploader to attach missing media in one step. Use request_uploads only when that draft editor is unavailable; never re-upload a confirmed stored file."
           :"All references are stored for this editor. Use them in intended order in an unapproved draft. Nothing was published.",
       });
     },
@@ -467,7 +467,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     "request_uploads",
     {
       title:"Prepare multiple private media uploads for a carousel or reel",
-      description:"Request up to 35 private, one-time image or MP4 upload pages in a single call, retaining the order for TikTok carousels. Use the upload_page_url fields to transfer each actual file from a chat or mobile device, or send the bytes directly to upload_url if the assistant has file access. Call check_uploads afterwards. No GitHub staging and no publishing.",
+      description:"Request up to 35 private, one-time image or MP4 upload pages in a single call, retaining the order for TikTok carousels. Use this only when no accessible draft editor exists: an existing unapproved draft already has Add photos and Add video to upload and attach in one signed-in page. Otherwise use upload_page_url for each original file, or transfer bytes directly with upload_url if available. Call check_uploads afterwards. No GitHub staging and no publishing.",
       inputSchema:z.object({
         filenames:z.array(z.string().min(1).max(200)).min(1).max(CHAT_BATCH_MAX_FILES)
           .describe("Ordered list of JPG, JPEG, PNG, GIF, or MP4 filenames. One upload grant per file."),
