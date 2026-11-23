@@ -73,6 +73,7 @@ In [dash.cloudflare.com](https://dash.cloudflare.com): left sidebar **Compute (W
 | `BSKY_HANDLE` | Bluesky account handle for the account GS Poster should post as |
 | `BSKY_APP_PASSWORD` | a Bluesky **app password**, not your main account password, generated in Bluesky settings |
 | `GITHUB_READ_TOKEN` | optional: fine-grained token, *Contents: read* only, for images in private repos |
+| `GITHUB_READ_REPOS` | optional: comma-separated `owner/repo` names for private images and videos |
 | `GITHUB_STAGING_REPO` | optional: exact dedicated **private** `owner/repo` permitted for `import_github_blob`, e.g. `GSGrimoire/GSGrimoire-gs-poster-media-staging` |
 
 `COOKIE_SECRET` is created automatically on the first deploy. Never put any of these in the repo or in a chat.
@@ -104,7 +105,9 @@ In your Meta app (Development mode is fine, since only your own Page is used):
 2. You open the site (it works on a phone), check each draft, edit if needed, enter the PIN and approve. Or reject it with a note. Claude sees the note and revises.
 3. The approval site's planner has **Week** and **Month** views in Copenhagen time. Week shows Sunday through Saturday with a live current-time line on today's column, half-hour scheduling slots and drag-to-reschedule for eligible posts. Hover over posts for details or click to review or edit pending captions. Moving an approved schedule requires the PIN and verifies Facebook's updated time; no post is recreated. Times less than 12 minutes away or in the past are unavailable. Month shows all posts in each displayed date, including photo thumbnails, status and platform icons, without time slots. Busy months use clearly labelled pages of up to 750 posts; a day can continue on a subsequent page rather than silently truncating. In Month, click a post to review it; click a day (or select "Plan this day") to open its Week view for precise time-slot planning. Drag an eligible draft or pending scheduled post to another date, or use the accessible Move button on mobile and keyboard. The existing Copenhagen clock time is preserved, and a dialog lets you adjust it. Unscheduled drafts suggest noon but require explicit time confirmation. Every move requires the approval PIN and an optimistic version check; a drag alone never approves or publishes a post. Unscheduled drafts appear under their creation date and are labelled as such. Facebook publishes at the set time; GS Poster publishes approved Bluesky targets through Cloudflare's scheduled trigger. You can cancel queued targets from the review site.
 
-Images come from GitHub: the image library's `raw.githubusercontent.com` links, or files in a private repo (needs `GITHUB_READ_TOKEN`). JPG, PNG or GIF up to 10 MB each. Facebook drafts may contain up to **80 photos**. Bluesky supports up to four gallery images with reviewed alternative text; Bluesky images are converted and resized under the 2 MB upload cap.
+Public GitHub media is fetched without credentials. For private images and videos, set `GITHUB_READ_REPOS` to the repositories you approve and limit the fine-grained `GITHUB_READ_TOKEN` to read-only Contents access for those repositories and the configured staging repository. The Worker also accepts `GITHUB_STAGING_REPO` as an approved private source. Configure the approved repositories before deploying if existing drafts use private links.
+
+JPG, PNG or GIF images may be up to 10 MB each. Facebook drafts may contain up to **80 photos**. Bluesky supports up to four gallery images with reviewed alternative text and resizes images to meet its 2 MB limit.
 
 ### Facebook large image posts
 

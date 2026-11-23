@@ -4,7 +4,7 @@
  * Larger files require a separate streaming/transcoding workflow.
  */
 import type { Env } from "./env.ts";
-import { parseGitHubUrl } from "./media.ts";
+import { allowsPrivateGitHubMedia, parseGitHubUrl } from "./media.ts";
 import { isUploadRef, parseUploadRef, readUpload } from "./upload.ts";
 
 export const INITIAL_VIDEO_MAX_BYTES = 50_000_000;
@@ -33,14 +33,18 @@ export async function openGitHubVideoSource(env:Env,value:string):Promise<Respon
       encodeURIComponent(ref.ref) + "/" + path,
     { headers: { "User-Agent": "gs-poster" }, redirect:"manual" },
   );
-  if (!response.ok && env.GITHUB_READ_TOKEN) {
+  if (!response.ok && env.GITHUB_READ_TOKEN && allowsPrivateGitHubMedia(env, ref)) {
+    await response.body?.cancel();
     response = await fetch("https://api.github.com/repos/" + ref.owner + "/" + ref.repo +
       "/contents/" + path + "?ref=" + encodeURIComponent(ref.ref), {
       headers: { Authorization: "Bearer " + env.GITHUB_READ_TOKEN,
         Accept: "application/vnd.github.raw+json", "User-Agent": "gs-poster" }, redirect:"manual",
     });
   }
-  if (!response.ok || !response.body) throw new Error("Could not fetch MP4 video from the GitHub library.");
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    throw new Error("Could not fetch MP4 video from the GitHub library. Private media needs a configured repository and read-only token.");
+  }
   const header = response.headers.get("content-length");
   const length = header === null ? null : Number(header);
   if (length !== null && (!Number.isSafeInteger(length) || length <= 0 || length > INITIAL_VIDEO_MAX_BYTES)) {

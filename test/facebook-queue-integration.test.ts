@@ -54,7 +54,8 @@ async function bulk(count = 80) {
     `https://raw.githubusercontent.com/example/images/main/${i}.png`), scheduled_at: null, created_by: "test" });
   assert.equal(await claimForPublish(db, p.id, { message: p.message, facebookEnabled: true,
     bluesky: null, scheduledAt: null, expectedUpdatedAt: p.updated_at }), true);
-  const env = { DB: db, FB_PAGE_ID: "123", FB_PAGE_TOKEN: "test-only", GITHUB_READ_TOKEN: "test-only" } as Env;
+  const env = { DB: db, FB_PAGE_ID: "123", FB_PAGE_TOKEN: "test-only",
+    GITHUB_READ_TOKEN: "test-only", GITHUB_READ_REPOS: "example/images" } as Env;
   await enqueueFacebookUpload(env, p.id);
   return { env, id: p.id };
 }
