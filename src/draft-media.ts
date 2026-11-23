@@ -33,7 +33,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
   </details>
   <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video || post.instagram?.video ? "+ Replace video" : "+ Add video"}</summary>
-  <p class="hint">One private MP4, up to 50 MB. Facebook publishing remains limited to 20 MB; choose other platforms for a larger video. A platform can have photos or a video, not both. Nothing is published.</p>
+  <p class="hint">Private MP4 uploads allow up to 300 MB. Facebook accepts up to 20 MB and Bluesky up to 50 MB in GS Poster. A platform can have photos or one video.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
     <input type="file" id="video-file" accept=".mp4,video/mp4" hidden>
@@ -52,6 +52,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div id="video-upload-status" class="hint" role="status" aria-live="polite"></div>
   </details>
 </div>
+<script src="/large-upload-client.js" defer></script>
 <script src="/draft-media.js" defer></script>
 `;
 }
@@ -87,16 +88,26 @@ export const DRAFT_MEDIA_JS = `
   let previewUrl = null;
   function chooseVideo(file) {
     if (running || !file) return;
-    if (!file.name.toLowerCase().endsWith(".mp4") || file.size <= 0 || file.size > 50_000_000) {
-      videoStatus.textContent = "Choose a nonempty MP4 up to 50 MB.";return;
+    if (!file.name.toLowerCase().endsWith(".mp4") || file.size <= 0 || file.size > 300_000_000) {
+      videoStatus.textContent = "Choose a nonempty MP4 up to 300 MB.";return;
     }
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     selectedVideo = file;
     previewUrl = URL.createObjectURL(file);
     videoPreview.src = previewUrl;videoPreview.hidden = false;
     videoName.textContent = file.name+" ("+(file.size/1048576).toFixed(1)+" MB)";
+    videoFacebook.disabled=panel.dataset.facebook!=="1"||Number(panel.dataset.facebookImages)>0||file.size>20_000_000;
+    videoBluesky.disabled=panel.dataset.bluesky!=="1"||Number(panel.dataset.blueskyImages)>0||file.size>50_000_000;
+    videoStatus.textContent="";
+    if(file.size>20_000_000){
+      videoFacebook.checked=false;
+      videoStatus.textContent="Facebook was deselected because its limit is 20 MB.";
+    }
+    if(file.size>50_000_000){
+      videoBluesky.checked=false;
+      videoStatus.textContent="Facebook and Bluesky were deselected because their limits are 20 MB and 50 MB.";
+    }
     videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled && videoTikTok.disabled && videoInstagram.disabled;
-    videoStatus.textContent = "";
   }
   videoDrop.addEventListener("click", () => videoInput.click());
   videoDrop.addEventListener("keydown", e => {
@@ -281,12 +292,12 @@ export const DRAFT_MEDIA_JS = `
       videoStatus.textContent="Creating private upload...";
       const grant=await api("video-link",{filename:selectedVideo.name});
       videoStatus.textContent="Uploading video...";
-      const uploaded=await fetch(grant.upload_url,{method:"PUT",body:selectedVideo,credentials:"same-origin"});
-      const body=await uploaded.json().catch(()=>({}));
-      if (!uploaded.ok || !body.ok)throw new Error(body.error || "Video upload failed.");
+      const result=await window.gsUploadFile(grant.upload_url,selectedVideo,(part,total)=>{
+        videoStatus.textContent="Uploading video: "+Math.round(100*part/total)+"% ("+part+"/"+total+" parts)";
+      });
       videoStatus.textContent="Attaching video to the draft...";
       const saved=await api("attach-video",{
-        reference:body.reference,alt,facebook,bluesky,tiktok,instagram,expected_updated_at:panel.dataset.version
+        reference:result.reference,alt,facebook,bluesky,tiktok,instagram,expected_updated_at:panel.dataset.version
       });
       panel.dataset.version=saved.updated_at;
       if(saved.audit_warning){

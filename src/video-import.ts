@@ -41,7 +41,7 @@ export async function prepareLinkedVideo(
     throw new VideoPrepareError("Only existing GitHub-linked MP4 videos can be prepared.");
   if(!env.UPLOADS)throw new VideoPrepareError("Private media storage is not configured.",503);
 
-  // Never hold an entire 40-50 MB GitHub video in Worker memory. The
+  // Never hold an entire 300 MB GitHub video in Worker memory. The
   // authenticated source is streamed into bounded 5 MiB R2 multipart parts.
   const upstream=await openGitHubVideoSource(env,source);
   const declared=upstream.headers.get("content-length");

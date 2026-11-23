@@ -7,6 +7,7 @@ import {createPost,ensureSchema,getPost,saveEditorDraft, type Post, type EditorD
 import {createUpload,handleUploadPut,readUpload,parseUploadRef,uploadStatusForOwner} from "../src/upload.ts";
 import {parseEditorForm} from "../src/draft-editor.ts";
 import {prepareLinkedVideo} from "../src/video-import.ts";
+import {openVideoStream} from "../src/video.ts";
 import {csrfToken,makeSession,SESSION_COOKIE,type Session} from "../src/session.ts";
 import type {Env} from "../src/env.ts";
 import type {InstagramDraft} from "../src/instagram.ts";
@@ -48,9 +49,10 @@ before(async()=>{
           },
         }),{status:200,headers:{"Content-Length":String(total)}});
       }
-      if(oversize)return new Response(MP4,{status:200,headers:{"Content-Length":String(50_000_001)}});
-      return new Response(malicious?new Uint8Array([1,2,3,4]):MP4,{status:200});
-    },bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",TIMEZONE:"Europe/Copenhagen"}}));
+      if(oversize)return new Response(MP4,{status:200,headers:{"Content-Length":String(300_000_001)}});
+      const bytes=malicious?new Uint8Array([1,2,3,4]):MP4;
+      return new Response(bytes,{status:200,headers:{"Content-Length":String(bytes.length)}});
+    },bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",APPROVE_PIN:"123456",TIMEZONE:"Europe/Copenhagen"}}));
   db=await mf.getD1Database("DB") as unknown as D1Database;
   bucket=await mf.getR2Bucket("UPLOADS") as unknown as R2Bucket;
   await ensureSchema(db);
@@ -95,6 +97,91 @@ function next(p:Post):EditorDraft {
     label:p.label,release:p.release};
 }
 const ig=(video:string):InstagramDraft=>({caption:"Manual #Reel",frame:"4:5",items:[],video});
+
+test("Bluesky video size is checked on attach and on approval of previously attached media",async()=>{
+  clear();
+  const grant=await createUpload({DB:db,UPLOADS:bucket} as Env,ORIGIN,{filename:"large.mp4",actor:"GSGrimoire"});
+  const ref=parseUploadRef(grant.reference)!;
+  const bytes=new Uint8Array(50_000_001);
+  bytes.set(MP4);
+  await bucket.put("uploads/"+ref.id+".mp4",bytes);
+  await db.prepare("UPDATE uploads SET status='stored',bytes=? WHERE id=?").bind(bytes.length,ref.id).run();
+  const p=await createPost(db,{message:"Cave",images:[],video:null,facebook_enabled:false,tiktok_enabled:false,
+    scheduled_at:null,created_by:"test",bluesky:{caption:"Cave",images:[],video:null,patreon:null}});
+  const attachment=await request(p.id,"attach-video",{reference:grant.reference,alt:"A cave",bluesky:true,
+    expected_updated_at:p.updated_at});
+  assert.equal(attachment.status,400);
+  assert.match(await attachment.text(),/Bluesky video transport accepts up to 50 MB/);
+  assert.equal((await getPost(db,p.id))?.bluesky?.video,null);
+
+  const saved=await createPost(db,{message:"Cave",images:[],video:null,facebook_enabled:false,tiktok_enabled:false,
+    scheduled_at:null,created_by:"test",bluesky:{caption:"Cave",images:[],video:{url:grant.reference,alt:"A cave"},patreon:null}});
+  const {Cookie,csrf}=await auth();
+  const approve=await mf.dispatchFetch(ORIGIN+"/post/"+saved.id+"/approve",{method:"POST",redirect:"manual",
+    headers:{Cookie,Origin:ORIGIN,"Sec-Fetch-Site":"same-origin","Content-Type":"application/x-www-form-urlencoded"},
+    body:new URLSearchParams({csrf,pin:"123456",target_bluesky:"1",expected_updated_at:saved.updated_at}).toString()});
+  assert.equal(approve.status,400);
+  assert.match(await approve.text(),/Bluesky video transport accepts up to 50 MB/);
+  assert.equal((await getPost(db,saved.id))?.approved_at,null);
+  assert.deepEqual(requests,[]);
+});
+
+test("GitHub streaming validates a split MP4 signature and the exact declared bytes",async()=>{
+  const previous=globalThis.fetch;
+  const chunks=(...parts:Uint8Array[])=>new ReadableStream<Uint8Array>({start(controller){
+    for(const part of parts)controller.enqueue(part);
+    controller.close();
+  }});
+  try{
+    globalThis.fetch=async()=>new Response(chunks(MP4.slice(0,5),MP4.slice(5)),{headers:{"Content-Length":String(MP4.length)}});
+    const stream=await openVideoStream({} as Env,BS);
+    assert.equal(stream.size,MP4.length);
+    assert.deepEqual(new Uint8Array(await new Response(stream.body).arrayBuffer()),MP4);
+    globalThis.fetch=async()=>new Response(chunks(MP4));
+    await assert.rejects(openVideoStream({} as Env,BS),/known MP4 size/);
+    globalThis.fetch=async()=>new Response(chunks(new Uint8Array(20)),{headers:{"Content-Length":"20"}});
+    await assert.rejects(openVideoStream({} as Env,BS),/non-MP4/);
+    globalThis.fetch=async()=>new Response(chunks(MP4),{headers:{"Content-Length":"21"}});
+    const short=await openVideoStream({} as Env,BS);
+    await assert.rejects(new Response(short.body).arrayBuffer(),/before its declared length/);
+  }finally{globalThis.fetch=previous;}
+});
+
+
+
+test("Bluesky's direct upload sends a fixed length with the exact bytes in workerd",async()=>{
+  const output=await build({stdin:{contents:
+    'import { publishBluesky } from "./src/bluesky.ts";'+
+    'export default {async fetch(req,env){return Response.json(await publishBluesky(env,"p_mvrslvbab2230330c1",{'+
+    'caption:"Test",images:[],patreon:null,video:{url:new URL(req.url).searchParams.get("ref"),alt:"Cave"}}));}};',
+    resolveDir:process.cwd()},bundle:true,format:"esm",platform:"neutral",target:"es2022",
+    write:false,external:["cloudflare:*","node:*"],conditions:["workerd","worker","browser"],logLevel:"silent"});
+  const calls:string[]=[];
+  const runtime=new Miniflare(convertV4MiniflareOptions({modules:true,cf:false,script:output.outputFiles[0].text,
+    compatibilityDate:"2026-09-01",compatibilityFlags:["nodejs_compat"],r2Buckets:["UPLOADS"],
+    bindings:{BSKY_HANDLE:"fixture.test",BSKY_APP_PASSWORD:"test-only"},
+    outboundService:async(req:Request)=>{
+      const rpc=new URL(req.url).pathname.split("/").at(-1)!;
+      calls.push(rpc);
+      if(rpc==="com.atproto.server.createSession")
+        return Response.json({accessJwt:"fixture-token",did:"did:plc:fixture",handle:"fixture.test"});
+      if(rpc==="com.atproto.repo.uploadBlob"){
+        assert.equal(req.headers.get("Content-Length"),String(MP4.length));
+        assert.deepEqual(new Uint8Array(await req.arrayBuffer()),MP4);
+        return Response.json({blob:{$type:"blob",size:MP4.length,mimeType:"video/mp4",ref:{$link:"fixture"}}});
+      }
+      if(rpc==="com.atproto.repo.createRecord")
+        return Response.json({uri:"at://did:plc:fixture/app.bsky.feed.post/fixture",cid:"fixture"});
+      return new Response("Unexpected outbound request",{status:599});
+    }}));
+  try{
+    const id="a".repeat(32);
+    await (await runtime.getR2Bucket("UPLOADS")).put("uploads/"+id+".mp4",MP4);
+    const response=await runtime.dispatchFetch(ORIGIN+"?ref="+encodeURIComponent("upload://"+id+".mp4"));
+    assert.equal(response.status,200,await response.clone().text());
+    assert.deepEqual(calls,["com.atproto.server.createSession","com.atproto.repo.uploadBlob","com.atproto.repo.createRecord"]);
+  }finally{await runtime.dispose();}
+});
 
 test("preparing TikTok, Bluesky and Instagram videos preserves independent source media and approval",async()=>{
   clear();

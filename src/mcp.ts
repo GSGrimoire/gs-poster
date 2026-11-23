@@ -137,7 +137,7 @@ const blueskySchema = z.object({
     alt: z.string().describe("Human-readable alternative text derived from the image library description, not a filename guess."),
   })).max(4).default([]),
   video: z.object({
-    url: z.string().min(1).describe("GitHub MP4 URL or private upload:// MP4 reference (up to 50 MB)."),
+    url: z.string().min(1).describe("GitHub MP4 URL or private upload:// MP4 reference (up to 300 MB)."),
     alt: z.string().min(1).describe("Accessibility description for this video."),
   }).nullable().optional(),
   patreon: z.object({
@@ -423,7 +423,7 @@ export function buildServer(env: Env, origin: string): McpServer {
     "request_upload",
     {
       title: "Get a private one-time file upload link",
-      description: "Create a one-time private JPG, PNG, GIF (up to 10 MB) or MP4 (up to 50 MB) upload link, valid for 10 minutes. Return upload_page_url to the editor: it opens a drag-and-drop uploader from Claude or ChatGPT, with no GitHub staging. If the assistant has direct access to file bytes in a code tool, it may PUT the original file to upload_url. Then check_upload before drafting. No publishing.",
+      description: "Create a one-time private JPG, PNG, GIF (up to 10 MB) or MP4 (up to 300 MB) upload link (MP4 valid for 60 minutes, images for 10 minutes). Return upload_page_url to the editor: it opens a drag-and-drop uploader from Claude or ChatGPT, with no GitHub staging. A direct one-request PUT is supported up to 50 MB; larger MP4 files must use the browser upload_page_url with bounded 5 MiB parts. Then check_upload before drafting. No publishing.",
       inputSchema: z.object({
         filename: z.string().min(1).max(200).describe("File name with extension. Only extension is retained."),
       }),
@@ -439,7 +439,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         await audit(env.DB, actor(), "upload-link", null, grant.reference);
         return ok({
           ...grant,upload_page_url:grant.upload_url,
-          next:"Open upload_page_url, select the file and upload privately. In a coding environment, PUT the file bytes to upload_url instead. Then call check_upload with reference and use the stored upload:// reference in draft_post or update_draft. Never share the bearer upload URL publicly."
+          next:"Open upload_page_url, select the file and upload privately. For files up to 50 MB, a coding environment may PUT bytes to upload_url; for larger videos open upload_page_url for chunked upload. Then call check_upload with reference and use the stored upload:// reference in draft_post or update_draft. Never share the bearer upload URL publicly."
         });
       } catch (error) {
         return fail(error instanceof Error ? error.message : String(error));
@@ -536,7 +536,7 @@ export function buildServer(env: Env, origin: string): McpServer {
         images: imageList.optional(),
         tiktok_images:imageList.optional().describe("Independent TikTok carousel (up to 35). Omitted means legacy shared Facebook gallery."),
         tiktok_video:z.string().optional().describe("Independent TikTok MP4; cannot combine with TikTok images."),
-        video: z.string().optional().describe("Facebook MP4 GitHub URL or private upload:// reference (50 MB maximum). Cannot be combined with Facebook images."),
+        video: z.string().optional().describe("Facebook MP4 GitHub URL or private upload:// reference (private limit 300 MB; Facebook publishing transport limit 20 MB). Cannot be combined with Facebook images."),
         link: z.string().url().optional().describe("Optional link preview. Only used when the post has no images."),
         publish_at: z.string().optional().describe("When to publish. Copenhagen time (2026-10-16T19:00) or ISO 8601 with offset. 30 minutes to 30 days ahead."),
         label: z.string().max(120).optional().describe('Short name shown to Gus, e.g. "Day 1 creature reveal".'),

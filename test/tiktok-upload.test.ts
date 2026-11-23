@@ -84,9 +84,15 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
   const fakeBytes=new Uint8Array(6*1024*1024);
   fakeBytes.set([0,0,0,24,102,116,121,112,105,115,111,109],0);
   env.UPLOADS={
-    get:async(key:string)=>{
+    head:async(key:string)=>{
       assert.equal(key,"uploads/"+"a".repeat(32)+".mp4");
-      return {arrayBuffer:async()=>fakeBytes.buffer};
+      return {size:fakeBytes.length};
+    },
+    get:async(key:string,options?:{range?:{offset:number;length:number}})=>{
+      assert.equal(key,"uploads/"+"a".repeat(32)+".mp4");
+      const range=options?.range;
+      const bytes=range?fakeBytes.slice(range.offset,range.offset+range.length):fakeBytes;
+      return {arrayBuffer:async()=>bytes.buffer};
     }
   } as unknown as R2Bucket;
   const p=await createPost(env.DB,{
@@ -132,6 +138,59 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
     assert.equal(checked.status,"inbox_ready");
     assert.equal(checked.publish_id,"v_inbox_file~v2.123");
     assert.equal((await getTikTokInboxTransfer(env.DB,p.id))?.status,"inbox_ready");
+  }finally{globalThis.fetch=previous;}
+});
+
+test("TikTok video uploads obey chunk boundaries and block retries after unclear receipt",async()=>{
+  const previous=globalThis.fetch;
+  try{
+    for(const {size,interrupt} of [{size:20_000_001,interrupt:false},{size:300_000_000,interrupt:false},
+      {size:20_000_001,interrupt:true}]){
+      const ref="upload://"+"e".repeat(32)+".mp4";
+      const reads:{offset:number;length:number}[]=[];
+      const buffers=new Map<number,ArrayBuffer>();
+      env.UPLOADS={head:async()=>({size}),get:async(_key:string,{range}:{range:{offset:number;length:number}})=>{
+        reads.push(range);
+        if(!buffers.has(range.length))buffers.set(range.length,new ArrayBuffer(range.length));
+        return {arrayBuffer:async()=>buffers.get(range.length)};
+      }} as unknown as R2Bucket;
+      const p=await createPost(env.DB,{message:"Chunk example",images:[],video:null,tiktok_images:[],
+        tiktok_video:ref,tiktok_enabled:true,facebook_enabled:false,scheduled_at:null,created_by:"test"});
+      const numberOfParts=Math.floor(size/10_000_000);
+      let initCount=0, sentCount=0;
+      globalThis.fetch=async(input,options)=>{
+        const url=String(input);
+        if(url.endsWith("/inbox/video/init/")){
+          initCount++;
+          assert.deepEqual(JSON.parse(String(options?.body)).source_info,{source:"FILE_UPLOAD",video_size:size,
+            chunk_size:10_000_000,total_chunk_count:numberOfParts});
+          return Response.json({data:{publish_id:"v_inbox_file~v2.chunk-example",
+            upload_url:"https://open-upload.tiktokapis.com/video/?upload_id=fixture"},error:{code:"ok"}});
+        }
+        assert.ok(url.startsWith("https://open-upload.tiktokapis.com/video/"));
+        const {offset,length}=reads[sentCount++];
+        const headers=new Headers(options?.headers);
+        assert.equal(offset,(sentCount-1)*10_000_000);
+        assert.equal(length,sentCount===numberOfParts?size-offset:10_000_000);
+        assert.ok(length<=20*1024*1024);
+        assert.equal(headers.get("Content-Length"),String(length));
+        assert.equal(headers.get("Content-Range"),"bytes "+offset+"-"+(offset+length-1)+"/"+size);
+        if(interrupt)throw Error("connection closed before confirmation");
+        return new Response(null,{status:sentCount===numberOfParts?201:206});
+      };
+      const transfer=()=>startTikTokInboxTransfer(env,p.id,p.updated_at,"GSGrimoire");
+      if(interrupt){
+        await assert.rejects(transfer(),/Check status before any new attempt/);
+        const saved=await getTikTokInboxTransfer(env.DB,p.id);
+        assert.equal(saved?.status,"needs_review");
+        assert.equal(saved?.publish_id,"v_inbox_file~v2.chunk-example");
+      }else{
+        assert.equal((await transfer()).status,"transfer_complete");
+      }
+      await assert.rejects(transfer(),/already exists/);
+      assert.equal(initCount,1);
+      assert.equal(sentCount,interrupt?1:numberOfParts);
+    }
   }finally{globalThis.fetch=previous;}
 });
 

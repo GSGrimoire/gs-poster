@@ -10,6 +10,8 @@ import type { Env } from "./env.ts";
 import { buildServer } from "./mcp.ts";
 import { handleWeb } from "./web.ts";
 import { handleUploadPut } from "./upload.ts";
+import { handleLargeVideoChunk, cleanupExpiredChunkUploads } from "./chunk-upload.ts";
+import { LARGE_UPLOAD_JS } from "./large-upload-client.ts";
 import { browserUploadPage } from "./chat-upload.ts";
 import { publishDueBluesky } from "./publish.ts";
 import { processFacebookUploadBatch } from "./facebook-queue.ts";
@@ -47,7 +49,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
 }
 
 export default {
-  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     // One platform failure must not prevent the other approved queue from running.
     let failed = false;
     try { await processFacebookUploadBatch(env); }
@@ -56,13 +58,26 @@ export default {
     catch { failed = true; console.error("Bluesky scheduled batch failed."); }
     try { await processInstagramBatch(env); }
     catch { failed = true; console.error("Instagram scheduled batch failed."); }
+    // Check the trigger timestamp so a delayed start cannot miss this run.
+    if (new Date(controller.scheduledTime).getUTCMinutes() === 0) {
+      try { await cleanupExpiredChunkUploads(env); }
+      catch { console.error("Expired multipart cleanup unavailable."); }
+    }
     if (failed) throw new Error("One or more scheduled publication batches failed.");
   },
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response {
     const origin = new URL(request.url).origin;
     if (env.PUBLIC_ORIGIN && origin !== env.PUBLIC_ORIGIN) return new Response("Not found", { status: 404 });
-    if (new URL(request.url).pathname.startsWith("/upload/"))
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/large-upload-client.js" && request.method === "GET")
+      return new Response(LARGE_UPLOAD_JS,{headers:{
+        "Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store",
+        "X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer",
+      }});
+    if (pathname.startsWith("/upload/")) {
+      if (pathname.includes("/multipart/")) return handleLargeVideoChunk(request,env);
       return request.method==="GET" ? browserUploadPage(request,env) : handleUploadPut(request, env);
+    }
     return providerFor(origin).fetch(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;

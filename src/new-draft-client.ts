@@ -324,8 +324,12 @@ export const NEW_DRAFT_JS = String.raw`
       }
     } else if (k === "video") {
       if (!video) throw new Error("Choose an MP4 video.");
-      if (!/\.mp4$/i.test(video.name) || video.size <= 0 || video.size > 50000000)
-        throw new Error("Video must be an MP4 no larger than 50 MB.");
+      if (!/\.mp4$/i.test(video.name) || video.size <= 0 || video.size > 300000000)
+        throw new Error("Video must be an MP4 no larger than 300 MB.");
+      if (target("facebook") && video.size > 20000000)
+        throw new Error("Facebook's current uploader accepts only 20 MB. Deselect Facebook before attaching this larger video.");
+      if (bs && video.size > 50000000)
+        throw new Error("GS Poster's Bluesky video transport accepts up to 50 MB. Deselect Bluesky or choose a smaller video.");
       if (bs && !$("new-video-alt").value.trim())
         throw new Error("Provide alternative text for your Bluesky video.");
     }
@@ -348,11 +352,9 @@ export const NEW_DRAFT_JS = String.raw`
   }
   async function upload(file, mediaKind, alt, fb, bs, tt=false) {
     const grant = await api(mediaKind === "video" ? "video-link" : "upload-link", {filename:file.name});
-    const transfer = await fetch(grant.upload_url, {
-      method:"PUT",credentials:"same-origin",body:file
+    const stored = await window.gsUploadFile(grant.upload_url,file,(part,total)=>{
+      if(mediaKind==="video")statusText("Uploading private video: "+Math.round(100*part/total)+"%");
     });
-    const stored = await transfer.json().catch(() => ({}));
-    if (!transfer.ok || !stored.ok) throw new Error(stored.error || "Private file transfer failed.");
     const attached = await api(mediaKind === "video" ? "attach-video" : "attach-image", {
       reference:stored.reference,alt,facebook:fb,bluesky:bs,tiktok:tt,
       expected_updated_at:created.version

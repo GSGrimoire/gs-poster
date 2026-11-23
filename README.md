@@ -116,11 +116,11 @@ The review page displays how many images were uploaded. If an upload fails befor
 
 ### Initial Bluesky video support
 
-**Provider-specific video limits:** private R2 storage, TikTok and Bluesky source handling accept MP4 files up to 50,000,000 bytes. Facebook's existing direct video endpoint has a stricter **20,000,000-byte limit**. GS Poster rejects larger Facebook videos before any PIN approval or mixed-target send, and rejects a failed Facebook retry before reclaiming it. For Facebook, use a smaller file or deselect Facebook. Uploading a 40 MB private video is not a promise that every provider can publish it.
+**Video limits:** GS Poster stores MP4 files up to 300,000,000 bytes. The upload page sends files over 50,000,000 bytes in parts. Facebook's direct upload accepts up to 20,000,000 bytes and GS Poster's direct Bluesky upload accepts up to 50,000,000 bytes. Use a smaller video for those destinations.
 
-Bluesky supports one video in a post. The service announced support for videos up to 10 minutes and 300 MB in August 2026, but this initial Worker implementation is deliberately narrower: it accepts **one GitHub-hosted or privately uploaded MP4 of up to 50 MB**, with a required accessibility description. The video and an image gallery are mutually exclusive. When a free Patreon card is selected alongside a video, the card is published as a threaded reply.
+Bluesky posts can include one MP4 video with alternative text. When a free Patreon card is selected alongside a video, the card is published as a threaded reply.
 
-This first implementation uploads the MP4 directly to the Bluesky personal data server, then posts the video reference; **Bluesky may show the video as unavailable briefly while it processes**. It does not yet provide 300 MB transfers, automatic transcoding, pre-publication video processing, captions/subtitles, or automatic duration validation. Large-video support should use a streaming ingest service and `video.bsky.app` processing jobs with durable status tracking. A verified Bluesky account email is required to post videos.
+GS Poster uploads the MP4 to the Bluesky personal data server before creating the post. Bluesky may show the video as unavailable while it processes. A verified Bluesky account email is required to post videos.
 
 Do not test with a live social account until the branch is independently reviewed and the service credentials are configured in Cloudflare. No new approval-free publishing tool is added.
 

@@ -88,7 +88,7 @@ export async function uploadUnpublishedPhoto(env: Env, img: ImageBytes, forSched
 export const FACEBOOK_VIDEO_MAX_BYTES = 20_000_000;
 export function assertFacebookVideoSize(size:number):void {
   if (!Number.isSafeInteger(size) || size <= 0 || size > FACEBOOK_VIDEO_MAX_BYTES)
-    throw new FacebookError("Facebook video must be between 1 byte and 20 MB. Private storage allows up to 50 MB for other platforms; choose a smaller Facebook video or deselect Facebook.");
+    throw new FacebookError("Facebook video must be between 1 byte and 20 MB. Private storage allows up to 300 MB for other platforms; choose a smaller Facebook video or deselect Facebook.");
 }
 
 /** Upload a private MP4 directly to the Page video endpoint, without a public file URL.

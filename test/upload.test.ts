@@ -5,6 +5,7 @@ import { INITIAL_VIDEO_MAX_BYTES } from "../src/video.ts";
 import { createUpload, handleUploadPut, looksLike, parseUploadRef,
   UPLOAD_MAX_LINKS_PER_HOUR, UPLOAD_QUOTA_BYTES, pendingUploadPageInfo, uploadStatusForOwner, getUploadUsage } from "../src/upload.ts";
 import {CHAT_UPLOAD_JS,browserUploadPage} from "../src/chat-upload.ts";
+import {LARGE_UPLOAD_JS} from "../src/large-upload-client.ts";
 import type { Env } from "../src/env.ts";
 
 type Row = Record<string, any>;
@@ -18,6 +19,10 @@ function fakeDb() {
         const [id,token_hash,ext,max_bytes,created_at,expires_at,created_by] = args;
         rows.push({id,token_hash,ext,max_bytes,status:"pending",created_at,expires_at,created_by,bytes:null});
         changes++;
+      } else if (sql.includes("SET status='uploading', max_bytes=?")) {
+        const [reservation,id,now]=args;
+        const r=rows.find(x=>x.id===id && x.status==="pending" && x.expires_at>now && x.max_bytes>=reservation);
+        if(r){r.max_bytes=reservation;r.status="uploading";changes++;}
       } else if (sql.includes("SET status = 'uploading'")) {
         const r = rows.find(x=>x.id===args[0] && x.status==="pending" && x.expires_at>args[1]);
         if(r){r.status="uploading";changes++;}
@@ -203,21 +208,22 @@ test("upload readiness is scoped to the authenticated uploader, not the MCP clie
 });
 
 test("chat uploader sends file bytes with a one-time PUT and never auto-publishes",()=>{
-  assert.match(CHAT_UPLOAD_JS,/method:"PUT",body:selected/);
-  assert.match(CHAT_UPLOAD_JS,/referrerPolicy:"no-referrer"/);
-  assert.match(CHAT_UPLOAD_JS,/credentials:"omit"/);
+  assert.match(CHAT_UPLOAD_JS,/gsUploadFile/);
+  assert.match(LARGE_UPLOAD_JS,/method, body, headers/);
+  assert.match(LARGE_UPLOAD_JS,/referrerPolicy: "no-referrer"/);
+  assert.match(LARGE_UPLOAD_JS,/credentials: "omit"/);
   assert.match(CHAT_UPLOAD_JS,/response\.reference/);
   assert.doesNotMatch(CHAT_UPLOAD_JS,/\/approve|\/publish/);
 });
 
-test("MP4 grants accept 40 MB files with a 50 MB bound, not unbounded uploads",async()=>{
+test("MP4 grants reserve 300 MB but legacy single PUT rejects above 50 MB",async()=>{
   const {env}=setup();
   const grant=await createUpload(env,"https://poster.test",{filename:"clip.mp4",actor:"GSGrimoire"});
-  assert.equal(grant.max_bytes,50_000_000);
+  assert.equal(grant.max_bytes,300_000_000);
   assert.equal(INITIAL_VIDEO_MAX_BYTES,50_000_000);
   const url=new URL(grant.upload_url),parts=url.pathname.split("/");
   const info=await pendingUploadPageInfo(env.DB,parts[2],parts[3]);
-  assert.equal(info?.maxBytes,50_000_000);
+  assert.equal(info?.maxBytes,300_000_000);
   const headerOnly=new Request(grant.upload_url,{method:"PUT",body:new Uint8Array(12),headers:{
     "Content-Length":"50000001",
   }});
