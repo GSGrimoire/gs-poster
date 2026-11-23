@@ -49,7 +49,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
 }
 
 export default {
-  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     // One platform failure must not prevent the other approved queue from running.
     let failed = false;
     try { await processFacebookUploadBatch(env); }
@@ -58,8 +58,8 @@ export default {
     catch { failed = true; console.error("Bluesky scheduled batch failed."); }
     try { await processInstagramBatch(env); }
     catch { failed = true; console.error("Instagram scheduled batch failed."); }
-    // Release expired, abandoned multipart reservations only after R2 confirms abort.
-    if (new Date().getUTCMinutes() === 0) {
+    // Check the trigger timestamp so a delayed start cannot miss this run.
+    if (new Date(controller.scheduledTime).getUTCMinutes() === 0) {
       try { await cleanupExpiredChunkUploads(env); }
       catch { console.error("Expired multipart cleanup unavailable."); }
     }

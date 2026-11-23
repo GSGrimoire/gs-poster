@@ -6,7 +6,7 @@ import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-pr
 import { allowedLogins, missingSecrets, type Env } from "./env.ts";
 import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, MONTH_CALENDAR_PAGE_SIZE, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
 import { markTikTokInboxApproved, markTikTokCreatorPublished, reopenTikTokInboxDraft, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, getTikTokHistoryState, type HistoryPost, type Paged, type TikTokHistoryState } from "./history.ts";
-import { checkBluesky } from "./bluesky.ts";
+import { assertBlueskyVideoSize, checkBluesky } from "./bluesky.ts";
 import { esc, html, page } from "./html.ts";
 import { POSTER_FAVICON } from "./favicon.ts";
 import { CALENDAR_JS, MONTH_CALENDAR_JS, renderCalendar, renderMonthCalendar, weekStart, weekRange, monthStart, monthRange, calendarReturnAfterMove } from "./calendar.ts";
@@ -926,8 +926,13 @@ async function draftImageAction(
       if (version !== current.updated_at) return fail("The draft changed. Reload.",409);
       if (!(await isStoredOwnerVideo(env.DB,reference,session.login)))
         return fail("This private video is not stored or does not belong to your account.");
-      if (facebook && ((await privateVideoSize(env,reference)) ?? Infinity)>FACEBOOK_VIDEO_TRANSPORT_MAX_BYTES)
-        return fail("Facebook's current publishing transport accepts only 20 MB. Deselect Facebook for this video.");
+      if (facebook || bluesky) {
+        const size = await privateVideoSize(env,reference);
+        if (size === null) return fail("Private video is missing or has expired.");
+        if (facebook && size > FACEBOOK_VIDEO_TRANSPORT_MAX_BYTES)
+          return fail("Facebook's current publishing transport accepts only 20 MB. Deselect Facebook for this video.");
+        if (bluesky) assertBlueskyVideoSize(size);
+      }
       const updated = await attachDraftVideo(env.DB,id,reference,alt,facebook,bluesky,version,tiktok,instagram);
       if (!updated) return fail("A target already has media or the draft changed. Reload.",409);
       const logged=await audit(env.DB,session.login,"draft-video-attached",id,
@@ -1335,7 +1340,8 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       if (bluesky.video) {
         try {
           const preview=await openVideoStream(env,bluesky.video.url);
-          await preview.body.cancel();
+          try { assertBlueskyVideoSize(preview.size); }
+          finally { await preview.body.cancel(); }
         }
         catch (error) {
           return postPage(env, session, id, {

@@ -33,7 +33,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
   <div role="status" id="media-upload-status" class="hint" aria-live="polite"></div>
   </details>
   <details class="adder" id="add-video"><summary>${post.video || post.bluesky?.video || tt.video || post.instagram?.video ? "+ Replace video" : "+ Add video"}</summary>
-  <p class="hint">One private MP4, up to 300 MB (files over 50 MB upload in parts). Facebook publishing remains limited to 20 MB; choose other platforms for a larger video. A platform can have photos or a video, not both. Nothing is published.</p>
+  <p class="hint">Private MP4 uploads allow up to 300 MB. Facebook accepts up to 20 MB and Bluesky up to 50 MB in GS Poster. A platform can have photos or one video.</p>
   <div id="video-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop MP4">
     Drop MP4 here, or click to choose
     <input type="file" id="video-file" accept=".mp4,video/mp4" hidden>
@@ -96,15 +96,16 @@ export const DRAFT_MEDIA_JS = `
     previewUrl = URL.createObjectURL(file);
     videoPreview.src = previewUrl;videoPreview.hidden = false;
     videoName.textContent = file.name+" ("+(file.size/1048576).toFixed(1)+" MB)";
+    videoFacebook.disabled=panel.dataset.facebook!=="1"||Number(panel.dataset.facebookImages)>0||file.size>20_000_000;
+    videoBluesky.disabled=panel.dataset.bluesky!=="1"||Number(panel.dataset.blueskyImages)>0||file.size>50_000_000;
+    videoStatus.textContent="";
     if(file.size>20_000_000){
       videoFacebook.checked=false;
-      videoFacebook.disabled=true;
-      videoFacebook.title="Facebook publishing uses a separate 20 MB transport limit.";
-      videoStatus.textContent="Larger video selected. Facebook was disabled because it currently accepts only 20 MB.";
-    }else{
-      videoFacebook.disabled=panel.dataset.facebook!=="1"||Number(panel.dataset.facebookImages)>0;
-      videoFacebook.title="";
-      videoStatus.textContent="";
+      videoStatus.textContent="Facebook was deselected because its limit is 20 MB.";
+    }
+    if(file.size>50_000_000){
+      videoBluesky.checked=false;
+      videoStatus.textContent="Facebook and Bluesky were deselected because their limits are 20 MB and 50 MB.";
     }
     videoSubmit.disabled = videoFacebook.disabled && videoBluesky.disabled && videoTikTok.disabled && videoInstagram.disabled;
   }

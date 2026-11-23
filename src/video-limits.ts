@@ -8,3 +8,5 @@ export const VIDEO_UPLOAD_LINK_MS = 60 * 60 * 1000;
 /** Legacy buffered reads are restricted to small provider uploads. */
 export const BUFFERED_VIDEO_MAX_BYTES = 50_000_000;
 export const FACEBOOK_VIDEO_TRANSPORT_MAX_BYTES = 20_000_000;
+/** Retain the existing direct-to-Bluesky transport ceiling while storage grows. */
+export const BLUESKY_VIDEO_TRANSPORT_MAX_BYTES = 50_000_000;

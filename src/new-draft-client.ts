@@ -328,6 +328,8 @@ export const NEW_DRAFT_JS = String.raw`
         throw new Error("Video must be an MP4 no larger than 300 MB.");
       if (target("facebook") && video.size > 20000000)
         throw new Error("Facebook's current uploader accepts only 20 MB. Deselect Facebook before attaching this larger video.");
+      if (bs && video.size > 50000000)
+        throw new Error("GS Poster's Bluesky video transport accepts up to 50 MB. Deselect Bluesky or choose a smaller video.");
       if (bs && !$("new-video-alt").value.trim())
         throw new Error("Provide alternative text for your Bluesky video.");
     }

@@ -19,6 +19,14 @@ const TYPES: Record<UploadExt, { mime: string; max: number }> = {
   gif: { mime: "image/gif", max: 10 * 1024 * 1024 },
   mp4: { mime: "video/mp4", max: PRIVATE_VIDEO_MAX_BYTES },
 };
+const pendingReservation = (ext: UploadExt, max: number) => ext === "mp4"
+  ? Math.min(max, SINGLE_REQUEST_VIDEO_MAX_BYTES) : max;
+const PENDING_RESERVATION_SQL = `CASE WHEN ext='mp4' THEN MIN(max_bytes, ${SINGLE_REQUEST_VIDEO_MAX_BYTES}) ELSE max_bytes END`;
+const RESERVED_BYTES_SQL = `(SELECT COALESCE(SUM(CASE
+  WHEN status='stored' THEN COALESCE(bytes, max_bytes)
+  WHEN status='uploading' THEN max_bytes
+  WHEN status='pending' AND expires_at > ? THEN ${PENDING_RESERVATION_SQL}
+  ELSE 0 END), 0) FROM uploads WHERE created_at > ?)`;
 const REF = /^upload:\/\/([a-f0-9]{32})\.(jpg|jpeg|png|gif|mp4)$/;
 const key = (r: UploadRef) => "uploads/" + r.id + "." + r.ext;
 export const isUploadRef = (s: string): boolean => s.startsWith("upload://");
@@ -77,14 +85,14 @@ export async function getUploadUsage(db: D1Database, at = new Date()): Promise<U
   const since = new Date(at.getTime() - UPLOAD_ACCOUNTING_DAYS * 86400_000).toISOString();
   const hourAgo = new Date(at.getTime() - 3600_000).toISOString();
   const { results } = await db.prepare(
-    "SELECT status, max_bytes, bytes, expires_at, created_at FROM uploads WHERE created_at > ?",
-  ).bind(since).all<Pick<UploadRow,"status" | "max_bytes" | "bytes" | "expires_at" | "created_at">>();
+    "SELECT status, ext, max_bytes, bytes, expires_at, created_at FROM uploads WHERE created_at > ?",
+  ).bind(since).all<Pick<UploadRow,"status" | "ext" | "max_bytes" | "bytes" | "expires_at" | "created_at">>();
   const stored = results.reduce((sum,r) =>
     sum + (r.status === "stored" ? (r.bytes ?? r.max_bytes) : 0), 0);
   const reserved = results.reduce((sum,r) => sum +
     (r.status === "stored" ? (r.bytes ?? r.max_bytes) :
       r.status === "uploading" ? r.max_bytes :
-      r.status === "pending" && r.expires_at > now ? r.max_bytes : 0), 0);
+      r.status === "pending" && r.expires_at > now ? pendingReservation(r.ext, r.max_bytes) : 0), 0);
   return {
     estimated_stored_bytes: stored,
     reserved_bytes: reserved,
@@ -111,7 +119,8 @@ export async function createUpload(env: Env, origin: string, input: { filename: 
   if (usage.links_last_hour >= UPLOAD_MAX_LINKS_PER_HOUR)
     throw new Error("Too many upload links were requested in the last hour.");
   const max = TYPES[ext].max;
-  if (usage.reserved_bytes + max > UPLOAD_QUOTA_BYTES)
+  const reservation = pendingReservation(ext, max);
+  if (usage.reserved_bytes + reservation > UPLOAD_QUOTA_BYTES)
     throw new Error("Upload storage is full.");
   const id = [...crypto.getRandomValues(new Uint8Array(16))]
     .map(v => v.toString(16).padStart(2,"0")).join("");
@@ -124,15 +133,10 @@ export async function createUpload(env: Env, origin: string, input: { filename: 
     (id, token_hash, ext, max_bytes, status, created_at, expires_at, created_by)
     SELECT ?, ?, ?, ?, 'pending', ?, ?, ?
     WHERE
-      (SELECT COALESCE(SUM(
-        CASE WHEN status = 'stored' THEN COALESCE(bytes,max_bytes)
-          WHEN status = 'uploading' THEN max_bytes
-          WHEN status = 'pending' AND expires_at > ? THEN max_bytes
-          ELSE 0 END),0)
-       FROM uploads WHERE created_at > ?) + ? <= ?
+      ${RESERVED_BYTES_SQL} + ? <= ?
       AND (SELECT COUNT(*) FROM uploads WHERE created_at > ?) < ?`)
     .bind(id, await sha256(token), ext, max, nowIso, expires, input.actor,
-      nowIso, keepSince, max, UPLOAD_QUOTA_BYTES,
+      nowIso, keepSince, reservation, UPLOAD_QUOTA_BYTES,
       hourAgo, UPLOAD_MAX_LINKS_PER_HOUR).run();
   if ((grant.meta.changes ?? 0) !== 1) {
     throw new Error("Upload budget exceeded by concurrent requests. No upload link was created.");
@@ -145,8 +149,20 @@ export async function createUpload(env: Env, origin: string, input: { filename: 
   return {
     reference: formatUploadRef({id,ext}), upload_url: url, method: "PUT",
     expires_at: expires, max_bytes: max, keep_days: UPLOAD_RETENTION_DAYS,
-    curl: 'For MP4 files over 50 MB, open upload_url in a browser and use the chunked uploader. For smaller files: curl -sS --fail-with-body -T "<path-to-file>" "' + url + '"',
+    curl: 'curl -sS --fail-with-body -T "<path-to-file>" "' + url + '"',
   };
+}
+
+/** Switch to the actual transfer ceiling in the same write that claims the grant. */
+export async function claimUploadReservation(db: D1Database, id: string, reservation: number): Promise<boolean> {
+  const now = new Date();
+  const since = new Date(now.getTime() - UPLOAD_ACCOUNTING_DAYS * 86400_000).toISOString();
+  const claimed = await db.prepare(`UPDATE uploads SET status='uploading', max_bytes=?
+    WHERE id=? AND status='pending' AND expires_at>? AND max_bytes>=?
+      AND ${RESERVED_BYTES_SQL} - (${PENDING_RESERVATION_SQL}) + ? <= ?`)
+    .bind(reservation, id, now.toISOString(), reservation,
+      now.toISOString(), since, reservation, UPLOAD_QUOTA_BYTES).run();
+  return claimed.meta.changes === 1;
 }
 
 class UploadError extends Error {
@@ -174,6 +190,7 @@ function json(body: unknown, status = 200): Response {
 }
 /** A chunk-sized SHA-256 fence, so verification never retains an entire MP4. */
 export interface UploadPartDigest { bytes: number; sha256: string }
+export class StoredUploadMismatch extends Error {}
 const VIDEO_PART_BYTES = VIDEO_UPLOAD_PART_BYTES;
 async function digestPart(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
@@ -185,19 +202,24 @@ export async function verifyStoredUploadParts(
   env: Env, ref: UploadRef, parts: UploadPartDigest[],
 ): Promise<void> {
   if (!env.UPLOADS || !parts.length) throw new Error("Private upload verification is unavailable.");
+  const head = await env.UPLOADS.head(key(ref));
+  if (!head) throw new Error("Private video size could not be confirmed.");
+  if (head.size !== parts.reduce((size, part) => size + part.bytes, 0))
+    throw new StoredUploadMismatch("Private video size did not match the upload.");
   let offset = 0;
   for (const part of parts) {
     if (!part.bytes || part.bytes > VIDEO_PART_BYTES) throw new Error("Invalid private media part.");
     const object = await env.UPLOADS.get(key(ref), {range:{offset,length:part.bytes}});
-    if (!object || !("body" in object)) throw new Error("Private video readback was not confirmed.");
+    const body = object && "body" in object ? object.body : null;
+    if (!body) throw new Error("Private video readback was not confirmed.");
     // Each range is at most 5 MiB. Never readUpload() the entire 300 MB file here.
-    const bytes = new Uint8Array(await object.arrayBuffer());
+    // Read the body once: some R2 bindings (the Miniflare proxy) treat the
+    // "body" lookup as a read, so a later arrayBuffer() would fail.
+    const bytes = new Uint8Array(await new Response(body).arrayBuffer());
     if (bytes.byteLength !== part.bytes || await digestPart(bytes) !== part.sha256)
-      throw new Error("Private video copy failed the integrity check.");
+      throw new StoredUploadMismatch("Private video copy failed the integrity check.");
     offset += part.bytes;
   }
-  const head = await env.UPLOADS.head(key(ref));
-  if (!head || head.size !== offset) throw new Error("Private video size could not be confirmed.");
 }
 
 /** Bound the ACTUAL incoming bytes before allocating the image buffer. */
@@ -355,9 +377,13 @@ export async function handleUploadPut(
       length > SINGLE_REQUEST_VIDEO_MAX_BYTES && !options?.internalUnknownLength)
     return rejectUnused("Videos above 50 MB must use the chunked browser uploader.",413);
   if (!request.body) return rejectUnused("The file is empty.",400);
-  const claim = await env.DB.prepare("UPDATE uploads SET status = 'uploading' WHERE id = ? AND status = 'pending' AND expires_at > ?")
-    .bind(id,new Date().toISOString()).run();
-  if ((claim.meta.changes ?? 0) !== 1) return gone();
+  const reservation = options?.internalUnknownLength ? length ?? row.max_bytes : pendingReservation(row.ext, row.max_bytes);
+  const claimed = row.ext === "mp4"
+    ? await claimUploadReservation(env.DB, id, reservation)
+    : (await env.DB.prepare("UPDATE uploads SET status = 'uploading' WHERE id = ? AND status = 'pending' AND expires_at > ?")
+      .bind(id,new Date().toISOString()).run()).meta.changes === 1;
+  if (!claimed)
+    return options?.internalUnknownLength ? json({error:"Upload could not reserve private storage."},409) : gone();
   const ref: UploadRef = {id,ext:row.ext};
   let writeStarted = false;
   // A failed database response may still have committed. Never delete after
@@ -368,7 +394,7 @@ export async function handleUploadPut(
     let fingerprints: UploadPartDigest[] = [];
     if (row.ext === "mp4") {
       // The multipart helper reports whether failures left an object absent.
-      const stored = await storeVideoInParts(env,ref,request.body,row.max_bytes,length);
+      const stored = await storeVideoInParts(env,ref,request.body,reservation,length);
       writeStarted = true;
       size = stored.bytes;
       fingerprints = stored.parts;

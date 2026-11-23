@@ -213,7 +213,11 @@ test("classification table",()=>{
 const videoRef="upload://"+"c".repeat(32)+".mp4";
 function stubVideo(){
  const bytes=new Uint8Array(4096);bytes.set([0,0,0,24,102,116,121,112,105,115,111,109],0);
- env.UPLOADS={get:async()=>({arrayBuffer:async()=>bytes.buffer})} as unknown as R2Bucket;
+ env.UPLOADS={head:async()=>({size:bytes.byteLength}),
+  get:async(_key:string,opt?:{range?:{offset:number;length:number}})=>{
+   const r=opt?.range;const out=r?bytes.slice(r.offset,r.offset+r.length):bytes;
+   return {arrayBuffer:async()=>out.buffer};
+  }} as unknown as R2Bucket;
 }
 async function videoDraft(){
  const p=await createPost(env.DB,{message:"Video",images:[],video:videoRef,scheduled_at:null,

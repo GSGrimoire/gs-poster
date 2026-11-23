@@ -19,6 +19,10 @@ function fakeDb() {
         const [id,token_hash,ext,max_bytes,created_at,expires_at,created_by] = args;
         rows.push({id,token_hash,ext,max_bytes,status:"pending",created_at,expires_at,created_by,bytes:null});
         changes++;
+      } else if (sql.includes("SET status='uploading', max_bytes=?")) {
+        const [reservation,id,now]=args;
+        const r=rows.find(x=>x.id===id && x.status==="pending" && x.expires_at>now && x.max_bytes>=reservation);
+        if(r){r.max_bytes=reservation;r.status="uploading";changes++;}
       } else if (sql.includes("SET status = 'uploading'")) {
         const r = rows.find(x=>x.id===args[0] && x.status==="pending" && x.expires_at>args[1]);
         if(r){r.status="uploading";changes++;}
@@ -340,7 +344,7 @@ test("uncertain multipart abort or completion retains reservation and consumed t
       point==="abort"?data.length+1:data.length),env);
     assert.notEqual(res.status,200);
     assert.equal((await uploadStatusForOwner(env.DB,grant.reference,"test"))?.status,"uploading");
-    assert.equal((await getUploadUsage(env.DB)).reserved_bytes,300_000_000);
+    assert.equal((await getUploadUsage(env.DB)).reserved_bytes,50_000_000);
     assert.equal((await handleUploadPut(upload(grant.upload_url,MP4_HEADER),env)).status,404);
     if(point==="abort")assert.equal(stats.aborted,1);
     else assert.equal(stats.completed,1);

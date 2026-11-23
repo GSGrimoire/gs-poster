@@ -6,6 +6,13 @@ import type { Env } from "./env.ts";
 import type { BlueskyDraft } from "./db.ts";
 import { checkImageUrl, fetchImage } from "./media.ts";
 import { checkVideoUrl, openVideoStream } from "./video.ts";
+import { BLUESKY_VIDEO_TRANSPORT_MAX_BYTES } from "./video-limits.ts";
+
+export function assertBlueskyVideoSize(size: number | null): void {
+  if (size === null) throw new Error("Private video is missing or has expired.");
+  if (size > BLUESKY_VIDEO_TRANSPORT_MAX_BYTES)
+    throw new Error("GS Poster's Bluesky video transport accepts up to 50 MB. Select a smaller video for Bluesky.");
+}
 
 const XRPC = "https://bsky.social/xrpc/";
 export const BSKY_IMAGE_LIMIT = 1_950_000; // below the protocol's 2,000,000-byte limit
@@ -174,19 +181,25 @@ export async function publishBluesky(env: Env, id: string, draft: BlueskyDraft):
   }
   let videoBlob: unknown = undefined;
   if (draft.video) {
-    // First stage support: Bluesky processes a direct blob asynchronously after publication.
-    // Stream the original 300 MB-capable MP4 to the PDS without ever
-    // buffering it in the 128 MB Worker isolate.
+    // Bluesky processes a direct blob asynchronously after publication.
     const source = await openVideoStream(env, draft.video.url);
-    const uploaded = await api("com.atproto.repo.uploadBlob", {
-      method: "POST",
-      headers: { ...bearer(session), "Content-Type": "video/mp4",
-        ...(source.size === null ? {} : { "Content-Length": String(source.size) }) },
-      body: source.body,
-      duplex: "half",
-    } as RequestInit & {duplex:"half"});
-    if (!uploaded.blob) throw new Error("Bluesky did not return a video blob.");
-    videoBlob = uploaded.blob;
+    try { assertBlueskyVideoSize(source.size); }
+    catch (error) { await source.body.cancel(); throw error; }
+    const body = new FixedLengthStream(source.size);
+    const cancel = new AbortController();
+    const writing = source.body.pipeTo(body.writable, { signal: cancel.signal });
+    void writing.catch(() => {});
+    try {
+      const uploaded = await api("com.atproto.repo.uploadBlob", {
+        method: "POST", redirect: "manual", headers: { ...bearer(session), "Content-Type": "video/mp4" }, body: body.readable,
+      });
+      await writing;
+      if (!uploaded.blob) throw new Error("Bluesky did not return a video blob.");
+      videoBlob = uploaded.blob;
+    } finally {
+      cancel.abort();
+      await writing.catch(() => {});
+    }
   }
   const embed = videoBlob
     ? { $type: "app.bsky.embed.video", video: videoBlob, alt: draft.video!.alt.trim() }

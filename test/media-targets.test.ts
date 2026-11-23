@@ -38,14 +38,22 @@ test("Bluesky videos require a safe MP4 source and descriptive alt", () => {
 
 test("Bluesky video creates a video post and separate linked Patreon card", async () => {
   const previous = globalThis.fetch;
+  const fixedLength = globalThis.FixedLengthStream;
+  // Node has no Worker stream constructor. The separate workerd test checks
+  // the actual Content-Length header and the streamed bytes.
+  globalThis.FixedLengthStream = class extends TransformStream<Uint8Array,Uint8Array> {
+    constructor(_size:number){super();}
+  } as typeof FixedLengthStream;
   const writes: Array<any> = [];
   const mp4 = Uint8Array.from([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0]);
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     if (url.includes("createSession")) return Response.json({ did: "did:plc:test", accessJwt: "demo-only" });
-    if (url.includes("raw.githubusercontent.com")) return new Response(mp4, { status: 200 });
+    if (url.includes("raw.githubusercontent.com"))
+      return new Response(mp4,{headers:{"Content-Length":String(mp4.length)}});
     if (url.includes("uploadBlob")) {
       assert.equal((init?.headers as Record<string, string>)["Content-Type"], "video/mp4");
+      assert.deepEqual(new Uint8Array(await new Response(init?.body).arrayBuffer()),mp4);
       return Response.json({ blob: { $type: "blob", ref: { $link: "testcid" }, mimeType: "video/mp4", size: mp4.length } });
     }
     if (url.includes("createRecord")) {
@@ -67,7 +75,7 @@ test("Bluesky video creates a video post and separate linked Patreon card", asyn
     assert.equal(writes[1].record.embed.$type, "app.bsky.embed.external");
     assert.deepEqual(writes[1].record.reply.root, { uri: writes[0].record.reply?.root?.uri ?? "at://did:plc:test/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1"), cid: "cid-" + blueskyRecordKey("p_mvrslvbab2230330c1") });
     assert.equal(published.cardUri, "at://did:plc:test/app.bsky.feed.post/" + blueskyRecordKey("p_mvrslvbab2230330c1", true));
-  } finally { globalThis.fetch = previous; }
+  } finally { globalThis.fetch = previous;globalThis.FixedLengthStream = fixedLength; }
 });
 
 test("Reject video payload that is not genuine MP4", async () => {

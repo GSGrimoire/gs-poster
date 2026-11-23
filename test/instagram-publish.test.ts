@@ -45,7 +45,8 @@ beforeEach(async () => {
   calls = []; status = "FINISHED"; publishFails = false; containerFails = false; holdContainer = undefined; holdPublish = undefined; nextId = 0;
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
-    if (url.hostname === "raw.githubusercontent.com") return new Response(MP4);
+    if (url.hostname === "raw.githubusercontent.com")
+      return new Response(MP4,{headers:{"Content-Length":String(MP4.length)}});
     assert.equal(url.hostname, "graph.facebook.com", "no unexpected network request: " + url.href);
     const method = init?.method ?? "GET";
     const path = url.pathname.replace(/^\/v[0-9.]+\//, "");

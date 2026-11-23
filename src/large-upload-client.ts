@@ -1,5 +1,5 @@
 /** Shared browser upload transport for drafts and one-use chat pages.
- * Only videos over 50 MB use the bounded resumable R2 multipart protocol.
+ * Only videos over 50 MB use the bounded R2 multipart protocol.
  */
 export const LARGE_UPLOAD_JS = String.raw`
 (() => {

@@ -4,7 +4,7 @@
  */
 import type { Env } from "./env.ts";
 import { parseGitHubUrl } from "./media.ts";
-import { isUploadRef, parseUploadRef, readUpload } from "./upload.ts";
+import { isUploadRef, looksLike, parseUploadRef, readUpload } from "./upload.ts";
 import { PRIVATE_VIDEO_MAX_BYTES, BUFFERED_VIDEO_MAX_BYTES } from "./video-limits.ts";
 
 /** Compatibility ceiling for legacy buffer-returning calls. */
@@ -35,13 +35,17 @@ export async function openGitHubVideoSource(env:Env,value:string):Promise<Respon
     { headers: { "User-Agent": "gs-poster" }, redirect:"manual" },
   );
   if (!response.ok && env.GITHUB_READ_TOKEN) {
+    await response.body?.cancel();
     response = await fetch("https://api.github.com/repos/" + ref.owner + "/" + ref.repo +
       "/contents/" + path + "?ref=" + encodeURIComponent(ref.ref), {
       headers: { Authorization: "Bearer " + env.GITHUB_READ_TOKEN,
         Accept: "application/vnd.github.raw+json", "User-Agent": "gs-poster" }, redirect:"manual",
     });
   }
-  if (!response.ok || !response.body) throw new Error("Could not fetch MP4 video from the GitHub library.");
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    throw new Error("Could not fetch MP4 video from the GitHub library.");
+  }
   const header = response.headers.get("content-length");
   const length = header === null ? null : Number(header);
   if (length !== null && (!Number.isSafeInteger(length) || length <= 0 || length > PRIVATE_VIDEO_MAX_BYTES)) {
@@ -100,8 +104,55 @@ export async function fetchVideo(env: Env, value: string): Promise<Uint8Array> {
 }
 
 
+/** Check the MP4 prefix and forward each chunk without retaining the full body. */
+async function checkedVideoBody(source:ReadableStream<Uint8Array>,size:number):Promise<ReadableStream<Uint8Array>>{
+  const reader=source.getReader();
+  const prefix=new Uint8Array(12);
+  const initial:Uint8Array[]=[];
+  let received=0;
+  try{
+    while(received<prefix.length){
+      const {done,value}=await reader.read();
+      if(done || value.byteLength>size-received)throw Error("GitHub MP4 length does not match its declaration.");
+      if(value.byteLength)initial.push(value);
+      prefix.set(value.subarray(0,prefix.length-received),received);
+      received+=value.byteLength;
+    }
+    if(!looksLike("mp4",prefix))throw Error("GitHub returned a non-MP4 file (possibly a Git LFS pointer).");
+  }catch(error){
+    await reader.cancel(error).catch(()=>{});
+    reader.releaseLock();
+    throw error;
+  }
+  return new ReadableStream({
+    async pull(controller){
+      const first=initial.shift();
+      if(first){controller.enqueue(first);return;}
+      try{
+        const {done,value}=await reader.read();
+        if(done){
+          if(received!==size)throw Error("GitHub MP4 ended before its declared length.");
+          reader.releaseLock();
+          controller.close();
+        }else{
+          if(value.byteLength>size-received)throw Error("GitHub MP4 exceeds its declared length.");
+          received+=value.byteLength;
+          controller.enqueue(value);
+        }
+      }catch(error){
+        await reader.cancel(error).catch(()=>{});
+        reader.releaseLock();
+        controller.error(error);
+      }
+    },
+    async cancel(reason){
+      try{await reader.cancel(reason);}finally{reader.releaseLock();}
+    },
+  });
+}
+
 /** Open media without allocating the complete MP4 in the Worker isolate. */
-export async function openVideoStream(env:Env,value:string):Promise<{body:ReadableStream<Uint8Array>;size:number|null}>{
+export async function openVideoStream(env:Env,value:string):Promise<{body:ReadableStream<Uint8Array>;size:number}>{
   const bad=checkVideoUrl(value);
   if(bad)throw Error(bad);
   if(isUploadRef(value)){
@@ -117,7 +168,13 @@ export async function openVideoStream(env:Env,value:string):Promise<{body:Readab
   }
   const response=await openGitHubVideoSource(env,value);
   const length=response.headers.get("content-length");
-  return {body:response.body!,size:length===null?null:Number(length)};
+  const encoding=response.headers.get("content-encoding");
+  if(length===null || (encoding && encoding!=="identity")){
+    await response.body!.cancel();
+    throw Error("GitHub must provide a known MP4 size for streaming. Upload the file directly to GS Poster.");
+  }
+  const size=Number(length);
+  return {body:await checkedVideoBody(response.body!,size),size};
 }
 
 /** Efficient R2 lookup for provider size fences and native byte-range playback. */
