@@ -55,7 +55,7 @@ before(async()=>{
       if(u.hostname==="open-upload.tiktokapis.com"&&req.method==="PUT"){
         // Mimic provider receipt of the entire fixed-length request body.
         await req.arrayBuffer();
-        const range=req.headers.get("content-range")?.match(/^bytes (\\d+)-(\\d+)\/(\\d+)$/);
+        const range=req.headers.get("content-range")?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
         const isLast=!range||Number(range[2])+1===Number(range[3]);
         return new Response(null,{status:isLast?201:206});
       }
@@ -78,7 +78,8 @@ before(async()=>{
       return new Response("blocked in test",{status:599});
     },
     bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",APPROVE_PIN:PIN,TIMEZONE:"Europe/Copenhagen",
-      TIKTOK_CLIENT_KEY:"sandbox-key",TIKTOK_CLIENT_SECRET:"sandbox-secret",TIKTOK_TOKEN_ENCRYPTION_KEY:TT_KEY}}));
+      TIKTOK_CLIENT_KEY:"sandbox-key",TIKTOK_CLIENT_SECRET:"sandbox-secret",TIKTOK_TOKEN_ENCRYPTION_KEY:TT_KEY,
+      BSKY_HANDLE:"test.bsky.social",BSKY_APP_PASSWORD:"test-only-app-password"}}));
   db=await mf.getD1Database("DB") as unknown as D1Database;
   r2=await mf.getR2Bucket("UPLOADS") as unknown as R2Bucket;
   await ensureSchema(db);await ensureFacebookQueue(db);await ensureTikTokSchema(db);await ensureTikTokInboxSchema(db);
