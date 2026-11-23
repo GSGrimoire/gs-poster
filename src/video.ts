@@ -185,6 +185,23 @@ export async function privateVideoSize(env:Env,value:string):Promise<number|null
   return head?.size??null;
 }
 
+/** Stream a bounded private range without materializing the chunk in Worker memory.
+ * The caller must verify the returned stream's exact byte count using
+ * FixedLengthStream before considering an outbound upload complete.
+ */
+export async function openPrivateVideoRangeStream(
+  env:Env,value:string,offset:number,length:number,
+):Promise<ReadableStream<Uint8Array>>{
+  const ref=parseUploadRef(value);
+  if(!ref || ref.ext!=="mp4" || !env.UPLOADS)throw Error("Expected private video.");
+  if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||
+     length<1||length>20*1024*1024||!Number.isSafeInteger(offset+length))
+    throw Error("Invalid bounded private video range.");
+  const object=await env.UPLOADS.get("uploads/"+ref.id+".mp4",{range:{offset,length}});
+  if(!object)throw Error("Video range is missing.");
+  return object.body;
+}
+
 /** A private video range is at most 20 MiB per read, even for a 300 MB file. */
 export async function privateVideoRange(env:Env,value:string,offset:number,length:number):
   Promise<Uint8Array>{
