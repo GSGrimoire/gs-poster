@@ -1309,8 +1309,11 @@ async function postAction(req: Request, env: Env, session: Session, id: string, 
       if (current.images.length) return postPage(env,session,id,
         {error:"Facebook video cannot be combined with image gallery."},400);
       try {
-        const bytes=await fetchVideo(env,current.video);
-        assertFacebookVideoSize(bytes.byteLength);
+        // Check the provider ceiling without allocating an entire MP4 on
+        // the PIN request. Publication retains its separate size fence.
+        const preview=await openVideoStream(env,current.video);
+        try { assertFacebookVideoSize(preview.size); }
+        finally { await preview.body.cancel(); }
       } catch(error) { return postPage(env,session,id,{error:"Facebook video cannot be approved: "+
         (error instanceof Error ? error.message : String(error))},400); }
     }
