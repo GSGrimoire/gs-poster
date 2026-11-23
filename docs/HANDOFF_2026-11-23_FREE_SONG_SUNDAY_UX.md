@@ -21,11 +21,11 @@ Two **unapproved, text-only** GS Poster Facebook + Bluesky drafts for release `A
 - The preset selects `video`, preserves the normal Facebook and Bluesky choices, and fills the release grouping without attaching/publishing anything.
 - An informational notice separates the short promotional social video from the full YouTube music video and thumbnail.
 - The attached test checks the preset, rendered media mode and absence of PIN/publishing controls.
-- `CHAT_MEDIA_WORKFLOW.md` now directs assistants to the existing draft's one-page Add video / Add photos controls **before** generating one-use, per-file upload pages.
+- `CHAT_MEDIA_WORKFLOW.md` and the native-import / batch-upload MCP tool instructions now direct assistants to the existing draft's one-page Add video / Add photos controls **before** generating one-use, per-file upload pages. These tool-description edits do not alter their input schemas, owner checks or handlers.
 
 ## Verification status
 
-- Author inspected the full four-file diff against pinned main; changes are limited to UI copy, preset values, guidance and a matching regression test.
+- Author inspected the full six-file diff against pinned main; changes are limited to UI copy, preset values, guidance and a matching regression test.
 - No runtime tests, TypeScript check, Wrangler bundle, browser interaction or live release smoke has been run in this session. The local container cannot resolve GitHub, and the repository dependencies are unavailable. The proposed branch is **not release-ready** until `npm run check` and `npx wrangler deploy --dry-run --outdir dist` pass without consuming unavailable GitHub Actions credits.
 - Actual Facebook, Bluesky, TikTok and YouTube publication and media delivery remain untested and unaltered.
 
