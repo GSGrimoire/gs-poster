@@ -51,7 +51,11 @@ before(async()=>{
         return Response.json({access_token:"fake-renewed-access",refresh_token:"fake-refresh",open_id:"creator",
           scope:"user.info.basic,video.upload",expires_in:3600,refresh_expires_in:200000,token_type:"Bearer"});
       }
-      if(u.hostname==="open-upload.tiktokapis.com"&&req.method==="PUT")return new Response(null,{status:201});
+      if(u.hostname==="open-upload.tiktokapis.com"&&req.method==="PUT"){
+        // Mimic provider receipt of the entire fixed-length request body.
+        await req.arrayBuffer();
+        return new Response(null,{status:201});
+      }
       return new Response("blocked in test",{status:599});
     },
     bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",APPROVE_PIN:PIN,TIMEZONE:"Europe/Copenhagen",
@@ -72,11 +76,11 @@ async function connectTikTok(scope="user.info.basic,video.upload"){
 }
 const hex=(n:number,c:string)=>c.repeat(32).slice(0,32-String(n).length)+n;
 const photo=(n:number)=>"upload://"+hex(n,"a")+".png";
-async function ttDraft(o:{facebook?:boolean;scheduledH?:number;photos?:number;video?:boolean}={}){
+async function ttDraft(o:{facebook?:boolean;scheduledH?:number;photos?:number;video?:boolean;videoBytes?:number}={}){
   let video:string|null=null;
   if(o.video){
     video="upload://"+hex(++seq,"c")+".mp4";
-    const bytes=new Uint8Array(64);bytes.set([0,0,0,32,0x66,0x74,0x79,0x70],0);
+    const bytes=new Uint8Array(o.videoBytes??64);bytes.set([0,0,0,32,0x66,0x74,0x79,0x70],0);
     await r2.put("uploads/"+video.slice(9),bytes);
   }
   const images=o.video?[]:Array.from({length:o.photos??3},(_,i)=>photo(++seq*10+i));
@@ -200,6 +204,19 @@ test("TikTok video: the private MP4 goes to the inbox once",async()=>{
     ["POST /v2/post/publish/inbox/video/init/","PUT /video/"]);
   assert.equal((await transfer(p.id))?.status,"transfer_complete");
   assert.equal((await getPost(db,p.id))!.status,"scheduled");
+});
+
+test("42 MB Facebook video is size-rejected before approval or TikTok transfer",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft({facebook:true,video:true,videoBytes:42_262_722});
+  const result=await approve(p,{target_tiktok:"0",target_facebook:"1"});
+  assert.equal(result.status,400);
+  const html=await result.text();
+  assert.match(html,/Facebook video cannot be approved/);
+  assert.equal((await getPost(db,p.id))!.approved_at,null);
+  assert.equal(await transfer(p.id),null);
+  assert.equal(tiktokCalls().length,0);
+  assert.equal(facebookCalls().length,0);
 });
 
 test("Facebook scheduled + TikTok: TikTok now, Facebook queued, both reported, no Graph call",async()=>{
