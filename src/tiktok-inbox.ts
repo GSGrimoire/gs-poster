@@ -3,7 +3,7 @@
  */
 import type {Env} from "./env.ts";
 import {getPost,audit,tiktokMedia} from "./db.ts";
-import {privateVideoSize,privateVideoRange} from "./video.ts";
+import {privateVideoSize,openPrivateVideoRangeStream} from "./video.ts";
 import {PRIVATE_VIDEO_MAX_BYTES} from "./video-limits.ts";
 import {tiktokAccessToken,tiktokConnection} from "./tiktok.ts";
 import {ensureTikTokMediaSchema} from "./tiktok-media.ts";
@@ -255,16 +255,30 @@ export async function startTikTokInboxTransfer(
     for(let i=0;i<chunkCount;i++){
       const offset=i*chunkSize;
       const length=i===chunkCount-1?size-offset:chunkSize;
-      const bytes=await privateVideoRange(env,media,offset,length);
-      const result=await fetch(data.upload_url,{
-        method:"PUT",redirect:"manual",
-        headers:{"Content-Type":"video/mp4","Content-Length":String(length),
-          "Content-Range":"bytes "+offset+"-"+(offset+length-1)+"/"+size},
-        body:bytes,
-      });
-      const expected=i===chunkCount-1?201:206;
-      if(result.status!==expected)
-        throw new Error("TikTok did not confirm video chunk "+(i+1)+"/"+chunkCount+".");
+      // No 10 MB ArrayBuffer or Uint8Array allocation per chunk. A fixed
+      // length stream enforces the exact byte count TikTok was promised.
+      // If network acceptance is uncertain, retain the existing needs_review
+      // state and never automatically retry this claimed transfer.
+      const source=await openPrivateVideoRangeStream(env,media,offset,length);
+      const fixed=new FixedLengthStream(length);
+      const controller=new AbortController();
+      const writing=source.pipeTo(fixed.writable,{signal:controller.signal});
+      void writing.catch(()=>{});
+      try{
+        const result=await fetch(data.upload_url,{
+          method:"PUT",redirect:"manual",
+          headers:{"Content-Type":"video/mp4","Content-Length":String(length),
+            "Content-Range":"bytes "+offset+"-"+(offset+length-1)+"/"+size},
+          body:fixed.readable,
+        });
+        const expected=i===chunkCount-1?201:206;
+        if(result.status!==expected)
+          throw new Error("TikTok did not confirm video chunk "+(i+1)+"/"+chunkCount+".");
+        await writing;
+      }finally{
+        controller.abort();
+        await writing.catch(()=>{});
+      }
     }
     await env.DB.prepare(
       "UPDATE tiktok_inbox_transfers SET status='transfer_complete',updated_at=? "+

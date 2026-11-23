@@ -26,6 +26,7 @@ const outbound:{method:string;url:string}[]=[];
 let tiktokMode:"ok"|"reject"|"network"="ok";
 let seq=0;
 let remoteTikTokStatus = "PUBLISH_COMPLETE";
+let blueskyVideoBytes=0, blueskyPostWrites=0;
 let holdTikTokRenewal: (() => Promise<void>) | undefined;
 
 before(async()=>{
@@ -51,11 +52,34 @@ before(async()=>{
         return Response.json({access_token:"fake-renewed-access",refresh_token:"fake-refresh",open_id:"creator",
           scope:"user.info.basic,video.upload",expires_in:3600,refresh_expires_in:200000,token_type:"Bearer"});
       }
-      if(u.hostname==="open-upload.tiktokapis.com"&&req.method==="PUT")return new Response(null,{status:201});
+      if(u.hostname==="open-upload.tiktokapis.com"&&req.method==="PUT"){
+        // Mimic provider receipt of the entire fixed-length request body.
+        await req.arrayBuffer();
+        const range=req.headers.get("content-range")?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+        const isLast=!range||Number(range[2])+1===Number(range[3]);
+        return new Response(null,{status:isLast?201:206});
+      }
+      if(u.hostname==="bsky.social"&&u.pathname.endsWith("/com.atproto.server.createSession"))
+        return Response.json({did:"did:plc:gs-poster-test",accessJwt:"test-access"});
+      if(u.hostname==="bsky.social"&&u.pathname.endsWith("/com.atproto.repo.uploadBlob")){
+        const reader=req.body?.getReader();
+        if(!reader)throw Error("Bluesky video request body missing");
+        let bytes=0;
+        try{while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;}}
+        finally{reader.releaseLock();}
+        blueskyVideoBytes+=bytes;
+        return Response.json({blob:{$type:"blob",ref:{$link:"test-bluesky-blob"},mimeType:"video/mp4",size:bytes}});
+      }
+      if(u.hostname==="bsky.social"&&u.pathname.endsWith("/com.atproto.repo.createRecord")){
+        const record=await req.json() as {rkey:string};
+        blueskyPostWrites++;
+        return Response.json({uri:"at://did:plc:gs-poster-test/app.bsky.feed.post/"+record.rkey,cid:"test-cid-"+record.rkey});
+      }
       return new Response("blocked in test",{status:599});
     },
     bindings:{COOKIE_SECRET:SECRET,ALLOWED_GITHUB_LOGINS:"gsgrimoire",APPROVE_PIN:PIN,TIMEZONE:"Europe/Copenhagen",
-      TIKTOK_CLIENT_KEY:"sandbox-key",TIKTOK_CLIENT_SECRET:"sandbox-secret",TIKTOK_TOKEN_ENCRYPTION_KEY:TT_KEY}}));
+      TIKTOK_CLIENT_KEY:"sandbox-key",TIKTOK_CLIENT_SECRET:"sandbox-secret",TIKTOK_TOKEN_ENCRYPTION_KEY:TT_KEY,
+      BSKY_HANDLE:"test.bsky.social",BSKY_APP_PASSWORD:"test-only-app-password"}}));
   db=await mf.getD1Database("DB") as unknown as D1Database;
   r2=await mf.getR2Bucket("UPLOADS") as unknown as R2Bucket;
   await ensureSchema(db);await ensureFacebookQueue(db);await ensureTikTokSchema(db);await ensureTikTokInboxSchema(db);
@@ -72,17 +96,19 @@ async function connectTikTok(scope="user.info.basic,video.upload"){
 }
 const hex=(n:number,c:string)=>c.repeat(32).slice(0,32-String(n).length)+n;
 const photo=(n:number)=>"upload://"+hex(n,"a")+".png";
-async function ttDraft(o:{facebook?:boolean;scheduledH?:number;photos?:number;video?:boolean}={}){
+async function ttDraft(o:{facebook?:boolean;scheduledH?:number;photos?:number;video?:boolean;videoBytes?:number;bluesky?:boolean}={}){
   let video:string|null=null;
   if(o.video){
     video="upload://"+hex(++seq,"c")+".mp4";
-    const bytes=new Uint8Array(64);bytes.set([0,0,0,32,0x66,0x74,0x79,0x70],0);
+    const bytes=new Uint8Array(o.videoBytes??64);bytes.set([0,0,0,32,0x66,0x74,0x79,0x70],0);
     await r2.put("uploads/"+video.slice(9),bytes);
   }
   const images=o.video?[]:Array.from({length:o.photos??3},(_,i)=>photo(++seq*10+i));
   return createPost(db,{message:MSG,label:"Internal GS Poster title",tiktok_title:o.video?null:"Public goblin gallery",release:"NPC",images,video,created_by:"test",
     scheduled_at:o.scheduledH?new Date(Date.now()+o.scheduledH*3600e3).toISOString():null,
-    facebook_enabled:o.facebook??false,tiktok_enabled:true,bluesky:null} as any);
+    facebook_enabled:o.facebook??false,tiktok_enabled:true,
+    bluesky:o.bluesky?{caption:"Hold the line. Free song release.",images:[],
+      video:video?{url:video,alt:"Armored warrior on a burning battlefield"}:null,patreon:null}:null} as any);
 }
 async function send(path:string,fields:Record<string,string>,o:{login?:string|null;origin?:string;csrf?:string}={}){
   const headers:Record<string,string>={Origin:o.origin??ORIGIN,"Sec-Fetch-Site":o.origin&&o.origin!==ORIGIN?"cross-site":"same-origin",
@@ -105,7 +131,7 @@ const transfer=(id:string)=>db.prepare("SELECT status,publish_id,media_type FROM
   .first<{status:string;publish_id:string|null;media_type:string}>();
 const tiktokCalls=()=>outbound.filter(r=>r.url.includes("tiktokapis.com"));
 const facebookCalls=()=>outbound.filter(r=>r.url.includes("facebook.com"));
-const reset=async()=>{outbound.length=0;tiktokMode="ok";remoteTikTokStatus="PUBLISH_COMPLETE";holdTikTokRenewal=undefined;await db.prepare("DELETE FROM pin_failures").run();};
+const reset=async()=>{outbound.length=0;tiktokMode="ok";remoteTikTokStatus="PUBLISH_COMPLETE";holdTikTokRenewal=undefined;blueskyVideoBytes=0;blueskyPostWrites=0;await db.prepare("DELETE FROM pin_failures").run();};
 
 test("the editor's release form carries TikTok inline, with the send-now warning, and no options link",async()=>{
   await reset();await connectTikTok();
@@ -200,6 +226,40 @@ test("TikTok video: the private MP4 goes to the inbox once",async()=>{
     ["POST /v2/post/publish/inbox/video/init/","PUT /video/"]);
   assert.equal((await transfer(p.id))?.status,"transfer_complete");
   assert.equal((await getPost(db,p.id))!.status,"scheduled");
+});
+
+test("42 MB Facebook video is size-rejected before approval or TikTok transfer",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft({facebook:true,video:true,videoBytes:42_262_722});
+  const result=await approve(p,{target_tiktok:"0",target_facebook:"1"});
+  assert.equal(result.status,400);
+  const html=await result.text();
+  assert.match(html,/Facebook video cannot be approved/);
+  assert.equal((await getPost(db,p.id))!.approved_at,null);
+  assert.equal(await transfer(p.id),null);
+  assert.equal(tiktokCalls().length,0);
+  assert.equal(facebookCalls().length,0);
+});
+
+test("42 MB TikTok and Bluesky video remains single-release and reaches both providers",async()=>{
+  await reset();await connectTikTok();
+  const p=await ttDraft({video:true,videoBytes:42_262_722,bluesky:true});
+  const response=await approve(p,{target_bluesky:"1"});
+  const html=await response.text();
+  assert.equal(response.status,200,html.slice(0,800));
+  assert.equal(blueskyVideoBytes,42_262_722);
+  assert.equal(blueskyPostWrites,1);
+  assert.equal(tiktokCalls().filter(x=>x.url.includes("/inbox/video/init/")).length,1);
+  assert.equal(tiktokCalls().filter(x=>x.url.includes("open-upload.tiktokapis.com")).length,4);
+  assert.equal((await transfer(p.id))?.status,"transfer_complete");
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.status,"published");
+  assert.equal(saved.bluesky?.status,"published");
+  assert.ok(saved.approved_at);
+  outbound.length=0;
+  const repeated=await approve(p,{target_bluesky:"1"});
+  assert.equal(repeated.status,409);
+  assert.equal(outbound.length,0,"a second click must not send the 42 MB video again");
 });
 
 test("Facebook scheduled + TikTok: TikTok now, Facebook queued, both reported, no Graph call",async()=>{

@@ -12,11 +12,17 @@ import type {Session} from "../src/session.ts";
 
 let worker:Miniflare;
 let env:Env;
+const previousFixedLengthStream=globalThis.FixedLengthStream;
 const session={login:"GSGrimoire",raw:"signed-test-session"} as Session;
 const token={access_token:"first-secret-access",refresh_token:"first-secret-refresh",
   open_id:"tt-account-1",scope:"user.info.basic,video.upload",
   expires_in:3600,refresh_expires_in:2000000,token_type:"Bearer"};
 before(async()=>{
+  // Node has no native FixedLengthStream. A separate bundled workerd test
+  // exercises the native constructor and exact outgoing bytes.
+  globalThis.FixedLengthStream=class extends TransformStream<Uint8Array,Uint8Array>{
+    constructor(_size:number){super();}
+  } as typeof FixedLengthStream;
   worker=new Miniflare(convertV4MiniflareOptions({
     modules:true,cf:false,script:"export default {fetch(){return new Response('test')}}",
     compatibilityDate:"2026-09-01",d1Databases:["DB"]
@@ -28,7 +34,23 @@ before(async()=>{
     TIMEZONE:"Europe/Copenhagen"
   } as Env;
 });
-after(async()=>await worker.dispose());
+after(async()=>{
+  globalThis.FixedLengthStream=previousFixedLengthStream;
+  await worker.dispose();
+});
+async function streamBytes(body:BodyInit|null|undefined):Promise<number>{
+  assert.ok(body instanceof ReadableStream,"TikTok upload must stream its bytes");
+  const reader=body.getReader();
+  let length=0;
+  try{
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      length+=value.byteLength;
+    }
+  }finally{reader.releaseLock();}
+  return length;
+}
 
 test("TikTok Login Kit optionally requests both video.upload and video.publish",()=>{
   assert.deepEqual([...TIKTOK_SCOPES],["user.info.basic","video.upload","video.publish"]);
@@ -92,7 +114,10 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
       assert.equal(key,"uploads/"+"a".repeat(32)+".mp4");
       const range=options?.range;
       const bytes=range?fakeBytes.slice(range.offset,range.offset+range.length):fakeBytes;
-      return {arrayBuffer:async()=>bytes.buffer};
+      return {
+        body:new Blob([bytes]).stream(),
+        arrayBuffer:async()=>{throw Error("Buffered private MP4 read must not occur");},
+      };
     }
   } as unknown as R2Bucket;
   const p=await createPost(env.DB,{
@@ -122,6 +147,7 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
       const headers=options?.headers as Record<string,string>;
       assert.equal(headers["Content-Range"],"bytes 0-"+(fakeBytes.length-1)+"/"+fakeBytes.length);
       assert.equal(headers["Content-Length"],String(fakeBytes.length));
+      assert.equal(await streamBytes(options?.body),fakeBytes.length);
       return new Response(null,{status:201});
     }
     if(url.endsWith("/status/fetch/"))
@@ -144,15 +170,19 @@ test("inbox upload is single-chunk private transfer with audit-safe idempotence"
 test("TikTok video uploads obey chunk boundaries and block retries after unclear receipt",async()=>{
   const previous=globalThis.fetch;
   try{
-    for(const {size,interrupt} of [{size:20_000_001,interrupt:false},{size:300_000_000,interrupt:false},
-      {size:20_000_001,interrupt:true}]){
+    for(const {size,interrupt} of [{size:20_000_001,interrupt:false},{size:42_262_722,interrupt:false},
+      {size:300_000_000,interrupt:false},{size:20_000_001,interrupt:true}]){
       const ref="upload://"+"e".repeat(32)+".mp4";
       const reads:{offset:number;length:number}[]=[];
-      const buffers=new Map<number,ArrayBuffer>();
+      const buffers=new Map<number,Uint8Array>();
       env.UPLOADS={head:async()=>({size}),get:async(_key:string,{range}:{range:{offset:number;length:number}})=>{
         reads.push(range);
-        if(!buffers.has(range.length))buffers.set(range.length,new ArrayBuffer(range.length));
-        return {arrayBuffer:async()=>buffers.get(range.length)};
+        if(!buffers.has(range.length))buffers.set(range.length,new Uint8Array(range.length));
+        const bytes=buffers.get(range.length)!;
+        return {
+          body:new ReadableStream<Uint8Array>({start(controller){controller.enqueue(bytes);controller.close();}}),
+          arrayBuffer:async()=>{throw Error("Buffered video chunk access forbidden");},
+        };
       }} as unknown as R2Bucket;
       const p=await createPost(env.DB,{message:"Chunk example",images:[],video:null,tiktok_images:[],
         tiktok_video:ref,tiktok_enabled:true,facebook_enabled:false,scheduled_at:null,created_by:"test"});
@@ -176,6 +206,7 @@ test("TikTok video uploads obey chunk boundaries and block retries after unclear
         assert.equal(headers.get("Content-Length"),String(length));
         assert.equal(headers.get("Content-Range"),"bytes "+offset+"-"+(offset+length-1)+"/"+size);
         if(interrupt)throw Error("connection closed before confirmation");
+        assert.equal(await streamBytes(options?.body),length,"R2 range must stream exactly the declared bytes");
         return new Response(null,{status:sentCount===numberOfParts?201:206});
       };
       const transfer=()=>startTikTokInboxTransfer(env,p.id,p.updated_at,"GSGrimoire");
