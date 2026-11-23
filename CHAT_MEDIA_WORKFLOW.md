@@ -26,6 +26,10 @@ A failed or ambiguous upload must not be assumed complete. Check the status firs
 
 ### B. Browser handoff when the chat client cannot read the attachment bytes
 
+**Prefer the existing draft editor if a draft already exists.** Open its GS Poster review page and use **Add video** or **Add photos**. Choose the actual file from the browser, select destinations, then **Upload and attach**. This keeps the transfer and draft attachment in one signed-in page, so there is no need to create separate expiring chat upload links, copy private references, or return to the chat for a second action. The draft remains unapproved. If the media is over the platform's delivery limit, use a compliant smaller social teaser and reserve the full music video for YouTube Studio.
+
+The separate one-time upload pages below are for assistants that need to transfer files before any draft exists, or when the signed-in draft editor is not available. Do not default to them for an existing draft.
+
 This works in Claude's web chat, ChatGPT, and on mobile without depending on model file tooling:
 
 1. Ask your assistant to call `request_upload` for the file.
