@@ -5,6 +5,22 @@
  * makes network requests, creates a job, or authorizes publication. The
  * future YouTube adapter must remain behind the existing owner/PIN approval
  * boundary and independently checkpoint every external side effect.
+ *
+ * Owner decisions, Gus, 16 November 2026 (full text in
+ * docs/YOUTUBE_FREE_SONG_SUNDAY_PIPELINE.md, "Owner decisions"):
+ *  D1 GS Poster is the release tool, not a production studio. Finished media
+ *     is made elsewhere (Claude, ChatGPT, GS Reels) and pushed here.
+ *     GS Poster owns the YouTube upload; there is no second uploader.
+ *  D2 YouTube is released by PIN approval like every other platform. The
+ *     owner chooses public, unlisted or private; public is the default.
+ *  D3 GS Poster handles the playlist itself and may hold the wide `youtube`
+ *     OAuth scope that this needs.
+ *
+ * How D2 is carried out safely: the video is always INSERTED as private
+ * (buildPrivateYouTubeMusicVideoMetadata), and only after YouTube has
+ * processed it does a separate, checkpointed `videos.update` apply the
+ * approved visibility (buildYouTubeReleaseUpdate). A lost or unclear insert
+ * response can then only ever leave a private video behind.
  */
 
 import { checkMessage } from "./validate.ts";
@@ -12,6 +28,27 @@ import { checkMessage } from "./validate.ts";
 export const YOUTUBE_TITLE_MAX_CHARACTERS = 100;
 export const YOUTUBE_DESCRIPTION_MAX_BYTES = 5_000;
 export const YOUTUBE_TAGS_MAX_CHARACTERS = 500;
+/**
+ * The `part` value a future adapter must send with `videos.insert`.
+ * Since YouTube's 2 November 2026 revision an insert that omits
+ * `status.privacyStatus` defaults to PUBLIC, so the `status` part is not
+ * optional: dropping it would publish the video.
+ */
+export const YOUTUBE_INSERT_PARTS = "snippet,status";
+
+/** D2: the three choices YouTube requires an upload client to offer. */
+export const YOUTUBE_VISIBILITIES = ["public", "unlisted", "private"] as const;
+export type YouTubeVisibility = typeof YOUTUBE_VISIBILITIES[number];
+/** D2: what the editor preselects. The saved draft must still state it. */
+export const YOUTUBE_DEFAULT_VISIBILITY: YouTubeVisibility = "public";
+
+/**
+ * D3: the one OAuth scope the adapter requests. `youtube.upload` alone can
+ * upload but cannot add to a playlist; `youtube` covers both, and also lets
+ * the holder edit and delete the channel's videos. Store its refresh token
+ * only as a Worker secret, never in D1, logs or any tool response.
+ */
+export const YOUTUBE_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube";
 
 export interface YouTubeMusicVideoDraft {
   /** Reviewed, audience-facing title, not an internal release label. */
@@ -23,12 +60,21 @@ export interface YouTubeMusicVideoDraft {
   /** Optional target playlist. This is not automatically added by this module. */
   playlistId?: string | null;
   tags?: string[];
+  /**
+   * D2: the visibility the owner approves with the PIN. Explicit on every
+   * saved draft; the editor preselects YOUTUBE_DEFAULT_VISIBILITY.
+   */
+  visibility: YouTubeVisibility;
   /** Deliberate audience declaration by the owner; never inferred. */
   madeForKids: boolean | null;
   /** Owner confirms they have rights to upload the audio and imagery. */
   rightsConfirmed: boolean;
-  /** Explicit owner declaration when YouTube requires synthetic-media disclosure. */
-  containsSyntheticMedia?: boolean | null;
+  /**
+   * Explicit owner answer to YouTube's altered or synthetic content question.
+   * YouTube lists synthetically generated music among the content that needs
+   * disclosure, so this is never inferred and never left unanswered.
+   */
+  containsSyntheticMedia: boolean | null;
 }
 
 export interface YouTubeMetadataCheck {
@@ -46,7 +92,17 @@ export interface YouTubePrivateInsertBody {
   status: {
     privacyStatus: "private";
     selfDeclaredMadeForKids: boolean;
-    containsSyntheticMedia?: boolean;
+    containsSyntheticMedia: boolean;
+  };
+}
+
+/** Body of the later `videos.update` (part=status) that applies the approved visibility. */
+export interface YouTubeReleaseUpdateBody {
+  id: string;
+  status: {
+    privacyStatus: "public" | "unlisted";
+    selfDeclaredMadeForKids: boolean;
+    containsSyntheticMedia: boolean;
   };
 }
 
@@ -55,11 +111,14 @@ const videoIdPattern = /^[a-zA-Z0-9_-]{11}$/;
 const forbiddenYouTubeText = /[<>]/;
 const unsafeControl = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 /** Bidirectional overrides/isolates can make a displayed link differ from the real one. */
-const bidiControl = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const bidiControl = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+/** Tabs and every kind of line break: never valid in a title or a tag. */
+const lineOrTab = /[\t\n\u000b\u000c\r\u0085\u2028\u2029]/;
 /** Unpaired UTF-16 surrogates are not valid Unicode text. */
 const loneSurrogate = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 /** Invisible characters are allowed but worth a human look. */
 const invisible = /[\u00ad\u200b-\u200d\u2060\ufeff]/;
+const invisibleAll = /[\u00ad\u200b-\u200d\u2060\ufeff]/g;
 const linkPattern = /https?:\/\/[^\s<>]+/gi;
 /** Sentence punctuation that commonly follows a link and is not part of it. */
 const trailingPunctuation = /[.,;:!?)\]}'"]+$/;
@@ -82,7 +141,11 @@ export function validFreePatreonPostUrl(value: string): boolean {
     // Require the canonical serialized form, so whitespace, tabs, newlines,
     // case variants or default ports that the URL parser silently drops
     // cannot make the reviewed string differ from the parsed destination.
-    return url.href === value &&
+    // The link must also survive the description link extraction unchanged,
+    // so a slug ending in sentence punctuation cannot be accepted here and
+    // then never be found in the description.
+    const extracted = descriptionLinks(value);
+    return url.href === value && extracted.length === 1 && extracted[0] === value &&
       url.protocol === "https:" &&
       (url.hostname === "patreon.com" || url.hostname === "www.patreon.com") &&
       !url.username && !url.password && !url.port && !url.search && !url.hash &&
@@ -115,13 +178,17 @@ export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): Y
   const title = draft.title.trim();
   const description = draft.description.trim();
 
-  if (!title) errors.push("YouTube title is required.");
+  if (!title.replace(invisibleAll, "").trim()) errors.push("YouTube title is required.");
   if (Array.from(title).length > YOUTUBE_TITLE_MAX_CHARACTERS)
     errors.push(`YouTube title exceeds ${YOUTUBE_TITLE_MAX_CHARACTERS} characters.`);
-  if (/[\t\r\n]/.test(title) || unsupportedText(title))
+  else if (title.length > YOUTUBE_TITLE_MAX_CHARACTERS)
+    warnings.push(`YouTube title is over ${YOUTUBE_TITLE_MAX_CHARACTERS} when emoji count double; YouTube may reject it.`);
+  // Test the raw title: trimming first would silently drop a leading or
+  // trailing tab or line break instead of rejecting it.
+  if (lineOrTab.test(draft.title) || unsupportedText(title))
     errors.push("YouTube title contains unsupported characters.");
 
-  if (!description) errors.push("YouTube description is required.");
+  if (!description.replace(invisibleAll, "").trim()) errors.push("YouTube description is required.");
   if (encoder.encode(description).byteLength > YOUTUBE_DESCRIPTION_MAX_BYTES)
     errors.push(`YouTube description exceeds ${YOUTUBE_DESCRIPTION_MAX_BYTES} UTF-8 bytes.`);
   if (unsupportedText(description))
@@ -144,19 +211,21 @@ export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): Y
 
   if (draft.playlistId != null && !/^[a-zA-Z0-9_-]{1,150}$/.test(draft.playlistId))
     errors.push("YouTube playlist identifier is invalid.");
+  if (!(YOUTUBE_VISIBILITIES as readonly unknown[]).includes(draft.visibility))
+    errors.push("Choose YouTube visibility explicitly: public, unlisted or private.");
   if (draft.madeForKids !== true && draft.madeForKids !== false)
     errors.push("YouTube audience selection must be explicit.");
   if (draft.rightsConfirmed !== true)
     errors.push("Confirm rights to upload the song and artwork before preparing an upload.");
-  if (draft.containsSyntheticMedia != null && typeof draft.containsSyntheticMedia !== "boolean")
-    errors.push("Synthetic-media disclosure must be explicitly true or false when provided.");
+  if (draft.containsSyntheticMedia !== true && draft.containsSyntheticMedia !== false)
+    errors.push("Answer YouTube's altered or synthetic content question explicitly (true or false).");
 
   const houseRules = checkMessage(`${title}\n${description}`, { hasImages: true });
   errors.push(...houseRules.errors);
   warnings.push(...houseRules.warnings);
 
   const tags = draft.tags ?? [];
-  if (tags.some((tag) => !tag.trim() || tag !== tag.trim() || /[,"\t\r\n]/.test(tag) || unsupportedText(tag)))
+  if (tags.some((tag) => !tag.trim() || tag !== tag.trim() || /[,"]/.test(tag) || lineOrTab.test(tag) || unsupportedText(tag)))
     errors.push("YouTube tags must be nonempty, trimmed, and contain no commas, quotes or unsupported characters.");
   if (tags.length) {
     // Tags are public metadata too: the house rules (no tool names, prices,
@@ -167,15 +236,14 @@ export function validateYouTubeMusicVideoDraft(draft: YouTubeMusicVideoDraft): Y
   if (youtubeTagCharacters(tags) > YOUTUBE_TAGS_MAX_CHARACTERS)
     errors.push(`YouTube tags exceed ${YOUTUBE_TAGS_MAX_CHARACTERS} characters.`);
   if (tags.some((tag) => tag.length > 100)) warnings.push("Very long tags are unlikely to help discovery.");
-  if (draft.containsSyntheticMedia == null)
-    warnings.push("Review whether YouTube requires a synthetic-media disclosure for this video.");
   return { errors, warnings };
 }
 
 /**
- * Build the *private-only* outbound metadata for a later approved upload.
- * The future adapter must gate this behind owner approval and must not turn
- * private into public, unlisted, or scheduled without an explicit review.
+ * Build the outbound `videos.insert` metadata. It is ALWAYS private, whatever
+ * visibility was approved: the approved visibility is applied afterwards by
+ * buildYouTubeReleaseUpdate, once the video ID is stored and processing has
+ * succeeded. The adapter must gate both calls behind the PIN approval.
  */
 export function buildPrivateYouTubeMusicVideoMetadata(draft: YouTubeMusicVideoDraft): YouTubePrivateInsertBody {
   const check = validateYouTubeMusicVideoDraft(draft);
@@ -186,10 +254,33 @@ export function buildPrivateYouTubeMusicVideoMetadata(draft: YouTubeMusicVideoDr
   if (draft.tags?.length) snippet.tags = [...draft.tags];
   const status: YouTubePrivateInsertBody["status"] = {
     privacyStatus: "private", selfDeclaredMadeForKids: draft.madeForKids as boolean,
+    containsSyntheticMedia: draft.containsSyntheticMedia as boolean,
   };
-  if (typeof draft.containsSyntheticMedia === "boolean")
-    status.containsSyntheticMedia = draft.containsSyntheticMedia;
   return { snippet, status };
+}
+
+/**
+ * Build the `videos.update` body (send with part=status) that applies the
+ * PIN-approved visibility to an already uploaded, processed video. Returns
+ * null when the approved visibility is private: nothing more to send.
+ *
+ * The whole status block is repeated on purpose: `videos.update` replaces the
+ * part it is given, so leaving the audience or synthetic-content answer out
+ * could reset it.
+ */
+export function buildYouTubeReleaseUpdate(draft: YouTubeMusicVideoDraft, videoId: string): YouTubeReleaseUpdateBody | null {
+  const check = validateYouTubeMusicVideoDraft(draft);
+  if (check.errors.length) throw new Error(check.errors.join(" "));
+  if (!videoIdPattern.test(videoId)) throw new Error("Invalid YouTube video identifier.");
+  if (draft.visibility === "private") return null;
+  return {
+    id: videoId,
+    status: {
+      privacyStatus: draft.visibility,
+      selfDeclaredMadeForKids: draft.madeForKids as boolean,
+      containsSyntheticMedia: draft.containsSyntheticMedia as boolean,
+    },
+  };
 }
 
 /** Build a canonical owner-facing URL only from a validated YouTube video ID. */
