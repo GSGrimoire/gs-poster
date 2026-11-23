@@ -11,7 +11,9 @@
 
 The user created a full music video, a YouTube thumbnail and a 20-second social teaser in ChatGPT. The GS Poster tool `import_chatgpt_files` was called twice for original ChatGPT attachments, but each returned `imported_count: 0` and `stopped_reason: Attachment could not be imported or verified. Use secure browser fallback.` No verified `upload://` reference resulted.
 
-Two **unapproved, text-only** GS Poster Facebook + Bluesky drafts for release `Across the Barricade` were saved: `p_mwtqgu5c0316366d98` and `p_mwtqgvcudcbeb16b09`. They were not published. Next, temporary upload pages were requested for the cover, thumbnail and teaser. This unnecessarily multiplied browser steps; the existing signed-in draft page already has `Add video` and `Add photos` components that upload and attach directly.
+At initial creation, two **unapproved, text-only** GS Poster Facebook + Bluesky drafts for release `Across the Barricade` were saved: `p_mwtqgu5c0316366d98` and `p_mwtqgvcudcbeb16b09`. Next, temporary upload pages were requested for the cover, thumbnail and teaser. This unnecessarily multiplied browser steps; the existing signed-in draft page already has `Add video` and `Add photos` components that upload and attach directly.
+
+**Later live readback in this session:** The announcement is now **published** to Facebook and Bluesky without media. The engagement post remains an **unapproved draft**; it has an owner-ready private MP4 of **42,262,722 bytes** attached for TikTok and Bluesky, while Facebook is currently disabled. This state change was outside this source branch and must not be reversed or duplicated. The connector independently reported `stored` and `ready: true` for that video, but no original-file hash comparison was performed.
 
 **Important limitation:** This evidence establishes an end-to-end failure for the native chat adapter in that session. It does not identify whether the cause was ChatGPT host file-parameter injection, a downloadable-origin restriction, expiry, media validation or a network failure. Do not weaken the importer allowlist or accept arbitrary URLs to make it pass.
 
@@ -35,7 +37,7 @@ Two **unapproved, text-only** GS Poster Facebook + Bluesky drafts for release `A
 2. **Issue #33** and **pull request #96**, guided editor and platform galleries: preserve one visible per-platform media assignment, independent galleries and useful readiness messages; test mobile.
 3. **Pull request #94**, 300 MB private video multipart transport: independent Full review, real Cloudflare Worker streaming and provider acceptance, no auto-merge.
 4. **Pull requests #91 and #92**, Free Song Sunday and YouTube: resolve pending metadata/plan review first. Do not claim this UX shortcut implements YouTube publishing.
-5. For this actual release, owner may open the saved GS Poster drafts and upload the existing social teaser with Add video. A social video may be attached to Facebook only within Facebook's present 20 MB limit. The 36 MB YouTube video belongs in YouTube Studio, not the Facebook video path.
+5. For this actual release, **do not reupload** the engagement draft's already stored 42 MB video. Its current targets are Bluesky and TikTok; Facebook is off. If Facebook video is desired separately, a smaller social teaser under Facebook's present 20 MB limit is required, with explicit owner review. The published announcement is not an editable draft. The full music video and thumbnail still require a separate YouTube workflow.
 
 ## Required next step
 
