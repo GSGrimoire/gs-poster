@@ -641,9 +641,10 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     const timeProblem = timeCheck.ok ? null : timeCheck.error + (timeCheck.suggestion
       ? ` Earliest valid now: ${formatLocal(timeCheck.suggestion, env.TIMEZONE)}, or tick the automatic move when you approve.` : "");
     const releaseProblems = [
-      ...(p.facebook_enabled && !p.message.trim() && !p.images.length && !p.video ? ["Facebook needs a caption or a photo."] : []),
-      ...(bs ? checkBluesky(bs).map((x) => "Bluesky: " + x) : []),
-      ...(timeProblem ? [timeProblem] : []),
+      ...(p.facebook_enabled && !p.message.trim() && !p.images.length && !p.video
+        ? [{ platform: "facebook" as const, message: "Facebook needs a caption or a photo." }] : []),
+      ...(bs ? checkBluesky(bs).map((x) => ({ platform: "bluesky" as const, message: "Bluesky: " + x })) : []),
+      ...(timeProblem ? [{ message: timeProblem }] : []),
     ];
     const editor = renderDraftEditor({
       post: p, csrf, tz: env.TIMEZONE, whenText: whenText(env, p, tiktokState), error: state.error, notice: state.notice,

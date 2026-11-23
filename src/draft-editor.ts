@@ -100,30 +100,15 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
   // A newly enabled/legacy TikTok target gets its own copy of Facebook media.
   // Refuse an explicit copy if the same save removes the Facebook source.
   const copyFacebook = form.get("tt_copy_fb") === "1";
+  const initializeTikTok = tiktok && !cur.tiktok_enabled && tiktokImages === null && !copyFacebook;
   if (tiktok && copyFacebook && cur.video && !video)
     errors.push("Cannot copy the Facebook video while also removing it.");
-  if (tiktok && copyFacebook) {
+  if (tiktok && (copyFacebook || (cur.tiktok_enabled && tiktokImages === null))) {
     tiktokImages = [...images];
     tiktokVideo = video;
-  } else if (tiktok && cur.tiktok_images === null) {
-    // Preserve the legacy Facebook fallback for already enabled drafts.
-    // On first activation, allow another platform to supply the source when
-    // Facebook has no gallery. No private bytes are copied or published.
-    const firstActivation = !cur.tiktok_enabled;
-    const sourcePhotos = firstActivation && !images.length ? postPhotos(cur) : images;
-    tiktokImages = firstActivation ? sourcePhotos.slice(0, 35) : [...sourcePhotos];
-    tiktokVideo = sourcePhotos.length ? null
-      : (video ?? (firstActivation ? postVideos(cur)[0] ?? null : null));
   }
-  const ttCaptionRaw = text(form, "tiktok_caption", cur.tiktok_caption ?? "").trim();
-  const tiktokCaption = ttCaptionRaw || null;
-  const tiktokTitle = text(form, "tiktok_title", cur.tiktok_title ?? "").trim();
-  if (tiktokTitle.length > 90) errors.push("TikTok photo title cannot exceed 90 characters.");
-  const ttIsVideo = tiktokImages === null ? !!video : !!tiktokVideo;
-  const ttLimit = captionLimit("tiktok", { photos: 1, video: ttIsVideo });
-  if (tiktok && (tiktokCaption ?? message).length > ttLimit)
-    errors.push(`The TikTok caption is too long; TikTok allows ${ttLimit} characters for this format.`);
 
+  const addRaw=String(form.get("bs_add_photos")??"");
   let bluesky: BlueskyDraft | null = null;
   if (blueskyOn || savedBluesky) {
     const base = savedBluesky ?? { caption: "", images: [], video: null, patreon: null };
@@ -142,12 +127,6 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     if(copyFbVideo && cur.video)bsImages=[];
     // Only copy images already attached to this post. Indices are resolved
     // server-side against the saved media pool, never trusted as new URLs.
-    const addRaw=String(form.get("bs_add_photos")??"");
-    // On first activation, reuse the existing post media without copying bytes.
-    // Empty alt text is deliberately left for owner review before approval.
-    // A previously configured empty Bluesky gallery is never overwritten.
-    if (blueskyOn && !savedBluesky && !addRaw && !bsVideo && !bsImages.length)
-      bsImages = postPhotos(cur).slice(0, 4).map(url => ({ url, alt: "" }));
     if(addRaw){
       const pool=postPhotos(cur);
       // Bound the field before allocating or parsing an untrusted list.
@@ -192,15 +171,10 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
     if (!items) errors.push("Could not read the Instagram photo settings. Reload the page and try again.");
     else {
       const videoSource=text(form,"ig_video_source",base.video??"").trim();
-      // First activation inherits up to ten existing photos, preserving their
-      // full content by padding. Previously saved selections stay independent.
-      const initialItems = instagramOn && !savedInstagram && !videoSource && items.length === 0
-        ? postPhotos(cur).slice(0, INSTAGRAM_MAX_ITEMS).map(url => defaultItem(url, "pad"))
-        : items;
       instagram = {
         caption: text(form,"ig_caption",base.caption),
         frame: text(form,"ig_frame",base.frame) as InstagramFrame,
-        items: initialItems,
+        items,
         ...(videoSource?{video:videoSource}:{}),
       };
       // The form is still saved while Instagram is paused. Validate its
@@ -215,13 +189,45 @@ export function parseEditorForm(form: FormData, cur: Post, tz: string): EditorPa
         ...otherVideoSources,
         ...(base.video ? [base.video] : []),
       ]);
+      const allowedPhotos = new Set(postPhotos(cur));
       if (instagramOn) {
-        errors.push(...instagramSaveErrors(instagram, new Set(postPhotos(cur)), allowedVideos));
-      } else if (videoSource && !allowedVideos.has(videoSource)) {
-        errors.push("The Instagram video must already belong to this post.");
+        errors.push(...instagramSaveErrors(instagram, allowedPhotos, allowedVideos));
+      } else {
+        if (videoSource && !allowedVideos.has(videoSource))
+          errors.push("The Instagram video must already belong to this post.");
+        if (items.some(item => !allowedPhotos.has(item.url)))
+          errors.push("An Instagram photo is not one of this post's photos.");
       }
     }
   }
+
+  // Inherit only from galleries that retain these references after this save.
+  // New destinations do not seed one another. Saved empty galleries stay empty.
+  const retainedPhotos = [...new Set([
+    ...images,
+    ...(tiktokImages ?? []),
+    ...(savedBluesky && bluesky ? bluesky.images.map(item => item.url) : []),
+    ...(savedInstagram && instagram ? instagram.items.map(item => item.url) : []),
+  ])];
+  if (initializeTikTok) {
+    tiktokImages = (images.length ? images : retainedPhotos).slice(0, PLATFORMS.tiktok.maxPhotos);
+    tiktokVideo = tiktokImages.length ? null : video
+      ?? (savedBluesky ? bluesky?.video?.url : null)
+      ?? (savedInstagram ? instagram?.video : null)
+      ?? null;
+  }
+  if (blueskyOn && bluesky && !savedBluesky && !addRaw && !bluesky.video)
+    bluesky.images = retainedPhotos.slice(0, PLATFORMS.bluesky.maxPhotos).map(url => ({ url, alt: "" }));
+  if (instagramOn && instagram && !savedInstagram && !instagram.video && !instagram.items.length)
+    instagram.items = retainedPhotos.slice(0, INSTAGRAM_MAX_ITEMS).map(url => defaultItem(url, "pad"));
+
+  const tiktokCaption = text(form, "tiktok_caption", cur.tiktok_caption ?? "").trim() || null;
+  const tiktokTitle = text(form, "tiktok_title", cur.tiktok_title ?? "").trim();
+  if (tiktokTitle.length > 90) errors.push("TikTok photo title cannot exceed 90 characters.");
+  const ttIsVideo = tiktokImages === null ? !!video : !!tiktokVideo;
+  const ttLimit = captionLimit("tiktok", { photos: 1, video: ttIsVideo });
+  if (tiktok && (tiktokCaption ?? message).length > ttLimit)
+    errors.push("The TikTok caption is too long; TikTok allows " + ttLimit + " characters for this format.");
 
   let scheduledAt: string | null = cur.scheduled_at;
   const whenRaw = form.get("when");
@@ -256,7 +262,7 @@ export interface EditorView {
   error?: string;
   notice?: string;
   checksHtml: string;
-  releaseProblems: string[];
+  releaseProblems: { message: string; platform?: "facebook" | "bluesky" }[];
   mediaPanel: string;
   tiktokCard: string;
   xCard?: string;
@@ -335,10 +341,7 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
     const excerpt = caption.trim().slice(0, 92);
     const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered
       ? view.tiktokPlan.reason
-      : id === "facebook" || id === "bluesky"
-        ? view.releaseProblems.find(message => message.startsWith("Bluesky:") ? id === "bluesky"
-          : message.startsWith("Facebook") ? id === "facebook" : true) ?? ""
-        : "";
+      : view.releaseProblems.find(problem => problem.platform === id)?.message ?? "";
     const issue = checks.errors[0] || releaseIssue;
     const extra = id === "instagram" && enabled && !view.instagramPlan?.ok
       ? "Manual download until Instagram is connected and its publishing requirements are met."
@@ -457,7 +460,7 @@ export function renderDraftEditor(v: EditorView): string {
       <h3>${!fbBs && !igOk ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
       ${releaseTargets}
       ${p.facebook_enabled && p.video ? '<p class="hint">Facebook video limit: 20 MB. Private video uploads allow up to 50 MB for other platforms. A larger video cannot be approved for Facebook until you replace it or deselect Facebook.</p>' : ''}
-      ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map((x) => `<li class="e">${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map(({message}) => `<li class="e">${esc(message)}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
       ${v.mediaLooksPending ? `<label><input type="checkbox" name="publish_without_media" value="1"> The name says media is pending, but Facebook has none. Publish without media anyway.</label>` : ""}
       ${fbBs && p.scheduled_at ? `<label class="rollover"><input type="checkbox" name="auto_rollover" value="1"> Automatically move to the next valid time if necessary</label>
