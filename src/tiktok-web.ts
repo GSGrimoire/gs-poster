@@ -3,7 +3,7 @@
  */
 import type {Env} from "./env.ts";
 import {audit,pinLocked,recordPinFailure} from "./db.ts";
-import {esc,html,page} from "./html.ts";
+import {esc,helpTip,html,page} from "./html.ts";
 import {checkCsrf,csrfToken,readSession,safeEqual,type Session} from "./session.ts";
 import {isSameOrigin} from "./origin.ts";
 import {
@@ -94,7 +94,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   ${notice==="revoke-warning"?'<div class="notice err">Local credentials were removed, but TikTok did not confirm revocation. Revoke GS Poster in TikTok account settings if necessary.</div>':""}
   ${!enabled?'<div class="notice err">TikTok is not configured yet. Add TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET and TIKTOK_TOKEN_ENCRYPTION_KEY as Cloudflare Worker secrets before connecting.</div>':""}
   <div class="step-card"><div class="step-heading"><span class="step-number">1</span><div>
-    <h3>App authorization</h3><p class="hint">Only the requested permissions appear on TikTok's consent screen.</p></div></div>
+    <div class="help-heading"><h3>App authorization</h3>${helpTip("TikTok permissions", "Review the requested permissions on the TikTok consent screen.")}</div></div></div>
     <p class="form-info">Login Kit redirect address</p><code style="display:block;overflow-wrap:anywhere">${esc(tiktokRedirect(env))}</code>
     <p class="form-info"><a href="/terms">Terms</a> | <a href="/privacy">Privacy</a> | <a href="/about">Public About page</a></p>
   </div>
@@ -119,7 +119,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
   ${conn?
     `<div class="step-card">
       <div class="step-heading"><span class="step-number">3</span><div><h3>Connected TikTok account</h3>
-        <p class="hint">Your account is available for separately approved transfers.</p></div></div>
+        </div></div>
       <p><strong>Connection:</strong> Active</p>
       <p><strong>Account identifier:</strong> ${esc(conn.open_id)}</p>
       <p><strong>Granted permissions:</strong> ${esc(granted.join(", "))}</p>
@@ -148,7 +148,7 @@ export async function tiktokSettings(env:Env,session:Session,notice=""):Promise<
     </form>`}
   <div class="step-card"><div class="eyebrow">Next step</div>
     <h3 style="margin:8px 0">Create your next post</h3>
-    <p class="hint">Send a carousel or video to your TikTok inbox, then add music and publish it in the TikTok app.</p>
+    ${helpTip("Posting to TikTok", "Send a carousel or video to your inbox, then add music and publish in the TikTok app.")}
     <p class="inline-actions"><a class="btn" href="/new?preset=tiktok-carousel">+ TikTok carousel</a><a class="btn" href="/new?preset=tiktok-video">+ TikTok video</a><a class="btn" href="/">Open planner</a></p>
     <p class="rail-note">Automatic TikTok scheduling is not enabled. Every TikTok transfer is a separate approval action, independent of your planner time.</p>
   </div>`;

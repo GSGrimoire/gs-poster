@@ -3,7 +3,8 @@
  * These are editorial heuristics, never publish gates and never mutations.
  * Opening excerpts are intentionally NOT claimed as platform truncation limits.
  */
-import {esc} from "./html.ts";
+import {actionWarning,esc,helpTip} from "./html.ts";
+import {STUDIO_CAPTION_IDS} from "./platforms.ts";
 import type {Post} from "./db.ts";
 import {tiktokMedia} from "./db.ts";
 /** Instagram app guidance since December 2025; the developer API still lists 30. */
@@ -11,7 +12,7 @@ export const INSTAGRAM_EDITORIAL_HASHTAGS=5;
 import {mediaLooksPending} from "./validate.ts";
 
 export type ReviewPlatform="facebook"|"bluesky"|"tiktok"|"instagram";
-export interface EditorialFinding {kind:"warning"|"note";message:string}
+export interface EditorialFinding {kind:"warning"|"note";message:string;field?:"media"}
 export interface EditorialReview {
   platform:ReviewPlatform;label:string;
   opening:string;previewCharacters:number;captionLength:number;hashtagCount:number;
@@ -35,7 +36,7 @@ function scan(platform:ReviewPlatform,label:string,caption:string,opts:{
   hasMedia:boolean;pending:boolean;searchPhrase?:string|null;video?:boolean;
 }):EditorialReview{
   const findings:EditorialFinding[]=[];
-  const warn=(message:string)=>findings.push({kind:"warning",message});
+  const warn=(message:string,field?:"media")=>findings.push({kind:"warning",message,field});
   const note=(message:string)=>findings.push({kind:"note",message});
   const n=OPENING_EXCERPT_CHARACTERS[platform];
   const opening=caption.slice(0,n);
@@ -46,7 +47,7 @@ function scan(platform:ReviewPlatform,label:string,caption:string,opts:{
   if(banned.length)warn("Review prohibited generic hashtags: "+banned.map(x=>"#"+x).join(", ")+".");
   if(caption.includes("\u2014"))warn("An em dash is present; the house rule prohibits it.");
   if(INVISIBLE.test(caption))warn("Invisible or soft-hyphen characters detected; remove unintended formatting.");
-  if(opts.pending&&!opts.hasMedia)warn("The post name suggests media is pending, but this platform has no media.");
+  if(opts.pending&&!opts.hasMedia)warn("The post name suggests media is pending, but this platform has no media.","media");
   if(platform==="tiktok"){
     if(hashtags.length<2||hashtags.length>4)
       warn("TikTok house guidance is 2 to 4 relevant hashtags; found "+hashtags.length+".");
@@ -83,27 +84,25 @@ export function editorialReview(post:Post):EditorialReview[]{
   return reports;
 }
 
-/** Accessible, escaped, bounded markup. No actions or inputs in the review panel. */
+/** Saved editorial warnings stay visible; preview and advice are optional. */
 export function renderEditorialReview(post:Post):string{
   const reports=editorialReview(post);
   if(!reports.length)return "";
-  const rows=reports.map(r=>`
-    <section class="preflight-target" aria-label="${esc(r.label)} caption review">
-      <h4>${esc(r.label)} <span class="hint">${r.hashtagCount} hashtags</span></h4>
-      <p class="hint">Opening ${r.previewCharacters} characters (illustrative excerpt, not a verified platform cutoff):</p>
-      <blockquote class="preflight-excerpt">${esc(r.opening || "(empty caption)")}${r.captionLength>r.previewCharacters?"…":""}</blockquote>
-      ${r.findings.length?`<ul class="checks">${r.findings.map(f=>
-        `<li class="${f.kind==="warning"?"w":"note"}">${esc(f.message)}</li>`).join("")}</ul>`
-        :'<p class="hint">No additional editorial warnings found.</p>'}
-    </section>`).join("");
-  const count=reports.reduce((n,r)=>n+r.findings.filter(f=>f.kind==="warning").length,0);
+  const warnings=reports.flatMap(report=>report.findings.filter(f=>f.kind==="warning").map(f=>
+    `<li>${actionWarning(report.label + " · " + f.message,
+      f.field === "media" ? "#ed-media" : "#" + STUDIO_CAPTION_IDS[report.platform])}</li>`)).join("");
   return `<section class="preflight-panel" id="preflight-panel" aria-labelledby="preflight-heading">
-    <h3 id="preflight-heading">Pre-publish review</h3>
-    <p class="hint">Read-only checks of the last saved draft, including Instagram preparation.
-      These are editorial prompts, not platform acceptance tests. They never publish or block approval.</p>
-    <p class="hint">${count} editorial warning${count===1?"":"s"} across ${reports.length} selected platform${reports.length===1?"":"s"}.</p>
-    <p class="hint" id="preflight-stale" hidden>Saved content changed since this review loaded.
-      Reload this page before final approval to review the latest captions.</p>
-    ${rows}
+    <div class="help-heading"><h3 id="preflight-heading">Pre-publish review</h3>
+      ${helpTip("Editorial review", "Prompts based on the last saved draft. Editorial checks never publish or block approval.")}</div>
+    <p class="action-warning" id="preflight-stale" role="status" hidden>Reload to check the latest saved captions.</p>
+    <ul class="action-checks">${warnings}</ul>
+    <details><summary>Caption previews and notes</summary>
+      ${reports.map(r=>`<section class="preflight-target" aria-label="${esc(r.label)} caption review">
+        <h4>${esc(r.label)} <span class="hint">${r.hashtagCount} hashtags</span></h4>
+        <p class="hint">Opening ${r.previewCharacters} characters (illustrative excerpt, not a verified platform cutoff)</p>
+        <blockquote class="preflight-excerpt">${esc(r.opening || "(empty caption)")}${r.captionLength>r.previewCharacters?"…":""}</blockquote>
+        ${r.findings.filter(f=>f.kind==="note").map(f=>`<p class="hint">${esc(f.message)}</p>`).join("")}
+      </section>`).join("")}
+    </details>
   </section>`;
 }

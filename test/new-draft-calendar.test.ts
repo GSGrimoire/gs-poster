@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { blankNewDraft, newDraftPrefill, newDraftTime, parseNewDraft, renderNewDraft, soonestDraftTime } from "../src/new-draft.ts";
+import { blankNewDraft, newDraftPrefill, newDraftTime, parseNewDraft, presetNewDraft, renderNewDraft, soonestDraftTime } from "../src/new-draft.ts";
 import { renderCalendar, CALENDAR_JS } from "../src/calendar.ts";
 import { NEW_DRAFT_JS } from "../src/new-draft-client.ts";
 import type { Env } from "../src/env.ts";
@@ -43,7 +43,7 @@ test("new form creates a pending, unapproved post with optional video placeholde
 
 test("new draft form escapes content and never includes approval or PIN controls",()=>{
   const html=renderNewDraft({...blankNewDraft(slot),label:'<img src=x onerror="alert(1)">',message:"<hello>"},'csrf<&"',zone,"Example <error>");
-  assert.match(html,/New post draft/);
+  assert.match(html,/<h2>New draft<\/h2>/);
   assert.match(html,/name="csrf"/);
   assert.match(html,/value="2026-10-28T16:30"/);
   assert.match(html,/&#60;img src=x/);
@@ -103,4 +103,24 @@ test("composer rejects unsupported content types and still creates unapproved re
   assert.equal(video.scheduled_at,null);
   assert.equal(video.facebook_enabled,true);
   assert.deepEqual(video.bluesky?.images,[]);
+});
+
+test("Free Song Sunday preset opens a video-first, unapproved social draft",()=>{
+  const fields=presetNewDraft("free-song-sunday");
+  assert.equal(fields.release,"Free Song Sunday");
+  assert.equal(fields.contentKind,"video");
+  assert.equal(fields.facebook,true);
+  assert.equal(fields.bluesky,true);
+  assert.equal(fields.tiktok,false);
+  assert.equal(fields.when,"");
+  const markup=renderNewDraft(fields,"csrf-test",zone);
+  assert.match(markup,/Free Song Sunday social video/);
+  assert.match(markup,/id="new-video-panel"/);
+  assert.match(markup,/name="content_kind" value="video" checked/);
+  assert.match(markup,/full music video, YouTube thumbnail and YouTube upload are separate/);
+  assert.doesNotMatch(markup,/name="pin"|\/approve|\/publish/);
+  const pending=parseNewDraft(fields,zone,"Owner",now);
+  assert.equal(pending.scheduled_at,null);
+  assert.equal(pending.video,null);
+  assert.equal(pending.release,"Free Song Sunday");
 });

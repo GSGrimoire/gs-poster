@@ -3,6 +3,16 @@
 export const esc = (v: unknown): string =>
   String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
+/** Optional guidance is available on hover, keyboard focus, or tap. */
+export function helpTip(label: string, copy: string, copyId?: string): string {
+  const id = copyId ?? "help-" + label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return `<details class="help-tip"><summary aria-controls="${esc(id)}" aria-describedby="${esc(id)}"><span aria-hidden="true">?</span><span class="sr-only">${esc(label)}</span></summary><span class="help-copy" id="${esc(id)}">${esc(copy)}</span></details>`;
+}
+
+export function actionWarning(message: string, href: string, level: "e" | "w" = "w"): string {
+  return `<a class="action-warning ${level}" href="${esc(href)}">${esc(message)}</a>`;
+}
+
 const CSS = `
 :root{--bg:#141110;--panel:#1e1a17;--line:#3a322b;--text:#ece3d4;--muted:#a89b88;--accent:#b3261e;--accent2:#d8b25a;--ok:#5f8f5a;--warn:#c98b2b;--err:#d9534f}
 @media (prefers-color-scheme: light){:root{--bg:#f4eee3;--panel:#fffaf1;--line:#ddd0bb;--text:#231c16;--muted:#6f6253;--accent:#9e1f18;--accent2:#8a6416;--warn:#8a5a0c;--ok:#3f6e3a}}
@@ -49,6 +59,27 @@ table.log td{padding:6px 4px;border-top:1px solid var(--line);vertical-align:top
 table.log td:nth-child(3){color:var(--text);word-break:break-word}
 table.log td.ts{white-space:nowrap}
 details summary{cursor:pointer;font:14px system-ui,sans-serif;color:var(--muted)}
+.help-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.help-tip{position:relative;display:inline-block;inline-size:26px;flex:none;vertical-align:middle}
+.help-tip::details-content{content-visibility:visible}
+.help-tip>summary{display:grid;place-items:center;list-style:none;min-width:26px;min-height:26px;border:1px solid var(--line);border-radius:50%;color:var(--text);font:650 13px system-ui,sans-serif}
+.help-tip>summary::-webkit-details-marker{display:none}
+.help-tip>summary:focus-visible{outline:2px solid var(--accent2);outline-offset:3px}
+.help-tip>.help-copy{visibility:hidden;position:absolute;z-index:8;inset-inline-start:0;top:100%;width:min(260px,calc(100vw - 56px));padding:10px 12px;border:1px solid var(--accent2);border-radius:8px;background:var(--panel);box-shadow:var(--shadow);color:var(--text);font:13px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}
+.help-tip[open]>.help-copy,.help-tip:has(>summary:focus-visible)>.help-copy{visibility:visible}
+@media(hover:hover){.help-tip:hover>.help-copy{visibility:visible}}
+@media(max-width:680px){
+  .help-heading{position:relative}
+  .help-heading>.help-tip{position:static}
+  .help-heading>.help-tip>.help-copy{inset-inline-start:0}
+}
+.action-checks{display:grid;gap:5px;margin:8px 0;padding:0;list-style:none}
+.action-checks:empty{display:none}
+.action-warning{display:block;max-width:100%;border-inline-start:3px solid var(--warn);border-radius:4px;padding:5px 8px;background:color-mix(in srgb,var(--warn) 13%,var(--panel));color:var(--text);font:600 13px/1.45 system-ui,sans-serif;overflow-wrap:anywhere}
+.action-warning.e{border-color:var(--err);background:color-mix(in srgb,var(--err) 13%,var(--panel))}
+.action-warning[hidden]{display:none}
+a.action-warning{text-decoration:underline;text-underline-offset:3px}
+[aria-invalid=true]{outline:2px solid var(--err);outline-offset:1px}
 .empty{color:var(--muted);font:14px system-ui,sans-serif}
 
 /* Editorial workspace: polished hierarchy without an external asset dependency. */

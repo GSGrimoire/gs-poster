@@ -27,6 +27,9 @@ test("checkTarget: hard limits are errors, display shape is only a note",()=>{
   assert.match(checkTarget({id:"tiktok",...base,photos:0}).errors[0],/needs photos or a video/);
   assert.match(checkTarget({id:"facebook",...base,photos:1,video:true}).errors[0],/cannot go in the same post/);
   assert.match(checkTarget({id:"tiktok",...base,video:true,photos:0,captionLength:2201}).errors[0],/allows 2200/);
+  assert.match(checkTarget({id:"tiktok",...base,missingTitle:true}).errors[0],/public TikTok carousel title/);
+  assert.deepEqual(checkTarget({id:"tiktok",...base,missingTitle:true,photos:0,video:true}).errors,[]);
+
   const shape=checkTarget({id:"tiktok",...base,ratios:[1,0.5625]});
   assert.deepEqual(shape.errors,[]);
   assert.equal(shape.warnings.length,1);
@@ -50,7 +53,8 @@ test("one card per platform, each with its own caption, media and checks",()=>{
   }
   assert.match(html,/data-shared="facebook"/,"TikTok shared gallery points at the Facebook tiles");
   assert.match(html,/1 description is missing/,"first render already shows the Bluesky problem");
-  assert.match(html,/not the crop a platform will deliver/);
+  assert.match(html,/class="action-warning e" href="#bs-alt-1">1 description is missing/);
+  assert.match(html,/class="help-copy" id="help-gallery-controls">[^<]*crop images differently/);
 });
 
 test("form field names the server parses are unchanged",()=>{
@@ -81,4 +85,17 @@ test("targetStates counts what the server would save",()=>{
   assert.equal(s.bluesky.missingAlt,1);
   assert.equal(s.tiktok.photos,2,"shared fallback uses the Facebook photos");
   assert.equal(s.tiktok.captionLength,post.message.length,"empty TikTok caption reuses Facebook's");
+});
+
+test("horizontal platform overview keeps inactive destinations visible and distinct from approval",()=>{
+  for(const id of ["facebook","bluesky","tiktok","instagram"]){
+    assert.match(html,new RegExp('data-overview-platform="'+id+'"'));
+  }
+  assert.match(html,/data-overview-platform="instagram" data-release-issue=""/);
+  assert.match(html,/platform-overview-row is-inactive/);
+  assert.match(html,/Select a destination to reuse existing post media/);
+  assert.match(html,/Saving and selecting platforms never publishes anything/);
+  assert.match(html,/data-overview-edit="instagram" href="#target-instagram" hidden/);
+  assert.match(html,/Enter a public TikTok carousel title/);
+  assert.match(DRAFT_EDITOR_JS,/overview\.classList\.toggle\("is-inactive"/);
 });

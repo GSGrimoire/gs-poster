@@ -103,12 +103,19 @@ export interface TargetState {
   video: boolean;
   /** Descriptions missing, counted only when the platform requires them. */
   missingAlt: number;
+  /** GS Poster requires a public title for a TikTok photo carousel. */
+  missingTitle?: boolean;
   /** Width / height of each photo, when known. */
   ratios?: number[];
   hashtags?: number;
 }
 
-export interface TargetCheck { errors: string[]; warnings: string[] }
+export type TargetField = "caption" | "description" | "title" | "gallery" | "upload";
+export interface TargetFinding { message: string; level: "e" | "w"; field: TargetField }
+export interface TargetCheck { errors: string[]; warnings: string[]; findings: TargetFinding[] }
+export const STUDIO_CAPTION_IDS: Record<PlatformId, string> = {
+  facebook: "ed-message", bluesky: "ed-bs", tiktok: "ed-tiktok", instagram: "ed-ig",
+};
 
 /**
  * Check one target against its rules. Pure, so the server and the browser
@@ -116,18 +123,25 @@ export interface TargetCheck { errors: string[]; warnings: string[] }
  */
 export function checkTarget(t: TargetState): TargetCheck {
   const r = PLATFORMS[t.id];
-  const errors: string[] = [], warnings: string[] = [];
+  const findings: TargetFinding[] = [];
+  const error = (field: TargetField, message: string) => findings.push({ message, level: "e", field });
+  const warn = (field: TargetField, message: string) => findings.push({ message, level: "w", field });
   const limit = captionLimit(t.id, t);
-  if (t.photos && t.video && !r.mixPhotoVideo) errors.push("Photos and a video cannot go in the same post.");
-  if (t.photos > r.maxPhotos) errors.push(`${t.photos} photos; ${r.label} allows ${r.maxPhotos}.`);
-  if (!t.photos && !t.video && !r.textOnly) errors.push(`${r.label} needs photos or a video.`);
-  if (limit && t.captionLength > limit) errors.push(`Caption is ${t.captionLength} characters; ${r.label} allows ${limit}.`);
-  if (r.altRequired && t.missingAlt) errors.push(`${t.missingAlt} ${t.missingAlt === 1 ? "description is" : "descriptions are"} missing.`);
-  if (r.maxHashtags && (t.hashtags ?? 0) > r.maxHashtags) errors.push(`${t.hashtags} hashtags; ${r.label} allows ${r.maxHashtags}.`);
-  if (!t.captionLength && t.id !== "tiktok") warnings.push("Caption is empty.");
+  if (t.photos && t.video && !r.mixPhotoVideo) error("gallery", "Photos and a video cannot go in the same post.");
+  if (t.photos > r.maxPhotos) error("gallery", `${t.photos} photos; ${r.label} allows ${r.maxPhotos}.`);
+  if (!t.photos && !t.video && !r.textOnly) error("upload", `${r.label} needs photos or a video.`);
+  if (limit && t.captionLength > limit) error("caption", `Caption is ${t.captionLength} characters; ${r.label} allows ${limit}.`);
+  if (r.altRequired && t.missingAlt) error("description", `${t.missingAlt} ${t.missingAlt === 1 ? "description is" : "descriptions are"} missing.`);
+  if (t.id === "tiktok" && t.photos > 0 && t.missingTitle) error("title", "Enter a public TikTok carousel title.");
+  if (r.maxHashtags && (t.hashtags ?? 0) > r.maxHashtags) error("caption", `${t.hashtags} hashtags; ${r.label} allows ${r.maxHashtags}.`);
+  if (!t.captionLength && t.id !== "tiktok") warn("caption", "Caption is empty.");
   const off = r.framed ? 0 : (t.ratios ?? []).filter((x) => x < r.aspect.min - 0.01 || x > r.aspect.max + 0.01).length;
-  if (off) warnings.push(`${off} ${off === 1 ? "photo is" : "photos are"} outside ${r.aspect.label}. ${r.aspect.outside}`);
-  return { errors, warnings };
+  if (off) warn("gallery", `${off} ${off === 1 ? "photo is" : "photos are"} outside ${r.aspect.label}. ${r.aspect.outside}`);
+  return {
+    errors: findings.filter(f => f.level === "e").map(f => f.message),
+    warnings: findings.filter(f => f.level === "w").map(f => f.message),
+    findings,
+  };
 }
 
 /** Rules as JSON for the browser, safe inside an HTML attribute after esc(). */

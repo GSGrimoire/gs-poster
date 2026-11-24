@@ -64,6 +64,11 @@ try {
   const timed=await createPost(db,{message:"Safe future draft",label:"Drag me",images:[],video:null,
     created_by:"browser-fixture",facebook_enabled:true,tiktok_enabled:false,scheduled_at:future.toISOString()});
 
+  const needsEdits=await createPost(db,{message:"Ready for Facebook",label:"Draft with warnings",images:photos,video:null,
+    created_by:"browser-fixture",facebook_enabled:true,tiktok_enabled:true,tiktok_images:sibling,
+    scheduled_at:new Date(Date.now()+60_000).toISOString(),
+    bluesky:{caption:"A divided #fyp example",images:[{url:photos[0],alt:""}],video:null,patreon:null}});
+
   await db.prepare(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<810)
     INSERT INTO posts (id,created_at,updated_at,status,message,scheduled_at,created_by)
     SELECT 'p_browsermonth_'||n,'2031-04-02T10:00:00.000Z','2031-04-02T10:00:00.000Z',
@@ -142,10 +147,58 @@ try {
     }
   }
 
+  await scenario("desktop-studio-help-and-warning-links",desktop,async()=>{
+    await desktop.goto(ORIGIN+"/post/"+needsEdits.id);
+    const tip=desktop.getByText("Choosing destinations",{exact:true}).locator("..");
+    const copy=desktop.locator("#help-choosing-destinations");
+    assert.equal(await copy.isVisible(),false);
+    await tip.hover();
+    assert.equal(await copy.isVisible(),true);
+    await desktop.mouse.move(5,5);
+    assert.equal(await copy.isVisible(),false);
+    await desktop.locator('input[name="p_facebook"]').focus();
+    await desktop.keyboard.press("Shift+Tab");
+    assert.equal(await tip.evaluate(e=>document.activeElement===e),true);
+    assert.equal(await copy.isVisible(),true);
+    await desktop.locator('[data-overview-issue="tiktok"]').click();
+    assert.equal(await desktop.locator("#ed-tiktok-title").evaluate(e=>document.activeElement===e),true);
+    await desktop.locator('#release-form a[href="#ed-when"]').click();
+    assert.equal(await desktop.locator("#ed-when").evaluate(e=>document.activeElement===e),true);
+    await desktop.locator('[data-overview-issue="bluesky"]').click();
+    const alt=desktop.locator("#bs-alt-0");
+    assert.equal(await alt.evaluate(e=>document.activeElement===e),true);
+    assert.equal(await alt.getAttribute("aria-invalid"),"true");
+    await alt.fill("A castle on a hill");
+    assert.equal(await alt.getAttribute("aria-invalid"),null);
+    await assertUnapproved(db,needsEdits.id);
+  });
+  await scenario("mobile-new-draft-help-and-warning-link",mobile,async()=>{
+    await mobile.goto(ORIGIN+"/new");
+    await mobile.locator('input[name="bluesky"]').check();
+    await mobile.locator('input[value="images"]').check();
+    const help=mobile.locator("#new-image-guidance");
+    assert.equal(await help.isVisible(),false);
+    const toggle=mobile.locator('summary[aria-controls="new-image-guidance"]');
+    await toggle.tap();
+    assert.equal(await help.isVisible(),true);
+    await toggle.tap();
+    assert.equal(await help.isVisible(),false);
+    await mobile.locator("#new-images-input").setInputFiles({name:"test.png",mimeType:"image/png",buffer:PNG});
+    const warning=mobile.locator("#summary-readiness");
+    assert.equal(await warning.getAttribute("href"),"#new-image-alt-0");
+    await warning.tap();
+    const alt=mobile.locator("#new-image-alt-0");
+    assert.equal(await alt.evaluate(e=>document.activeElement===e),true);
+    assert.equal(await alt.getAttribute("aria-invalid"),"true");
+    await alt.fill("A castle on a hill");
+    assert.equal(await alt.getAttribute("aria-invalid"),null);
+    assert.equal(await warning.isVisible(),false);
+  });
+
   await scenario("desktop-bluesky-click-one-shot-autosave",desktop,async()=>{
     await desktop.goto(ORIGIN+"/post/"+owned.id);
     const picker=desktop.locator(".bs-copy-picker");
-    if(!(await picker.evaluate(e=>e.open)))await picker.locator("summary").click();
+    if(!(await picker.evaluate(e=>e.open)))await picker.locator(":scope > summary").click();
     await desktop.locator('[data-copy-bs="0"]').click();
     await desktop.locator('[name="bs_add_alt_0"]').fill("First browser image");
     // Staging alone must never start autosave without an explicit copy click.
@@ -161,7 +214,7 @@ try {
   await scenario("desktop-bluesky-source-drag",desktop,async()=>{
     await desktop.goto(ORIGIN+"/post/"+owned.id);
     const picker=desktop.locator(".bs-copy-picker");
-    if(!(await picker.evaluate(e=>e.open)))await picker.locator("summary").click();
+    if(!(await picker.evaluate(e=>e.open)))await picker.locator(":scope > summary").click();
     await drag(desktop,desktop.locator('.bs-source-item[data-pool-index="1"]'),desktop.locator("#bs-copy-drop"),"Bluesky source copy");
     assert.equal(await desktop.locator('[name="bs_add_alt_1"]').count(),1);
     await desktop.locator('[name="bs_add_alt_1"]').fill("Second browser image");
