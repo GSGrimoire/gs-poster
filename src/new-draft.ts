@@ -1,5 +1,5 @@
 /** Standalone new-draft form. Draft creation never approves or publishes. */
-import { esc } from "./html.ts";
+import { esc, helpTip } from "./html.ts";
 import { checkWhen, APPROVE_MIN_LEAD_MS } from "./validate.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 import { textLength } from "./bluesky.ts";
@@ -19,6 +19,9 @@ export function presetNewDraft(preset: string | null, when = ""): NewDraftFields
   const base=blankNewDraft(when);
   if(preset==="tiktok-carousel") return {...base,facebook:false,bluesky:false,tiktok:true,contentKind:"images"};
   if(preset==="tiktok-video") return {...base,facebook:false,bluesky:false,tiktok:true,contentKind:"video"};
+  // Video-first social companion to a Free Song Sunday release. The full-length
+  // YouTube video and thumbnail remain a separate, owner-managed upload.
+  if(preset==="free-song-sunday") return {...base,release:"Free Song Sunday",contentKind:"video"};
   return base;
 }
 /** Reject forged, stale or non-existent local times, including DST gaps. */
@@ -74,12 +77,10 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   const v=(s:string)=>esc(s);
   const kind=fields.contentKind ?? "text";
   return `
-  <div class="hero">
-    <div class="hero-kicker">GS Grimoire | New post draft</div>
-    <h2>Make something worth sharing.</h2>
-    <p>Build once, tailor by platform, preview every image and save an unapproved draft. Nothing goes live until you choose a separate publishing action.</p>
-  </div>
+  <div class="help-heading"><h2>New draft</h2>${helpTip("Saving a new draft",
+    "Nothing goes live until you choose a separate publishing action.")}</div>
   ${error?`<div class="notice err" role="alert">${v(error)}</div>`:""}
+  ${fields.release==="Free Song Sunday"?`<div class="notice" role="note"><strong>Free Song Sunday social video:</strong> Add a short promotional video here and tailor the captions below. This saves one unapproved GS Poster draft for the chosen social platforms. The full music video, YouTube thumbnail and YouTube upload are separate. Before approving, verify that the video is attached to each intended platform.</div>`:""}
   <style>
   #new-draft-form [hidden]{display:none!important}
   #new-draft-form .step-card{scroll-margin-top:20px}
@@ -106,10 +107,6 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   .platform-editor textarea{display:block;width:100%;min-width:0;min-height:210px;resize:vertical;overflow-wrap:break-word;word-break:normal}
   .platform-editor label{overflow-wrap:normal;word-break:normal}
   .platform-editor h3{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-  .info-tip{position:relative;display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border:1px solid var(--muted);border-radius:50%;font:700 12px system-ui,sans-serif;color:var(--muted);cursor:help;flex-shrink:0}
-  .info-tip .info-tip-content{visibility:hidden;opacity:0;pointer-events:none;position:absolute;left:0;top:calc(100% + 9px);z-index:5;width:min(280px,calc(100vw - 65px));padding:11px 13px;border:1px solid var(--accent2);border-radius:8px;background:var(--panel);box-shadow:0 8px 24px #0008;color:var(--text);font:13px/1.5 system-ui,sans-serif;transition:opacity .12s}
-  .info-tip:hover .info-tip-content,.info-tip:focus .info-tip-content,.info-tip:focus-within .info-tip-content{visibility:visible;opacity:1}
-  .info-tip:focus-visible{outline:3px solid var(--accent2);outline-offset:2px}
   .platform-editor[hidden]{display:none!important}
   .platform-editor .field-meter{margin-top:5px}
   .new-target-choices{display:flex;gap:7px;flex-wrap:wrap;grid-column:2}
@@ -131,24 +128,23 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
     <input type="hidden" name="csrf" value="${v(csrf)}">
     <div class="workspace-main">
       <section class="step-card" aria-labelledby="draft-platform-title">
-        <div class="step-heading"><span class="step-number">1</span><div><h3 id="draft-platform-title">Where will this go?</h3><p class="hint">Each platform can be selected independently.</p></div></div>
+        <h3 id="draft-platform-title" tabindex="-1">Destinations</h3>
         <div class="choice-tiles new-choice-group">
           <label class="choice-tile"><input type="checkbox" name="facebook" value="1" ${fields.facebook?"checked":""}> Facebook</label>
           <label class="choice-tile"><input type="checkbox" name="bluesky" value="1" ${fields.bluesky?"checked":""}> Bluesky</label>
           <label class="choice-tile"><input type="checkbox" name="tiktok" value="1" ${fields.tiktok?"checked":""}> TikTok</label>
         </div>
-        <p class="choice-advice" id="new-platform-advice">TikTok posts go to your TikTok inbox. You add music and publish in the TikTok app. Calendar times do not publish to TikTok.</p>
       </section>
 
       <section class="step-card" aria-labelledby="draft-content-title">
-        <div class="step-heading"><span class="step-number">2</span><div><h3 id="draft-content-title">Photos or video</h3><p class="hint">Add photos or one video, or keep it a text post.</p></div></div>
+        <h3 id="draft-content-title" tabindex="-1">Media</h3>
         <div class="choice-tiles new-choice-group" role="group" aria-label="Post content type">
           <label class="choice-tile"><input type="radio" name="content_kind" value="images" ${kind==="images"?"checked":""}> + Add photos</label>
           <label class="choice-tile"><input type="radio" name="content_kind" value="video" ${kind==="video"?"checked":""}> + Add video</label>
           <label class="choice-tile"><input type="radio" name="content_kind" value="text" ${kind==="text"?"checked":""}> Text only</label>
         </div>
         <section id="new-images-panel" ${kind!=="images"?"hidden":""}>
-          <p class="form-info" id="new-image-guidance">Select each image’s destinations. Each platform keeps its own gallery and count: Facebook 80, TikTok 35, Bluesky 4. Drag images to reorder them, or use Move up/down. Each platform keeps its own selected subset.</p>
+          ${helpTip("Image selection", "Choose destinations per photo. Facebook allows 80 photos, TikTok 35 and Bluesky 4. Drag to reorder, or use the arrow buttons.", "new-image-guidance")}
           <div id="new-images-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop images">
             <strong>Drop your artwork here</strong>
             <span>Or select JPG, PNG or GIF files, up to 10 MB each</span>
@@ -158,7 +154,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <div id="new-images-preview" aria-live="polite"></div>
         </section>
         <section id="new-video-panel" ${kind!=="video"?"hidden":""}>
-          <p class="form-info">One private MP4 video, up to 50 MB. Facebook publishing accepts up to 20 MB. For a larger video, choose another platform or replace it before Facebook approval. Video uploads remain private until you approve a transfer.</p>
+          ${helpTip("Video limits", "Choose one private MP4 up to 50 MB. Facebook accepts up to 20 MB for publishing.")}
           <div id="new-video-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop MP4 video">
             <strong>Drop your video here</strong>
             <span>Or select an MP4 file to preview, up to 50 MB</span>
@@ -173,23 +169,22 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
       </section>
 
       <section class="step-card" aria-labelledby="draft-copy-title">
-        <div class="step-heading"><span class="step-number">3</span><div><h3 id="draft-copy-title">Tell the story</h3><p class="hint">Tailor the caption to each destination.</p></div></div>
+        <h3 id="draft-copy-title" tabindex="-1">Captions</h3>
         <div class="platform-editor-grid" aria-label="Platform-specific captions">
         <section id="new-facebook-panel" class="platform-editor">
-          <h3>Facebook <span class="info-tip" tabindex="0" aria-label="Facebook caption guidance">i<span class="info-tip-content" role="tooltip">Up to 63,206 characters. Facebook uses its own caption and assigned gallery. Publishing requires separate approval.</span></span></h3>
+          <div class="help-heading"><h3>Facebook</h3>${helpTip("Facebook caption guidance", "Up to 63,206 characters.")}</div>
           <label for="new-message">Caption</label>
           <textarea id="new-message" name="message" maxlength="63206" placeholder="Your story, hook or announcement...">${v(fields.message)}</textarea>
           <div class="field-meter" id="new-main-count">0 characters</div>
-          <p class="form-info" id="new-tiktok-caption-advice" hidden>TikTok photo descriptions can contain up to 4,000 characters. Review the final caption again in TikTok posting options.</p>
         </section>
         <section id="new-tiktok-panel" class="platform-editor" ${fields.tiktok?"":"hidden"}>
-          <h3>TikTok <span class="info-tip" tabindex="0" aria-label="TikTok caption guidance">i<span class="info-tip-content" role="tooltip">Include hashtags here. Up to 4,000 characters for photos or 2,200 for video. An empty caption falls back to the Facebook caption. TikTok transfer always needs separate approval.</span></span></h3>
+          <div class="help-heading"><h3>TikTok</h3>${helpTip("TikTok caption guidance", "Up to 4,000 characters for photos or 2,200 for video. An empty caption uses the Facebook caption. You finish and publish inbox transfers in the TikTok app.")}</div>
           <label for="new-tiktok-caption">Caption and hashtags</label>
           <textarea id="new-tiktok-caption" name="tiktok_caption" maxlength="4000" placeholder="Tailor your TikTok caption, hooks and hashtags here...">${v(fields.tiktokCaption||"")}</textarea>
           <div class="field-meter" id="new-tiktok-count">0 characters</div>
         </section>
         <section id="new-bluesky-panel" class="platform-editor">
-          <h3>Bluesky <span class="info-tip" tabindex="0" aria-label="Bluesky caption guidance">i<span class="info-tip-content" role="tooltip">Up to 300 characters. Bluesky can use four selected images, each with descriptive alternative text. The caption is independent of other platforms.</span></span></h3>
+          <div class="help-heading"><h3>Bluesky</h3>${helpTip("Bluesky caption guidance", "Up to 300 characters. Each of the four allowed images needs alternative text.")}</div>
           <label for="new-bs">Caption</label>
           <textarea id="new-bs" name="bs_caption" maxlength="300" placeholder="A shorter companion caption...">${v(fields.bsCaption)}</textarea>
           <div class="field-meter" id="new-bs-count">0 / 300</div>
@@ -198,7 +193,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
       </section>
 
       <section class="step-card" aria-labelledby="draft-details-title">
-        <div class="step-heading"><span class="step-number">4</span><div><h3 id="draft-details-title">Name it and plan it</h3><p class="hint">The name helps you find this post later.</p></div></div>
+        <h3 id="draft-details-title" tabindex="-1">Name and time</h3>
         <label for="new-label">Post name (optional)</label>
         <input id="new-label" name="label" type="text" maxlength="120" value="${v(fields.label)}" placeholder="House Rule Compendium carousel">
         <label for="new-release">Release or collection (optional)</label>
@@ -210,26 +205,24 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <button id="new-asap-button" type="button" aria-pressed="false">As soon as possible (+12 min)</button>
           <button id="new-clear-time" type="button">Clear time</button>
         </div>
-        <p class="form-info" id="new-timing-advice">Saving is never approval. Facebook and Bluesky scheduling requires separate approval with your PIN; TikTok transfers remain manual for now.</p>
+        ${helpTip("Proposed calendar time", "Facebook and Bluesky require separate approval with your PIN. The calendar does not send TikTok inbox transfers.")}
       </section>
     </div>
     <aside class="workspace-rail" aria-label="Draft overview">
       <div class="step-card">
-        <div class="eyebrow">Your draft at a glance</div>
-        <h3 style="margin:9px 0 15px">Ready when you are</h3>
+        <h3>Draft summary</h3>
         <div class="summary-row"><span>Destinations</span><strong id="summary-platforms">Choose platforms</strong></div>
         <div class="summary-row"><span>Format</span><strong id="summary-format">Text</strong></div>
         <div class="summary-row"><span>Media</span><strong id="summary-media">No media selected</strong></div>
         <p class="platform-total" id="new-platform-counts" aria-live="polite">Choose media for each selected platform</p>
         <div class="summary-row"><span>Calendar</span><strong id="summary-timing">Not scheduled</strong></div>
-        <div class="summary-row"><span>Next step</span><strong id="summary-readiness">Save as draft</strong></div>
+        <a id="summary-readiness" class="action-warning e" href="#draft-content-title" hidden></a>
         <div class="progress-track" role="progressbar" aria-label="Media transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="new-upload-progress"><span class="progress-fill" id="new-progress-fill"></span></div>
         <p class="rail-note" id="new-progress-caption">Media will upload only after you save.</p>
         <button class="primary" type="submit" id="new-draft-submit" style="width:100%;margin-top:17px">Save draft and media</button>
         <p id="new-draft-status" role="status" aria-live="polite" class="form-info"></p>
         <a href="/" class="btn" style="display:block;text-align:center;margin-top:10px">Back to planner</a>
-        <p class="rail-note"><span class="status-led"></span> Unapproved by default. Your content cannot publish from this screen.</p>
-        <p class="rail-note">If scripts are disabled, Save creates a text draft; attach media on the review page.</p>
+        <noscript><p class="action-warning">Save creates a text draft. Attach media on the review page.</p></noscript>
       </div>
     </aside>
   </form>

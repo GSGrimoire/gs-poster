@@ -70,8 +70,8 @@ test("the draft page is one editor: Save button, chosen platforms only, no dupli
   assert.doesNotMatch(html,/Edit unreleased captions/);
   assert.doesNotMatch(html,/name="bs_image_0"/,"no raw Bluesky URL fields");
   assert.match(html,/data-platform="tiktok" hidden/);
-  assert.ok(html.includes(".targets > .target[hidden],.readiness > li[hidden]{display:none!important}"),
-    "inactive cards and readiness entries must stay hidden despite display:grid/flex rules");
+  assert.ok(html.includes(".targets > .target[hidden]{display:none!important}"),
+    "inactive cards must stay hidden despite display:grid rules");
   assert.equal((await get("/draft-editor.js")).status,200);
 });
 
@@ -111,6 +111,122 @@ test("disabling and re-enabling a platform retains its captions and gallery with
   assert.deepEqual(restored.bluesky?.images,active.bluesky?.images);
   assert.deepEqual(restored.instagram?.items,[item]);
   assert.equal(restored.instagram?.caption,"Saved Instagram words");
+});
+
+
+test("first platform activation inherits source photos without publishing or duplicating uploads",async()=>{
+  const p=await draft({images:6});
+  const result=await call("/post/"+p.id+"/save",{...baseSave(p),p_bluesky:"1",p_instagram:"1",
+    p_tiktok:"1",bs_caption:"Six goblins",tiktok_title:"Six goblins"});
+  assert.equal(result.status,200,await result.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.status,"draft");
+  assert.equal(saved.approved_at,null);
+  assert.deepEqual(saved.images,p.images,"Facebook source gallery stays unchanged");
+  assert.deepEqual(saved.bluesky?.images.map(x=>x.url),p.images.slice(0,4));
+  assert.ok(saved.bluesky?.images.every(x=>x.alt===""),"accessibility descriptions require owner review");
+  assert.deepEqual(saved.tiktok_images,p.images,"TikTok receives independent reference selection");
+  assert.deepEqual(saved.instagram?.items.map(x=>x.url),p.images);
+  assert.ok(saved.instagram?.items.every(x=>x.mode==="pad"),"original photos are not cropped by default");
+  assert.equal(saved.bluesky?.status,"draft");
+  assert.ok(saved.instagram,"Instagram preparation was saved without publishing");
+});
+
+test("late TikTok activation can inherit media from Bluesky when Facebook has none",async()=>{
+  const p=await createPost(db,{message:"The cave map",images:[],video:null,facebook_enabled:false,
+    tiktok_enabled:false,created_by:"test",scheduled_at:null,
+    bluesky:{caption:"Cave",images:[{url:IMG(0),alt:"A cave entrance"}],video:null,patreon:null}});
+  const result=await call("/post/"+p.id+"/save",{expected_updated_at:p.updated_at,
+    p_bluesky:"1",p_tiktok:"1",bs_caption:"Cave",tiktok_title:"The Cave"});
+  assert.equal(result.status,200,await result.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.deepEqual(saved.tiktok_images,[IMG(0)]);
+  assert.deepEqual(saved.images,[]);
+  assert.equal(saved.approved_at,null);
+});
+
+test("simultaneous activation inherits only retained photos within each destination's limit",async()=>{
+  const p=await draft({images:39});
+  const result=await call("/post/"+p.id+"/save",{...baseSave(p),p_bluesky:"1",p_instagram:"1",
+    p_tiktok:"1",remove_fb_0:"1",remove_fb_1:"1"});
+  assert.equal(result.status,200,await result.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.deepEqual(saved.images,p.images.slice(2));
+  assert.deepEqual(saved.bluesky?.images.map(item=>item.url),p.images.slice(2,6));
+  assert.deepEqual(saved.instagram?.items.map(item=>item.url),p.images.slice(2,12));
+  assert.deepEqual(saved.tiktok_images,p.images.slice(2,37));
+  assert.equal(saved.approved_at,null);
+
+  const stale=await call("/post/"+p.id+"/save",{...baseSave(p),p_tiktok:"1"});
+  assert.equal(stale.status,409);
+  assert.deepEqual((await getPost(db,p.id))!.tiktok_images,saved.tiktok_images);
+});
+
+test("clearing the source photos and activating platforms in one save leaves the new galleries empty",async()=>{
+  const p=await draft({images:1});
+  const result=await call("/post/"+p.id+"/save",{...baseSave(p),p_bluesky:"1",p_instagram:"1",
+    p_tiktok:"1",remove_fb_0:"1"});
+  assert.equal(result.status,200,await result.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.deepEqual(saved.images,[]);
+  assert.deepEqual(saved.bluesky?.images,[]);
+  assert.deepEqual(saved.instagram?.items,[]);
+  assert.deepEqual(saved.tiktok_images,[]);
+  assert.equal(saved.approved_at,null);
+});
+
+test("new galleries may inherit independently retained photos from a paused destination",async()=>{
+  const p=await draft({images:2,bluesky:true});
+  const result=await call("/post/"+p.id+"/save",{...baseSave(p),p_instagram:"1",p_tiktok:"1",
+    remove_fb_0:"1",remove_fb_1:"1",remove_bs_0:"1"});
+  assert.equal(result.status,200,await result.clone().text());
+  const saved=(await getPost(db,p.id))!;
+  assert.equal(saved.bluesky,null);
+  assert.deepEqual(saved.bluesky_paused?.images,[{url:IMG(1),alt:"Another goblin"}]);
+  assert.deepEqual(saved.tiktok_images,[IMG(1)]);
+  assert.deepEqual(saved.instagram?.items.map(item=>item.url),[IMG(1)]);
+  assert.equal(saved.approved_at,null);
+});
+
+test("TikTok activation uses retained videos after removal and leaves independent media alone",async()=>{
+  const video="https://raw.githubusercontent.com/GoofySpook/GSImageLibrary/main/test/cave.mp4";
+  for(const keepBlueskyVideo of [false,true]){
+    const p=await createPost(db,{message:"The cave",images:[],video,created_by:"test",scheduled_at:null,
+      facebook_enabled:true,tiktok_enabled:false,bluesky:{caption:"The cave",images:[],
+        video:{url:video,alt:"The cave entrance"},patreon:null}});
+    const result=await call("/post/"+p.id+"/save",{...baseSave(p),p_bluesky:"1",p_tiktok:"1",
+      remove_fb_video:"1",...(keepBlueskyVideo?{}:{remove_bs_video:"1"})});
+    assert.equal(result.status,200,await result.clone().text());
+    const saved=(await getPost(db,p.id))!;
+    assert.equal(saved.video,null);
+    assert.equal(saved.tiktok_video,keepBlueskyVideo?video:null);
+    assert.equal(saved.bluesky?.video?.url,keepBlueskyVideo?video:undefined);
+    assert.equal(saved.approved_at,null);
+  }
+});
+
+test("a paused Instagram gallery still requires photos associated with the post",async()=>{
+  const p=await draft({images:2});
+  const item={url:IMG(0),mode:"crop",bg:"dark"};
+  assert.equal((await call("/post/"+p.id+"/save",{...baseSave(p),p_instagram:"1",
+    ig_items:JSON.stringify([item])})).status,200);
+  const active=(await getPost(db,p.id))!;
+  assert.equal((await call("/post/"+p.id+"/save",{...baseSave(active),
+    ig_items:JSON.stringify([{...item,url:IMG(9)}])})).status,400);
+  const saved=(await getPost(db,p.id))!;
+  assert.deepEqual(saved.instagram,active.instagram);
+});
+
+test("a Bluesky-only draft shows a schedule warning only in the release checks",async()=>{
+  const p=await createPost(db,{message:"Cave",images:[],video:null,created_by:"test",facebook_enabled:false,
+    scheduled_at:new Date(Date.now()-3600_000).toISOString(),
+    bluesky:{caption:"The cave entrance",images:[],video:null,patreon:null}});
+  const res=await get("/post/"+p.id);
+  assert.equal(res.status,200);
+  const html=await res.text();
+  assert.match(html,/data-overview-platform="facebook" data-release-issue=""/);
+  assert.match(html,/data-overview-platform="bluesky" data-release-issue=""/);
+  assert.match(html,/id="release-form"[\s\S]*The publish time is less than/);
 });
 
 test("TikTok uses a public title and gets a separate image gallery after late activation",async()=>{

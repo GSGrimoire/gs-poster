@@ -114,6 +114,12 @@ test("the editor shows the Threads chip and card, and saving keeps its text and 
   assert.match(html, /name="p_threads"/);
   assert.match(html, /id="target-threads"/);
   assert.match(html, /name="th_media"/);
+  // Merged with the Destinations overview: Threads has its own row and its card
+  // uses the shared checks list. Threads has no gallery, so no link may point to one.
+  assert.match(html, /data-overview-platform="threads"/);
+  assert.match(html, /data-platform-toggle="threads"/);
+  assert.match(html, /data-checks="threads"/);
+  assert.doesNotMatch(html, /gallery-threads/);
   const saved = await post(`/post/${p.id}/save`, { expected_updated_at: p.updated_at, p_facebook: "1", p_threads: "1",
     th_caption: "Into the cave", th_media: "facebook", auto: "1", message: "Cave." });
   assert.equal(saved.status, 200, await saved.clone().text());

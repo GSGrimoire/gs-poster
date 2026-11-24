@@ -5,7 +5,7 @@ import {csrfToken} from "./session.ts";
 import {getPost,tiktokMedia} from "./db.ts";
 import {tiktokConnection,getTikTokCreatorOptions,type TikTokCreatorOptions} from "./tiktok.ts";
 import {canRetryTikTokTransfer,getTikTokInboxTransfer} from "./tiktok-inbox.ts";
-import {esc,html,page} from "./html.ts";
+import {esc,helpTip,html,page} from "./html.ts";
 import {TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
 /**
@@ -66,7 +66,7 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
       ${TIKTOK_DIRECT_POST_VISIBLE?'<div class="eyebrow">Option A | Controlled transfer</div>':""}
       <h3 style="margin:9px 0">Send to TikTok inbox</h3>
       <p class="form-info">Send ${type==="PHOTO"?"this carousel":"the video"} to TikTok and finish its caption, privacy and publication in TikTok itself. No publication occurs from this choice until you finish it inside TikTok.</p>
-      ${type==="VIDEO"?'<p class="hint">TikTok does not accept video inbox captions through this endpoint. Set the final caption inside TikTok.</p>':""}
+      ${type==="VIDEO"?helpTip("TikTok video caption", "Set the final caption inside TikTok after sending the video."):""}
       ${fields("MEDIA_UPLOAD")}
       <button class="primary" type="submit">Send to TikTok inbox</button>
     </form>`:
