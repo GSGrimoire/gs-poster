@@ -19,6 +19,9 @@ export function presetNewDraft(preset: string | null, when = ""): NewDraftFields
   const base=blankNewDraft(when);
   if(preset==="tiktok-carousel") return {...base,facebook:false,bluesky:false,tiktok:true,contentKind:"images"};
   if(preset==="tiktok-video") return {...base,facebook:false,bluesky:false,tiktok:true,contentKind:"video"};
+  // Video-first social companion to a Free Song Sunday release. The full-length
+  // YouTube video and thumbnail remain a separate, owner-managed upload.
+  if(preset==="free-song-sunday") return {...base,release:"Free Song Sunday",contentKind:"video"};
   return base;
 }
 /** Reject forged, stale or non-existent local times, including DST gaps. */
@@ -77,6 +80,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   <div class="help-heading"><h2>New draft</h2>${helpTip("Saving a new draft",
     "Nothing goes live until you choose a separate publishing action.")}</div>
   ${error?`<div class="notice err" role="alert">${v(error)}</div>`:""}
+  ${fields.release==="Free Song Sunday"?`<div class="notice" role="note"><strong>Free Song Sunday social video:</strong> Add a short promotional video here and tailor the captions below. This saves one unapproved GS Poster draft for the chosen social platforms. The full music video, YouTube thumbnail and YouTube upload are separate. Before approving, verify that the video is attached to each intended platform.</div>`:""}
   <style>
   #new-draft-form [hidden]{display:none!important}
   #new-draft-form .step-card{scroll-margin-top:20px}

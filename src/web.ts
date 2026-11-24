@@ -435,6 +435,7 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
     '<h2 style="margin:0">'+(view==="month"?"Monthly":"Weekly")+' planner</h2><div class="inline-actions">' +
     '<a class="btn" href="/history">View History</a>' +
     '<a class="btn" href="/new?preset=tiktok-carousel">New TikTok carousel</a>' +
+    '<a class="btn" href="/new?preset=free-song-sunday">Free Song Sunday video</a>' +
     '<a class="btn" href="/new">New draft</a></div></div>' +
     calendar +
     '<form class="history-search" method="get" action="/" role="search">' +
