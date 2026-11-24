@@ -489,7 +489,7 @@ export function renderDraftEditor(v: EditorView): string {
       ${effects.length > 1 ? `<ul class="effects" aria-label="What approving does">${effects.join("")}</ul>` : ""}
       <label for="release-pin">PIN</label>
       <input id="release-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
-      <p class="hint release-dirty" id="release-dirty" hidden>Saving your changes. Approval unlocks when they are saved; it releases the saved version.</p>
+      <p class="action-warning release-dirty" id="release-dirty" role="status" hidden>Approval is available once your changes are saved.</p>
       <div class="row"><button class="primary" id="release-button">${buttonText}</button></div>
       ${p.instagram && !igOk ? `<p class="rail-note">Instagram is not released here${igPlan && !igPlan.ok && !igPlan.offered ? " until it is connected" : ""}. Download its media from the Instagram card.</p>` : ""}
     </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok</h3>
@@ -746,14 +746,14 @@ export function renderDraftEditor(v: EditorView): string {
           <textarea id="ed-tiktok" name="tiktok_caption" data-max="${captionLimit("tiktok", { photos: 1, video: !!(ttShared ? p.video : tt.video) })}" data-caption="tiktok" placeholder="Leave empty to reuse the Facebook caption">${esc(p.tiktok_caption ?? "")}</textarea>
           <div class="field-meter"></div>
           <input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0">
-          ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button></div>
-          ${helpTip("Copying Facebook photos to TikTok", "Replaces the TikTok gallery. After saving, prepare any linked GitHub photos for TikTok.")}` : ""}
-          ${p.video ? `<div class="row"><button type="button" id="tt-copy-fb-video">Use Facebook video for TikTok</button></div>
-          ${helpTip("Copying Facebook video to TikTok", "Replaces the TikTok gallery. Save before preparing linked GitHub video for TikTok.")}` : ""}
+          ${p.images.length ? `<div class="row help-heading"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button>
+          ${helpTip("Copying Facebook photos to TikTok", "Replaces the TikTok gallery. After saving, prepare any linked GitHub photos for TikTok.")}</div>` : ""}
+          ${p.video ? `<div class="row help-heading"><button type="button" id="tt-copy-fb-video">Use Facebook video for TikTok</button>
+          ${helpTip("Copying Facebook video to TikTok", "Replaces the TikTok gallery. Save before preparing linked GitHub video for TikTok.")}</div>` : ""}
           <div class="tiles" id="gallery-tiktok" tabindex="-1" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
           ${on.tiktok && !ttShared && tt.video && parseGitHubUrl(tt.video) ? `<div class="row"><button type="button" data-prepare-video="tiktok">Prepare TikTok video privately</button></div>` : ""}
-          ${p.tiktok_enabled && ttImportIndices.length ? `<div class="row"><button type="button" id="tt-import" data-indices="${esc(JSON.stringify(ttImportIndices))}">Prepare ${ttImportIndices.length} linked photo${ttImportIndices.length === 1 ? "" : "s"} for TikTok</button></div>
-          ${helpTip("Preparing linked photos", "Private copies expire after 45 days. Prepare them close to publication.")}<p class="hint" id="tt-import-status" role="status" aria-live="polite"></p>` : ""}
+          ${p.tiktok_enabled && ttImportIndices.length ? `<div class="row help-heading"><button type="button" id="tt-import" data-indices="${esc(JSON.stringify(ttImportIndices))}">Prepare ${ttImportIndices.length} linked photo${ttImportIndices.length === 1 ? "" : "s"} for TikTok</button>
+          ${helpTip("Preparing linked photos", "Private copies expire after 45 days. Prepare them close to publication.")}</div><p class="hint" id="tt-import-status" role="status" aria-live="polite"></p>` : ""}
           ${!ttShared && !tt.video && tt.images.length > 1 ? `<input type="hidden" name="order_tt" value="${Array.from({ length: tt.images.length }, (_, i) => i).join(",")}">` : ""}
         </article>
       </div>

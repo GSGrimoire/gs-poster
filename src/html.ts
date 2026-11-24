@@ -60,7 +60,7 @@ table.log td:nth-child(3){color:var(--text);word-break:break-word}
 table.log td.ts{white-space:nowrap}
 details summary{cursor:pointer;font:14px system-ui,sans-serif;color:var(--muted)}
 .help-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.help-tip{position:relative;display:inline-block;flex:none;vertical-align:middle}
+.help-tip{position:relative;display:inline-block;inline-size:26px;flex:none;vertical-align:middle}
 .help-tip::details-content{content-visibility:visible}
 .help-tip>summary{display:grid;place-items:center;list-style:none;min-width:26px;min-height:26px;border:1px solid var(--line);border-radius:50%;color:var(--text);font:650 13px system-ui,sans-serif}
 .help-tip>summary::-webkit-details-marker{display:none}

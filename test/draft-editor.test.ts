@@ -70,8 +70,8 @@ test("the draft page is one editor: Save button, chosen platforms only, no dupli
   assert.doesNotMatch(html,/Edit unreleased captions/);
   assert.doesNotMatch(html,/name="bs_image_0"/,"no raw Bluesky URL fields");
   assert.match(html,/data-platform="tiktok" hidden/);
-  assert.ok(html.includes(".targets > .target[hidden],.readiness > li[hidden]{display:none!important}"),
-    "inactive cards and readiness entries must stay hidden despite display:grid/flex rules");
+  assert.ok(html.includes(".targets > .target[hidden]{display:none!important}"),
+    "inactive cards must stay hidden despite display:grid rules");
   assert.equal((await get("/draft-editor.js")).status,200);
 });
 

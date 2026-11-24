@@ -53,7 +53,8 @@ test("one card per platform, each with its own caption, media and checks",()=>{
   }
   assert.match(html,/data-shared="facebook"/,"TikTok shared gallery points at the Facebook tiles");
   assert.match(html,/1 description is missing/,"first render already shows the Bluesky problem");
-  assert.match(html,/not the crop a platform will deliver/);
+  assert.match(html,/class="action-warning e" href="#bs-alt-1">1 description is missing/);
+  assert.match(html,/class="help-copy" id="help-gallery-controls">[^<]*crop images differently/);
 });
 
 test("form field names the server parses are unchanged",()=>{
