@@ -7,7 +7,7 @@ import { allowedLogins, missingSecrets, type Env } from "./env.ts";
 import { audit, attachDraftImage, markXOpened, attachDraftVideo, createPost, getPost, saveEditorDraft, listPosts, listCalendarPosts, MONTH_CALENDAR_PAGE_SIZE, pinLocked, recordPinFailure, type BlueskyDraft, type Post, tiktokMedia } from "./db.ts";
 import { markTikTokInboxApproved, markTikTokCreatorPublished, reopenTikTokInboxDraft, reconcileOldTikTokInboxDrafts, searchPosts, searchActivity, normalizedSearch, getTikTokHistoryState, type HistoryPost, type Paged, type TikTokHistoryState } from "./history.ts";
 import { checkBluesky } from "./bluesky.ts";
-import { esc, html, page } from "./html.ts";
+import { actionWarning, esc, helpTip, html, page } from "./html.ts";
 import { POSTER_FAVICON } from "./favicon.ts";
 import { CALENDAR_JS, MONTH_CALENDAR_JS, renderCalendar, renderMonthCalendar, weekStart, weekRange, monthStart, monthRange, calendarReturnAfterMove } from "./calendar.ts";
 import { blankNewDraft, presetNewDraft, newDraftPrefill, parseNewDraft, renderNewDraft, soonestDraftTime, type NewDraftFields } from "./new-draft.ts";
@@ -431,9 +431,6 @@ async function dashboard(env: Env, session: Session, params: URLSearchParams): P
   const body =
     (missing.length ? '<div class="notice err">Not fully set up. Missing secrets: ' +
       missing.map(esc).join(", ") + '.</div>' : '') +
-    '<div class="hero"><div class="hero-kicker">GS Grimoire editorial planner</div>' +
-    '<h2>Drafts and the planner</h2>' +
-    '<p>Review and approve your saved drafts. Scheduled posts, TikTok inbox transfers, published posts and activity are in History.</p></div>' +
     '<div class="row" style="justify-content:space-between;align-items:center">' +
     '<h2 style="margin:0">'+(view==="month"?"Monthly":"Weekly")+' planner</h2><div class="inline-actions">' +
     '<a class="btn" href="/history">View History</a>' +
@@ -471,9 +468,8 @@ async function historyPage(env: Env, session: Session, params: URLSearchParams):
       '<p class="empty">No matching activity.</p>') +
     pager(activity,params,"activity_page","/history","activity") + '</div></details>';
   const body =
-    '<div class="hero"><div class="hero-kicker">Post and transfer records</div>' +
-    '<h2>History</h2><p>Search all queued, inbox, published and completed records, plus the activity log. ' +
-    'TikTok inbox transfers are not automatically published.</p></div>' +
+    '<div class="help-heading"><h2>History</h2>' +
+    helpTip("History records", "TikTok inbox transfers are finished and published in the TikTok app.") + '</div>' +
     '<form class="history-search" method="get" action="/history" role="search">' +
     '<label for="history-q">Search history</label>' +
     '<input type="search" id="history-q" name="q" maxlength="120" placeholder="Search posts, captions, labels or activity" value="' +
@@ -590,7 +586,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   let actions = instagramJobCard(igJob, p.id, csrf, (iso) => formatLocal(new Date(iso), env.TIMEZONE));
   const postVideo=ttMedia.video;
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && !tiktokConn) {
-    actions += '<div class="step-card"><div class="eyebrow">TikTok | Connection required</div><h3>Connect your TikTok account</h3><p class="hint">Your draft is safe. Connect TikTok before sending a video or carousel to your TikTok inbox.</p><p><a class="btn" href="/tiktok/settings">Open TikTok settings</a></p></div>';
+    actions += actionWarning("Connect TikTok to send this draft", "/tiktok/settings", "e");
   }
   if ((postVideo||ttMedia.images.length) && p.tiktok_enabled && tiktokConn) {
     const ttRetry=!!tiktokTransfer&&canRetryTikTokTransfer(tiktokTransfer);
@@ -733,7 +729,7 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
   if (p.status === "scheduled" && tiktokState !== "inbox" && p.scheduled_at) {
     actions += `<form method="post" action="/post/${p.id}/reschedule" class="card">${hidden}
       <h2>Change release time</h2>
-      <p class="hint">Moves the pending schedule without creating another post. Facebook and Bluesky are updated together when both are pending.</p>
+      ${helpTip("Changing release time", "Facebook and Bluesky are updated together when both are pending.")}
       <label for="move-time">New release time (${esc(env.TIMEZONE)})</label>
       <input id="move-time" type="datetime-local" name="when" value="${esc(whenValue)}" required>
       <label for="move-pin">Approval PIN</label><input id="move-pin" type="password" name="pin" required autocomplete="off">

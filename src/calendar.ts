@@ -1,6 +1,6 @@
 import type { Env } from "./env.ts";
 import type { Post } from "./db.ts";
-import { esc } from "./html.ts";
+import { esc, helpTip } from "./html.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 
 export function dayPlus(day: string, offset: number): string {
@@ -313,14 +313,13 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
     '<a href="/calendar?view=week&week=' + dayPlus(start,7) + '">Next</a></div>' +
     '<nav class="calendar-view-toggle" aria-label="Planner view">' +
     '<a href="/calendar?view=week&week=' + start + '" aria-current="page">Week</a>' +
-    '<a href="/calendar?view=month&month=' + dayPlus(start,3).slice(0,7) + '">Month</a></nav></div>' +
+    '<a href="/calendar?view=month&month=' + dayPlus(start,3).slice(0,7) + '">Month</a></nav>' +
+    helpTip("Using the week planner", env.TIMEZONE + ". Click a free slot to draft, or drag a pending post to move it. Grey slots are unavailable. Moving an approved post requires your PIN.") + '</div>' +
     '<div class="calendar-legend"><span><i class="calendar-swatch" style="background:var(--accent2)"></i>Draft</span>' +
     '<span><i class="calendar-swatch" style="background:#6099df"></i>Scheduled</span>' +
     '<span><i class="calendar-swatch" style="background:var(--ok)"></i>Published</span></div>' +
     '<div class="calendar-window" data-zone="' + esc(env.TIMEZONE) + '"><div class="calendar-inner">' + header + '<div class="calendar-days">' +
     timeAxis + cols + '</div></div></div>' +
-    '<p class="calendar-info">Copenhagen time. Click an available empty timeslot to create a draft, hover for details, or drag a pending post to reschedule. ' +
-    'Grey slots are past, less than 12 minutes away, or beyond 30 days. Creating a draft never publishes; moving an approved post requires your PIN. Published posts remain visible.</p>' +
     '<dialog class="cal-modal" id="cal-dialog"><h2>Reschedule <span id="cal-moving"></span></h2>' +
     '<form method="post" id="cal-form"><input type="hidden" name="csrf" value="' + esc(csrf) + '">' +
     '<input type="hidden" name="expected_updated_at"><input type="hidden" name="return_to" value="/calendar?view=week&amp;week=' + start + '">' +
@@ -450,17 +449,14 @@ export function renderMonthCalendar(
     '<div class="calendar-legend"><span><i class="calendar-swatch" style="background:var(--accent2)"></i>Draft</span>'+
     '<span><i class="calendar-swatch" style="background:#6099df"></i>Scheduled</span>'+
     '<span><i class="calendar-swatch" style="background:var(--ok)"></i>Published</span></div>'+
+    helpTip("Using the month planner", env.TIMEZONE + ". Click a day to plan it, or click a post to edit it. Drag a pending post or select Move. Confirm changes to approved posts with your PIN.") +
     '<div class="calendar-month-wrap"><div class="calendar-month-grid">'+weekdays+cells.join("")+'</div></div>'+
     (paging.page > 1 || paging.hasNext
       ? '<nav class="calendar-nav" aria-label="Month post pages" style="margin-top:12px">'+
         (paging.page>1?'<a href="/calendar?view=month&amp;month='+month+'&amp;month_page='+(paging.page-1)+'">Previous posts</a>':'')+
         '<strong>Month posts page '+paging.page+'</strong>'+
         (paging.hasNext?'<a href="/calendar?view=month&amp;month='+month+'&amp;month_page='+(paging.page+1)+'">Next posts</a>':'')+
-        '</nav><p class="calendar-month-info">High-volume month: some days may continue on another page. No posts are silently omitted.</p>':'')+
-    '<p class="calendar-month-info">Dates use '+esc(env.TIMEZONE)+'. Posts are listed by day; unscheduled drafts are marked. '+
-    'Click a post to edit it. Click a day to open its week and select a precise time for a new draft. '+
-    'Drag a pending post to another day or select Move to review its date and time. '+
-    'Nothing is rescheduled or published until you confirm with your PIN.</p>'+
+        '</nav><p class="calendar-month-info">Some days continue on another page.</p>':'')+
     (csrf ? '<dialog class="cal-modal" id="month-cal-dialog"><h2>Move <span id="month-cal-moving"></span></h2>'+
       '<form method="post" id="month-cal-form"><input type="hidden" name="csrf" value="'+esc(csrf)+'">'+
       '<input type="hidden" name="expected_updated_at">'+

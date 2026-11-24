@@ -200,5 +200,5 @@ test("monthly calendar query does not discard posts after the weekly 500-item ca
     new Date("2031-04-15T12:00:00Z"),{page:1,hasNext:true});
   assert.match(html,/Month posts page 1/);
   assert.match(html,/month_page=2/);
-  assert.match(html,/some days may continue on another page/);
+  assert.match(html,/Some days continue on another page/);
 });

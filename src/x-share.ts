@@ -13,7 +13,7 @@
  * Recording a click sends nothing anywhere, so it needs session, same-origin
  * and CSRF checks but no PIN.
  */
-import { esc } from "./html.ts";
+import { esc, helpTip } from "./html.ts";
 import type { Post } from "./db.ts";
 import { formatLocal } from "./time.ts";
 
@@ -81,7 +81,7 @@ export function renderXCard(p: Post, csrf: string, tz: string): string {
     ${opened ? `<p data-x-spent><button type="button" disabled>Opened in X</button></p>` : ""}
     <p data-x-link${x.empty ? " hidden" : ""}><a class="btn" href="${esc(x.href)}" target="_blank" rel="noopener noreferrer" data-x-open>${opened ? "Reopen in X" : "Open in X"}</a></p>
     <p class="hint" data-x-status${opened ? "" : " hidden"}>${status}</p>
-    <p class="hint">Fills in the text and link in a new tab. You attach any image or video and press Post in X.</p>
+    ${helpTip("Sharing on X", "Opens X with the text and link. Attach media and publish from X.")}
     <p class="hint" data-x-note${x.note ? "" : " hidden"}>${esc(x.note)}</p>
     <p class="hint media-error" data-x-error hidden></p>
   </section><script src="/x-share.js" defer></script>`;

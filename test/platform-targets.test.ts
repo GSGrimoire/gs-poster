@@ -92,7 +92,7 @@ test("horizontal platform overview keeps inactive destinations visible and disti
   }
   assert.match(html,/data-overview-platform="instagram" data-release-issue=""/);
   assert.match(html,/platform-overview-row is-inactive/);
-  assert.match(html,/Select to add this destination/);
+  assert.match(html,/Select a destination to reuse existing post media/);
   assert.match(html,/Saving and selecting platforms never publishes anything/);
   assert.match(html,/data-overview-edit="instagram" href="#target-instagram" hidden/);
   assert.match(html,/Enter a public TikTok carousel title/);

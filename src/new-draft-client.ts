@@ -46,20 +46,32 @@ export const NEW_DRAFT_JS = String.raw`
       k==="video" ? (video ? video.name : "No video selected") : "Text only";
     summary("summary-timing").textContent=asap.value==="1" ? "Earliest available" :
       time.value ? time.value.replace("T"," ") : "Unscheduled";
-    let warning="";
-    if(!platforms.length)warning="Select a destination";
+    let warning="", field="draft-content-title";
+    const missingDescription = images.find(x=>x.targets?.bluesky?.checked&&!x.alt?.value.trim());
+    if(!platforms.length){warning="Select a destination";field="draft-platform-title";}
     else if(tt&&k==="text")warning="Choose images or video for TikTok";
-    else if(tt&&(ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000))warning="Shorten TikTok caption";
+    else if(tt&&(ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000)){warning="Shorten TikTok caption";field="new-tiktok-caption";}
     else if(k==="images"&&!images.length)warning="Add artwork";
     else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&selectedCount(name)>platformLimits[name])) warning="Reduce images for the highlighted destination";
     else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&!selectedCount(name)&&
       !(name==="facebook"&&mainCaption.value.trim())&&!(name==="bluesky"&&bsCaption.value.trim())))
       warning="Assign media or write a text-only caption for each destination";
-    else if(k==="images"&&bs&&images.some(x=>x.targets?.bluesky?.checked&&!x.alt?.value.trim()))warning="Describe selected Bluesky images";
+    else if(k==="images"&&bs&&missingDescription){warning="Describe the first highlighted Bluesky image";field=missingDescription.alt.id;}
     else if(k==="video"&&!video)warning="Add an MP4";
-    else if(k==="video"&&bs&&!$("new-video-alt").value.trim())warning="Describe Bluesky video";
-    summary("summary-readiness").textContent=created?"Draft saved, upload in progress":warning||"Ready to save";
-    summary("new-tiktok-caption-advice").hidden=!tt;
+    else if(k==="video"&&bs&&!$("new-video-alt").value.trim()){warning="Describe Bluesky video";field="new-video-alt";}
+    const issue = summary("summary-readiness");
+    issue.hidden = created || !warning;
+    issue.textContent = warning;
+    issue.href = "#" + field;
+    for (const item of images) {
+      if (!item.alt) continue;
+      if (bs && k === "images" && item.targets.bluesky?.checked && !item.alt.value.trim()) {
+        item.alt.setAttribute("aria-invalid", "true");
+      } else item.alt.removeAttribute("aria-invalid");
+    }
+    if (bs && k === "video" && video && !$("new-video-alt").value.trim()) {
+      $("new-video-alt").setAttribute("aria-invalid", "true");
+    } else $("new-video-alt").removeAttribute("aria-invalid");
     summary("new-tiktok-panel").hidden=!tt;
     summary("new-facebook-panel").hidden=!target("facebook");
     const max=63206;
@@ -68,13 +80,14 @@ export const NEW_DRAFT_JS = String.raw`
     summary("new-bs-count").textContent=bsCaption.value.length+" / 300";
     summary("new-tiktok-count").textContent=(ttCaption.value.trim()||mainCaption.value).length+" / "+(k==="video"?2200:4000);
     summary("new-tiktok-count").classList.toggle("media-error",tt && (ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000));
-    summary("new-timing-advice").textContent=tt?
-      "The calendar time is for planning. TikTok does not publish automatically; later select an inbox upload or private test post and approve with your PIN." :
-      "Saving is never approval. Facebook and Bluesky publish only after separate approval with your PIN.";
     mediaCount();
   }
+  $("summary-readiness").addEventListener("click", event => {
+    document.getElementById(event.currentTarget.hash.slice(1))?.focus({preventScroll:true});
+  });
   function renumberImages() {
     for(const [index,item] of images.entries()) {
+      item.alt.id="new-image-alt-"+index;
       item.number.textContent="Image "+(index+1)+" of "+images.length;
       item.label.firstChild.textContent="Alternative text for image "+(index+1);
       item.up.disabled=index===0;
@@ -187,9 +200,6 @@ export const NEW_DRAFT_JS = String.raw`
       if(item.targetContainer)for(const [name,node] of Object.entries(item.targetLabels)) node.hidden=!target(name);
     }
     $("new-video-alt").required=bs&&k==="video";
-    $("new-platform-advice").textContent=tt?
-      "TikTok images and videos can go to your inbox for manual publication. Private direct posts are a separate, explicitly approved action. Calendar times never auto-publish to TikTok.":
-      "Facebook and Bluesky publication requires your approval PIN. Save here only creates a draft.";
     updateSummary();
   }
   form.querySelectorAll('input[name="content_kind"],input[name="facebook"],input[name="bluesky"],input[name="tiktok"]')

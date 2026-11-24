@@ -43,7 +43,7 @@ test("new form creates a pending, unapproved post with optional video placeholde
 
 test("new draft form escapes content and never includes approval or PIN controls",()=>{
   const html=renderNewDraft({...blankNewDraft(slot),label:'<img src=x onerror="alert(1)">',message:"<hello>"},'csrf<&"',zone,"Example <error>");
-  assert.match(html,/New post draft/);
+  assert.match(html,/<h2>New draft<\/h2>/);
   assert.match(html,/name="csrf"/);
   assert.match(html,/value="2026-10-28T16:30"/);
   assert.match(html,/&#60;img src=x/);

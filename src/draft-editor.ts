@@ -4,13 +4,13 @@
  * New media still arrives through the private upload/attach routes; the editor
  * can only remove media or change Bluesky alternative text.
  */
-import { esc } from "./html.ts";
+import { actionWarning, esc, helpTip } from "./html.ts";
 import { renderEditorialReview } from "./preflight.ts";
 import { tiktokMedia, type BlueskyDraft, type EditorDraft, type Post } from "./db.ts";
 import { BSKY_TEXT_LIMIT, textLength } from "./bluesky.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 import { captionLimit, checkTarget, PLATFORM_ORDER, PLATFORMS, platformRulesJson, FACEBOOK_CAPTION_MAX,
-  type PlatformId, type TargetState } from "./platforms.ts";
+  STUDIO_CAPTION_IDS, type PlatformId, type TargetField, type TargetState } from "./platforms.ts";
 import type { TikTokReleasePlan } from "./tiktok-release.ts";
 import type { InstagramPlan } from "./instagram-publish.ts";
 import { parseGitHubUrl } from "./media.ts";
@@ -321,10 +321,42 @@ function formatLine(id: PlatformId): string {
   ].filter(Boolean).join(" | ");
 }
 
-function checkItems(t: TargetState): string {
-  const c = checkTarget(t);
-  if (!c.errors.length && !c.warnings.length) return `<li class="ok">Media checks passed for ${esc(PLATFORMS[t.id].label)}. Delivery is checked at release.</li>`;
-  return [...c.errors.map((e) => `<li class="e">${esc(e)}</li>`), ...c.warnings.map((w) => `<li class="w">${esc(w)}</li>`)].join("");
+function fieldId(platform: PlatformId, field: TargetField, post: Post): string {
+  if (field === "caption") return STUDIO_CAPTION_IDS[platform];
+  if (field === "title") return "ed-tiktok-title";
+  if (field === "upload") return "ed-media";
+  if (field === "description") {
+    const bs = post.bluesky ?? post.bluesky_paused;
+    if (bs?.video) return "bs-video-alt";
+    const index = bs?.images.findIndex(image => !image.alt.trim()) ?? -1;
+    if (index >= 0) return "bs-alt-" + index;
+  }
+  return "gallery-" + platform;
+}
+
+function releaseLink(platform: PlatformId | undefined, message: string): string {
+  if (!platform) return "#ed-when";
+  if (platform === "facebook") return "#ed-message";
+  if (platform === "tiktok") {
+    if (/settings/i.test(message)) return "/tiktok/settings";
+    if (/title/i.test(message)) return "#ed-tiktok-title";
+    if (/caption/i.test(message)) return "#ed-tiktok";
+    if (/reattach|add photos/i.test(message)) return "#ed-media";
+  }
+  if (platform === "bluesky") {
+    if (/Patreon \/posts\//.test(message)) return "#ed-patreon-url";
+    if (/Patreon card needs/.test(message)) return "#ed-patreon-title";
+    if (/video.+(description|accessibility)/i.test(message)) return "#bs-video-alt";
+    const image = /Image (\d+).+alternative text/.exec(message);
+    if (image) return "#bs-alt-" + (Number(image[1]) - 1);
+    if (/caption|grapheme/.test(message)) return "#ed-bs";
+  }
+  return "#gallery-" + platform;
+}
+
+function checkItems(t: TargetState, p: Post): string {
+  return checkTarget(t).findings.map(f =>
+    `<li>${actionWarning(f.message, "#" + fieldId(t.id, f.field, p), f.level)}</li>`).join("");
 }
 
 const photos = (n: number) => (n ? n + (n === 1 ? " photo" : " photos") : "text only");
@@ -335,45 +367,32 @@ export function renderPlatformOverview(p: Post, states: Record<PlatformId, Targe
   const rows = PLATFORM_ORDER.map(id => {
     const rule = PLATFORMS[id], enabled = on[id], state = states[id], checks = checkTarget(state);
     const media = state.video ? "1 video" : state.photos === 1 ? "1 photo" : state.photos + " photos";
-    const caption = id === "facebook" ? p.message : id === "tiktok" ? p.tiktok_caption ?? p.message
-      : id === "bluesky" ? (p.bluesky ?? p.bluesky_paused)?.caption ?? ""
-      : (p.instagram ?? p.instagram_paused)?.caption ?? "";
-    const excerpt = caption.trim().slice(0, 92);
-    const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered
-      ? view.tiktokPlan.reason
-      : view.releaseProblems.find(problem => problem.platform === id)?.message ?? "";
-    const issue = checks.errors[0] || releaseIssue;
-    const extra = id === "instagram" && enabled && !view.instagramPlan?.ok
-      ? "Manual download until Instagram is connected and its publishing requirements are met."
-      : enabled && sourceCount > 0 && !state.photos && !state.video
-        ? "No image selected. This platform will send text only if supported."
-        : enabled && sourceCount > rule.maxPhotos && state.photos === rule.maxPhotos
-          ? "Only the first " + rule.maxPhotos + " source images were selected. Review the gallery."
-          : !enabled ? "Select to add this destination. Existing media is offered on first activation." : "";
+    const releaseIssue = id === "tiktok" && view.tiktokPlan && !view.tiktokPlan.ok && view.tiktokPlan.offered &&
+      releaseLink(id, view.tiktokPlan.reason) === "/tiktok/settings" ? view.tiktokPlan.reason : "";
     const manual = id === "instagram" && !view.instagramPlan?.ok;
-    const mediaReview = enabled && sourceCount > 0 && !state.photos && !state.video && id !== "facebook";
-    const status = !enabled ? "Not selected" : checks.errors.length
-      ? checks.errors.length + (checks.errors.length === 1 ? " problem" : " problems")
-      : issue ? "Needs setup" : manual ? "Manual" : mediaReview ? "Review media" :
-        checks.warnings.length ? "Prepared, " + checks.warnings.length + (checks.warnings.length === 1 ? " note" : " notes") : "Prepared";
-    return `<div class="platform-overview-row${enabled ? "" : " is-inactive"}${checks.errors.length && enabled ? " has-e" : ""}"
-      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}" data-manual="${manual ? "1" : "0"}" data-has-source="${sourceCount ? "1" : "0"}">
+    const clipped = enabled && sourceCount > rule.maxPhotos && state.photos === rule.maxPhotos
+      ? "Review the selected photos. This platform allows " + rule.maxPhotos + "." : "";
+    const finding = checks.findings[0];
+    const blocking = finding?.level === "e" || !!releaseIssue;
+    const problem = finding?.level === "e" ? finding.message : releaseIssue || finding?.message || clipped;
+    const href = finding?.level === "e" || (!releaseIssue && finding)
+      ? "#" + fieldId(id, finding.field, p)
+      : releaseIssue ? releaseLink(id, releaseIssue) : "#gallery-" + id;
+    const status = !enabled ? "Not selected" : blocking ? "Needs attention"
+      : manual ? "Manual download" : problem ? "Review" : "Prepared";
+    return `<div class="platform-overview-row${enabled ? "" : " is-inactive"}${blocking && enabled ? " has-e" : ""}"
+      data-overview-platform="${id}" data-release-issue="${esc(releaseIssue)}" data-release-href="${esc(releaseLink(id, releaseIssue))}" data-manual="${manual ? "1" : "0"}" data-source-count="${sourceCount}">
       <label class="platform-overview-name"><input type="checkbox" name="p_${id}" value="1"
         data-platform-toggle="${id}"${enabled ? " checked" : ""}> <strong>${esc(rule.label)}</strong></label>
       <span class="platform-overview-media" data-overview-media="${id}">${esc(media)}</span>
       <div class="platform-overview-check"><strong data-ready="${id}" aria-live="polite">${esc(status)}</strong>
-        <span data-overview-issue="${id}">${esc(issue || extra || checks.warnings[0] || "No outstanding media checks.")}</span>
-        ${issue && extra ? `<span class="platform-overview-extra">${esc(extra)}</span>` : ""}
-        <span class="platform-overview-caption">${esc(excerpt ? "Caption: " + excerpt + (caption.trim().length > 92 ? "…" : "") : "Caption: not yet written")}</span></div>
+        <a data-overview-issue="${id}" class="action-warning ${blocking ? "e" : "w"}" href="${esc(href)}"${enabled && problem ? "" : " hidden"}>${esc(problem)}</a></div>
       <a data-overview-edit="${id}" href="#target-${id}"${enabled ? "" : " hidden"}>Edit ${esc(rule.label)}</a>
     </div>`;
   }).join("");
   return `<section class="ed-card platform-overview" aria-labelledby="ed-platforms">
-    <h3 id="ed-platforms">Prepare destinations</h3>
-    <p class="hint">All platforms stay visible. Select a destination to reuse existing post media on first activation.
-      Inactive platforms are greyed out and excluded from approval. Previously customized galleries are preserved.
-      Saving and selecting platforms never publishes anything.</p>
-    <ol class="studio-steps" aria-label="Preparation steps"><li>1. Select destinations</li><li>2. Fix each platform\'s requirements</li><li>3. Review and approve with your PIN</li></ol>
+    <div class="help-heading"><h3 id="ed-platforms">Destinations</h3>${helpTip("Choosing destinations",
+      "Select a destination to reuse existing post media on first activation. Paused platforms keep their captions and galleries. Saving and selecting platforms never publishes anything.")}</div>
     <div class="platform-overview-list">${rows}</div>
   </section>`;
 }
@@ -400,11 +419,11 @@ export function renderDraftEditor(v: EditorView): string {
     : p.images.map((url, i) => tile(`/media/${p.id}/${i}`, `Facebook photo ${i + 1}`, "remove_fb_" + i, "", p.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
   const bsMedia = bs?.video
     ? video(`/video/${p.id}/bluesky`, "remove_bs_video",
-      `<label>Describe the video<input type="text" name="bs_video_alt" maxlength="${MAX_ALT}" value="${esc(bs.video.alt)}"></label>`)
+      `<label>Describe the video<input id="bs-video-alt" type="text" name="bs_video_alt" maxlength="${MAX_ALT}" value="${esc(bs.video.alt)}"></label>`)
     : (bs?.images ?? []).map((img, i) => tile(`/media/${p.id}/${i}?platform=bluesky`, `Bluesky photo ${i + 1}`, "remove_bs_" + i,
-      `<label>Describe the image<input type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined, pool.indexOf(img.url))).join("");
+      `<label>Describe the image<input id="bs-alt-${i}" type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined, pool.indexOf(img.url))).join("");
   const ttMedia = ttShared
-    ? `<p class="hint shared-note">TikTok is currently using legacy shared Facebook media. Enabling TikTok and saving makes its gallery independent.</p>`
+    ? `<span class="hint shared-note">Using Facebook media</span>`
     : tt.video
       ? video(`/video/${p.id}/tiktok`, "remove_tt_video")
       : tt.images.map((url, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
@@ -424,9 +443,8 @@ export function renderDraftEditor(v: EditorView): string {
       <fieldset class="ig-release">
         <legend class="sr-only">Instagram</legend>
         <label><input type="checkbox" name="target_instagram" value="1" checked data-ig-toggle> Instagram | ${igWhat}</label>
-        <p class="hint">Caption: ${esc(igOk.caption.slice(0, 140))}${igOk.caption.length > 140 ? "..." : ""} (edit it in the Instagram card; it saves automatically)</p>
         <label><input type="checkbox" name="confirm_instagram" value="1" required data-ig-required> Post this to the GS Grimoire Instagram automatically ${p.scheduled_at ? "at " + esc(v.whenText) : "within a few minutes"}.</label>
-      </fieldset>` : igPlan && !igPlan.ok && igPlan.offered ? `<p class="hint">Instagram: ${esc(igPlan.reason)}</p>` : "";
+      </fieldset>` : igPlan && !igPlan.ok && igPlan.offered ? `${actionWarning(igPlan.reason, "#target-instagram", "e")}` : "";
   const canRelease = fbBs || !!ttOk || !!igOk;
   const scheduledOthers = fbBs && p.scheduled_at;
   const ttPreview = ttOk ? (ttOk.type === "VIDEO"
@@ -440,12 +458,12 @@ export function renderDraftEditor(v: EditorView): string {
           ${ttPreview}
           <p class="hint">${ttOk.type === "VIDEO"
             ? "TikTok takes no caption for inbox videos; add it in the app."
-            : `Title: <strong>${esc(ttOk.title)}</strong>. Caption: ${esc(ttOk.caption.slice(0, 140))}${ttOk.caption.length > 140 ? "..." : ""} <span class="tt-edit">(edit it in the TikTok card; it saves automatically)</span>`}</p>
+            : `Title: <strong>${esc(ttOk.title)}</strong>. Caption: ${esc(ttOk.caption.slice(0, 140))}${ttOk.caption.length > 140 ? "..." : ""} `}</p>
           <p class="tt-now" role="note"><strong>Sent to your TikTok inbox the moment you approve</strong>${scheduledOthers ? `, even though ${p.facebook_enabled && p.bluesky ? "Facebook and Bluesky are" : p.facebook_enabled ? "Facebook is" : "Bluesky is"} scheduled for ${esc(v.whenText)}` : ""}. Nothing is published on TikTok: you finish and post it in the TikTok app.</p>
           <label><input type="checkbox" name="is_aigc" value="1"> AI-generated content (declared to TikTok)</label>
           <label><input type="checkbox" name="confirm_tiktok" value="1" required data-tt-required> I have the rights to this media and want it sent to TikTok now.</label>
         </div>
-      </fieldset>` : ttPlan && !ttPlan.ok && ttPlan.offered ? `<p class="hint tt-blocked">TikTok: ${esc(ttPlan.reason)}</p>` : "";
+      </fieldset>` : ttPlan && !ttPlan.ok && ttPlan.offered ? `${actionWarning(ttPlan.reason, releaseLink("tiktok", ttPlan.reason), "e")}` : "";
   const effects = [
     ...(ttOk ? [`<li><strong>Now:</strong> TikTok inbox</li>`] : []),
     ...(fbBs || igOk ? [`<li><strong>${p.scheduled_at ? esc(v.whenText) : "Now"}:</strong> ${[p.facebook_enabled ? "Facebook" : "", p.bluesky ? "Bluesky" : "", igOk ? "Instagram" : ""].filter(Boolean).join(", ")}</li>`] : []),
@@ -459,13 +477,13 @@ export function renderDraftEditor(v: EditorView): string {
       <div class="eyebrow">Release</div>
       <h3>${!fbBs && !igOk ? "Send to your TikTok inbox" : p.scheduled_at ? "Schedule for " + esc(v.whenText) : "Post as soon as you approve"}</h3>
       ${releaseTargets}
-      ${p.facebook_enabled && p.video ? '<p class="hint">Facebook video limit: 20 MB. Private video uploads allow up to 50 MB for other platforms. A larger video cannot be approved for Facebook until you replace it or deselect Facebook.</p>' : ''}
-      ${v.releaseProblems.length && fbBs ? `<ul class="checks">${v.releaseProblems.map(({message}) => `<li class="e">${esc(message)}</li>`).join("")}</ul>` : ""}
+      ${p.facebook_enabled && p.video ? helpTip("Facebook video limit", "Facebook accepts video up to 20 MB. Replace a larger video or deselect Facebook before approval.") : ""}
+      ${v.releaseProblems.length && fbBs ? `<ul class="action-checks">${v.releaseProblems.map(({message, platform}) =>
+        `<li>${actionWarning(message, releaseLink(platform, message), "e")}</li>`).join("")}</ul>` : ""}
       ${p.facebook_enabled && p.images.length > 12 ? `<label><input type="checkbox" name="reviewed_all_images" value="1" required> I reviewed all ${p.images.length} Facebook photos.</label>` : ""}
       ${v.mediaLooksPending ? `<label><input type="checkbox" name="publish_without_media" value="1"> The name says media is pending, but Facebook has none. Publish without media anyway.</label>` : ""}
       ${fbBs && p.scheduled_at ? `<label class="rollover"><input type="checkbox" name="auto_rollover" value="1"> Automatically move to the next valid time if necessary</label>
-      <p class="hint">Off: if ${esc(v.whenText)} has become too close, approval is refused and you pick a new time. On: it moves to the earliest valid time and tells you the new time.</p>`
-      : p.facebook_enabled && p.images.length ? `<p class="hint">Photo posts go through the upload queue and usually appear on Facebook within a few minutes.</p>` : ""}
+      ${helpTip("Automatic schedule adjustment", "If the time is too close, this moves it to the earliest valid time. Otherwise you need to pick a new time.")}` : ""}
       ${igBlock}
       ${ttBlock}
       ${effects.length > 1 ? `<ul class="effects" aria-label="What approving does">${effects.join("")}</ul>` : ""}
@@ -473,12 +491,14 @@ export function renderDraftEditor(v: EditorView): string {
       <input id="release-pin" type="password" name="pin" inputmode="numeric" autocomplete="off" required>
       <p class="hint release-dirty" id="release-dirty" hidden>Saving your changes. Approval unlocks when they are saved; it releases the saved version.</p>
       <div class="row"><button class="primary" id="release-button">${buttonText}</button></div>
-      <p class="rail-note">Releases exactly the saved draft. Each platform's result is shown separately; nothing is retried automatically.</p>
       ${p.instagram && !igOk ? `<p class="rail-note">Instagram is not released here${igPlan && !igPlan.ok && !igPlan.offered ? " until it is connected" : ""}. Download its media from the Instagram card.</p>` : ""}
     </form>` : p.tiktok_enabled ? `<div class="release-card"><div class="eyebrow">Release</div><h3>TikTok</h3>
-      <p class="hint">${esc(ttPlan && !ttPlan.ok ? ttPlan.reason : "Nothing to release yet.")}</p></div>`
+      ${ttPlan && !ttPlan.ok && ttPlan.offered
+        ? actionWarning(ttPlan.reason, releaseLink("tiktok", ttPlan.reason), "e")
+        : esc(ttPlan && !ttPlan.ok ? ttPlan.reason : "Nothing to release yet.")}</div>`
     : `<div class="release-card"><div class="eyebrow">Release</div><h3>Instagram only</h3>
-      <p class="hint">${esc(igPlan && !igPlan.ok ? igPlan.reason : "Nothing to release yet.")} Download the finished media from the Instagram card.</p></div>`;
+      ${igPlan && !igPlan.ok && igPlan.offered
+      ? actionWarning(igPlan.reason, "#target-instagram", "e") : `<a href="#target-instagram">Prepare Instagram media</a>`}</div>`;
 
   return `
 <style>
@@ -519,8 +539,6 @@ export function renderDraftEditor(v: EditorView): string {
 .adder>summary::-webkit-details-marker{display:none}
 .adder[open]{flex-basis:100%}
 .adder[open]>summary{border-style:solid;margin-bottom:12px}
-.studio-steps{list-style:none;display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px;padding:0}
-.studio-steps li{font:12px system-ui,sans-serif;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
 .platform-overview-list{display:grid;gap:8px}
 .platform-overview-row{display:grid;grid-template-columns:minmax(120px,1fr) minmax(72px,.6fr) minmax(190px,2fr) auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg);font:13px system-ui,sans-serif}
 .platform-overview-row.is-inactive{background:color-mix(in srgb,var(--bg) 65%,var(--line));color:var(--muted)}
@@ -532,31 +550,23 @@ export function renderDraftEditor(v: EditorView): string {
 .platform-overview-check strong{font-weight:650}
 .platform-overview-row.has-e .platform-overview-check strong{color:var(--err)}
 .platform-overview-check span{color:var(--muted);overflow-wrap:anywhere}
-.platform-overview-caption{font-size:12px;opacity:.85}
-.platform-overview-row a{text-align:right;white-space:nowrap}
+.platform-overview-row .action-warning{text-align:left;white-space:normal}
+.platform-overview-row [data-overview-edit]{text-align:right;white-space:nowrap}
 .platform-overview-row a[hidden]{display:none}
-@media(max-width:680px){.platform-overview-row{grid-template-columns:minmax(110px,1fr) auto;gap:6px 12px}.platform-overview-check{grid-column:1/-1;grid-row:2}.platform-overview-row a{grid-column:2;grid-row:1}}
+@media(max-width:680px){.platform-overview-row{grid-template-columns:minmax(110px,1fr) auto;gap:6px 12px}.platform-overview-check{grid-column:1/-1;grid-row:2}.platform-overview-row [data-overview-edit]{grid-column:2;grid-row:1}}
 .targets{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start;margin-top:12px}
 .target{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg);display:grid;gap:8px;min-width:0}
 /* A hidden target must not be shown by the author display:grid/flex styles. */
-.targets > .target[hidden],.readiness > li[hidden]{display:none!important}
+.targets > .target[hidden]{display:none!important}
 .target[data-state=error]{border-color:var(--err)}
 .target-head h4{font:650 16px system-ui,sans-serif;margin:0}
-.target-head .format{font:12.5px system-ui,sans-serif;color:var(--muted);margin:2px 0 0}
-.target-checks{margin:0;padding:8px 10px 8px 26px;border-radius:8px;background:var(--panel);font-size:13px}
-.target-checks .ok{color:var(--ok)}
+.target-checks{margin:0}
 .target textarea{min-height:140px}
 .target .tiles{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
 .tiles>.hint{grid-column:1/-1}
 .cap-label{margin:4px 0 0!important}
 .cap-row{display:flex;justify-content:space-between;align-items:end;gap:8px}
 .copy-cap{padding:5px 10px;font-size:12px}
-.readiness{list-style:none;display:flex;flex-wrap:wrap;gap:8px;margin:0 0 6px;padding:0;font:13px system-ui,sans-serif}
-.readiness li{display:flex;gap:6px;align-items:center;padding:6px 12px;border:1px solid var(--line);border-radius:99px;background:var(--bg)}
-.readiness li a{font-weight:650;text-decoration:none}
-.readiness [data-ready]{color:var(--ok)}
-.readiness li.has-e [data-ready]{color:var(--err)}
-.readiness li.has-w [data-ready]{color:var(--warn)}
 .ig-frames{border:0;padding:0;margin:4px 0 0;display:flex;flex-wrap:wrap;gap:6px}
 .ig-frames legend,.ig-mode legend{font:600 13px system-ui,sans-serif;color:var(--muted);padding:0;margin-bottom:6px}
 .seg{display:inline-flex!important;align-items:center;gap:6px;margin:0!important;padding:7px 12px;border:1px solid var(--line);border-radius:99px;background:var(--panel);cursor:pointer;font:600 13px system-ui,sans-serif!important;color:var(--text)!important}
@@ -604,7 +614,6 @@ export function renderDraftEditor(v: EditorView): string {
 .tt-more{align-self:center;font:600 12px system-ui,sans-serif;color:var(--muted)}
 .tt-video{width:100%;max-height:220px;border-radius:8px;background:#000}
 .tt-now{margin:0;padding:8px 10px;border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel));font:13px system-ui,sans-serif}
-.tt-edit{color:var(--muted)}
 .effects{list-style:none;margin:8px 0 0;padding:0;font:13px system-ui,sans-serif;display:grid;gap:2px}
 .tile-move{display:flex;align-items:center;gap:4px}
 .tile[draggable=true]{cursor:grab}
@@ -623,7 +632,6 @@ export function renderDraftEditor(v: EditorView): string {
 .tile-move button{padding:2px 9px;font-size:15px;line-height:1.2}
 .tile-move button:disabled{opacity:.35}
 .tile-pos{font:650 12px system-ui,sans-serif;color:var(--muted);margin-right:auto}
-.mode-line{font:13px system-ui,sans-serif;color:var(--muted);margin:-6px 0 14px}
 .rollover{font-weight:600!important;color:var(--text)!important}
 .save-state.failed{color:var(--err);font-weight:600}
 .time-row input{flex:1 1 210px}
@@ -637,7 +645,6 @@ export function renderDraftEditor(v: EditorView): string {
   ${v.notice ? `<div class="notice ok" role="status">${esc(v.notice)}</div>` : ""}
   ${p.status === "rejected" && p.note ? `<div class="notice">Your note for the drafting assistant: ${esc(p.note)}</div>` : ""}
   <div class="editor-head"><span class="chip s-${esc(p.status)}">${esc(p.status)}</span><strong>${esc(p.label || "Untitled draft")}</strong>${p.release ? `<span>${esc(p.release)}</span>` : ""}<span>${esc(v.whenText)}</span></div>
-  <p class="mode-line">Draft. Changes save automatically. Nothing is published until you approve with your PIN.</p>
   <div class="editor-grid">
   <form method="post" action="/post/${id}/save" id="draft-editor">
     <input type="hidden" name="csrf" value="${esc(v.csrf)}">
@@ -646,23 +653,22 @@ export function renderDraftEditor(v: EditorView): string {
     ${renderPlatformOverview(p, states, on, pool.length, v)}
 
     <section class="ed-card targets-card" aria-labelledby="ed-targets">
-      <h3 id="ed-targets">Each platform</h3>
-      <p class="hint">Thumbnails show the whole picture. They are not the crop a platform will deliver; the notes under each platform say what it does with other shapes.</p>
+      <div class="help-heading"><h3 id="ed-targets">Captions and galleries</h3>${helpTip("Gallery controls",
+        "Drag photos or use the arrow buttons to reorder them. Each platform may crop images differently from these thumbnails.")}</div>
       <div class="targets" data-rules="${esc(platformRulesJson())}">
-        <article class="target" id="target-facebook" data-platform="facebook"${hide(on.facebook)} aria-labelledby="tg-facebook">
-          <div class="target-head"><h4 id="tg-facebook">Facebook</h4><p class="format">${esc(formatLine("facebook"))}</p></div>
-          <ul class="checks target-checks" data-checks="facebook">${checkItems(states.facebook)}</ul>
+        <article class="target" id="target-facebook" data-platform="facebook"${hide(on.facebook)} aria-labelledby="tg-facebook" tabindex="-1">
+          <div class="target-head help-heading"><h4 id="tg-facebook">Facebook</h4>${helpTip("Facebook limits", formatLine("facebook") + ". " + PLATFORMS.facebook.delivery)}</div>
+          <ul class="action-checks target-checks" data-checks="facebook">${checkItems(states.facebook, p)}</ul>
           <label for="ed-message" class="cap-label">Caption</label>
           <textarea id="ed-message" name="message" maxlength="${FB_MAX}" data-max="${FB_MAX}" data-caption="facebook">${esc(p.message)}</textarea>
           <div class="field-meter"></div>
-          <p class="hint">${p.video ? "Facebook video limit: 20 MB, even though private storage and other targets allow up to 50 MB." : "Drag photos to change their order, or use the arrow buttons."}</p>
-          <div class="tiles" data-media="facebook" data-order="order_fb">${fbMedia || empty}</div>
+          <div class="tiles" id="gallery-facebook" tabindex="-1" data-media="facebook" data-order="order_fb">${fbMedia || empty}</div>
           ${!p.video && p.images.length > 1 ? `<input type="hidden" name="order_fb" value="${Array.from({ length: p.images.length }, (_, i) => i).join(",")}">` : ""}
         </article>
-        <article class="target target-ig" id="target-instagram" data-platform="instagram"${hide(on.instagram)} aria-labelledby="tg-instagram">
-          <div class="target-head"><h4 id="tg-instagram">Instagram</h4><p class="format">${esc(formatLine("instagram"))}</p></div>
-          <ul class="checks target-checks" data-checks="instagram">${checkItems(states.instagram)}</ul>
-          <fieldset class="ig-frames"><legend>Frame for every photo</legend>
+        <article class="target target-ig" id="target-instagram" data-platform="instagram"${hide(on.instagram)} aria-labelledby="tg-instagram" tabindex="-1">
+          <div class="target-head help-heading"><h4 id="tg-instagram">Instagram</h4>${helpTip("Instagram limits", formatLine("instagram") + ". " + PLATFORMS.instagram.delivery)}</div>
+          <ul class="action-checks target-checks" data-checks="instagram">${checkItems(states.instagram, p)}</ul>
+          <fieldset class="ig-frames" id="gallery-instagram" tabindex="-1"><legend>Frame for every photo</legend>
             ${INSTAGRAM_FRAMES.map((f) => `<label class="seg"><input type="radio" name="ig_frame" value="${f}"${f === igFrame ? " checked" : ""}> ${f === "4:5" ? "Portrait 4:5" : f === "1:1" ? "Square 1:1" : "Landscape 1.91:1"}</label>`).join("")}
           </fieldset>
           <div class="ig-bulk"><span class="hint">All photos:</span>
@@ -676,10 +682,10 @@ export function renderDraftEditor(v: EditorView): string {
             <option value="">Photo carousel, not a video</option>
             ${availableVideos.map((url,i)=>`<option value="${esc(url)}"${igVideo===url?" selected":""}>Video ${i+1} from this post</option>`).join("")}
           </select>
-          <p class="hint">Choose a video to prepare a Reel, or use the photos below. Switching to a video clears the Instagram photo selection after confirmation. You can also upload an Instagram-only MP4 in Add video.</p>
+          ${helpTip("Choosing Instagram media", "Choose photos or a video for a Reel. Switching to video clears the Instagram photo selection after confirmation. Upload a new MP4 under Add video.")}
           <div id="ig-reel-panel">
             <video id="ig-reel-preview" controls playsinline preload="metadata" style="max-width:100%;max-height:440px" src="/video/${p.id}/instagram"${ig?.video?"":" hidden"}></video>
-            <p class="hint" id="ig-reel-specs">Reels work best at 9:16 with H.264 video and Advanced Audio Coding audio. GS Poster does not transcode or crop video. Verify the source before posting in Instagram.</p>
+            ${helpTip("Instagram Reel format", "Reels work best at 9:16 with H.264 video and Advanced Audio Coding audio. Verify the original before posting. GS Poster leaves its encoding and frame intact.", "ig-reel-specs")}
             <p><a id="ig-reel-download" href="/instagram/${p.id}/video.mp4" download="instagram-${p.id}-reel.mp4"${ig?.video?"":" hidden"}>Download MP4 for Instagram Reel</a></p>
           </div>
           <input type="hidden" name="ig_items" id="ig-items-field" value="${esc(JSON.stringify(igItems))}">
@@ -695,21 +701,19 @@ export function renderDraftEditor(v: EditorView): string {
           </details>` : `<p class="hint">Add photos to the post first; Instagram picks from them.</p>`}
           ${on.instagram && igVideo && parseGitHubUrl(igVideo) ? `<div class="row"><button type="button" data-prepare-video="instagram">Prepare Instagram video privately</button></div>` : ""}
           <p class="hint" id="ig-unsaved" hidden>Save to download prepared Instagram media.</p>
-          <p class="hint ig-downloads" id="ig-downloads"${igItems.length ? "" : " hidden"}>${esc(PLATFORMS.instagram.delivery)}
-            ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" | ")}</p>
+          <p class="hint ig-downloads" id="ig-downloads"${igItems.length ? "" : " hidden"}>Download: ${igItems.map((_, n) => `<a href="/instagram/${p.id}/${n}.jpg" download="instagram-${p.id}-${n + 1}.jpg">Photo ${n + 1}</a>`).join(" | ")}</p>
         </article>
-        <article class="target" id="target-bluesky" data-platform="bluesky"${hide(on.bluesky)} aria-labelledby="tg-bluesky">
-          <div class="target-head"><h4 id="tg-bluesky">Bluesky</h4><p class="format">${esc(formatLine("bluesky"))}</p></div>
-          <ul class="checks target-checks" data-checks="bluesky">${checkItems(states.bluesky)}</ul>
+        <article class="target" id="target-bluesky" data-platform="bluesky"${hide(on.bluesky)} aria-labelledby="tg-bluesky" tabindex="-1">
+          <div class="target-head help-heading"><h4 id="tg-bluesky">Bluesky</h4>${helpTip("Bluesky limits", formatLine("bluesky") + ". " + PLATFORMS.bluesky.delivery)}</div>
+          <ul class="action-checks target-checks" data-checks="bluesky">${checkItems(states.bluesky, p)}</ul>
           <div class="cap-row"><label for="ed-bs" class="cap-label">Caption</label>
             <button type="button" class="copy-cap" data-copy-to="ed-bs" data-copy-from="ed-message">Copy Facebook caption</button></div>
           <textarea id="ed-bs" name="bs_caption" data-max="${BSKY_TEXT_LIMIT}" data-graphemes="1" data-caption="bluesky" placeholder="A short companion caption">${esc(bs?.caption ?? "")}</textarea>
           <div class="field-meter"></div>
           ${p.video ? `<div class="row"><button type="button" id="bs-copy-fb-video">Use Facebook video for Bluesky</button><input type="hidden" name="bs_copy_fb_video" id="bs-copy-fb-video-flag" value="0"></div><label for="bs-copy-video-alt">Video description for Bluesky when copying<input id="bs-copy-video-alt" type="text" name="bs_copy_video_alt" maxlength="1000" value="${esc(bs?.video?.alt??"")}" placeholder="Describe the action in the video"></label>` : ""}
-          <p class="hint">Drag photos within this gallery to reorder them, or use the arrows.</p>
-          <div class="tiles" data-media="bluesky" data-order="order_bs">${bsMedia || empty}</div>
+          <div class="tiles" id="gallery-bluesky" tabindex="-1" data-media="bluesky" data-order="order_bs">${bsMedia || empty}</div>
           ${pool.length ? `<details class="bs-copy-picker"${on.bluesky && (bs?.images.length ?? 0) === 0 ? " open" : ""}><summary>Copy existing photos to Bluesky</summary>
-            <p class="hint">Drag a photo from another platform into the drop area, or choose Copy below. Originals stay on their current platforms. Bluesky allows four photos and each needs alternative text.</p>
+            ${helpTip("Copying photos to Bluesky", "Drag a photo into the drop area, or choose Copy. Bluesky allows four photos. Describe each photo before copying it.")}
             <div id="bs-copy-drop" class="bs-copy-drop" tabindex="0">Drop an existing photo here to copy it into Bluesky</div>
             <div class="bs-source-pool" id="bs-source-pool">
               ${pool.map((url,i)=>`<div class="bs-source-item" draggable="true" data-pool-index="${i}">
@@ -719,7 +723,7 @@ export function renderDraftEditor(v: EditorView): string {
             <input type="hidden" id="bs-add-photos" name="bs_add_photos" value="">
             <div id="bs-copy-staged" class="bs-copy-staged" aria-live="polite"></div>
             <button type="button" id="bs-copy-save" disabled>Copy selected photos to Bluesky</button>
-            <p class="hint" id="bs-copy-status" role="status" aria-live="polite">Choose photos, describe each one, then press Copy selected photos.</p>
+            <p class="hint" id="bs-copy-status" role="status" aria-live="polite"></p>
           </details>` : `<p class="hint">Attach a photo to this post to make it available for Bluesky.</p>`}
           ${on.bluesky && bs?.video?.url && parseGitHubUrl(bs.video.url) ? `<div class="row"><button type="button" data-prepare-video="bluesky">Prepare Bluesky video privately</button></div>` : ""}
           ${bs && !bs.video && bs.images.length > 1 ? `<input type="hidden" name="order_bs" value="${Array.from({ length: bs.images.length }, (_, i) => i).join(",")}">` : ""}
@@ -732,9 +736,9 @@ export function renderDraftEditor(v: EditorView): string {
             <input id="ed-patreon-desc" type="text" name="bs_patreon_description" value="${esc(bs?.patreon?.description ?? "")}">
           </details>
         </article>
-        <article class="target" id="target-tiktok" data-platform="tiktok"${hide(on.tiktok)} aria-labelledby="tg-tiktok"${ttShared ? ' data-shared="facebook"' : ""}>
-          <div class="target-head"><h4 id="tg-tiktok">TikTok</h4><p class="format">${esc(formatLine("tiktok"))}</p></div>
-          <ul class="checks target-checks" data-checks="tiktok">${checkItems(states.tiktok)}</ul>
+        <article class="target" id="target-tiktok" data-platform="tiktok"${hide(on.tiktok)} aria-labelledby="tg-tiktok" tabindex="-1"${ttShared ? ' data-shared="facebook"' : ""}>
+          <div class="target-head help-heading"><h4 id="tg-tiktok">TikTok</h4>${helpTip("TikTok limits", formatLine("tiktok") + ". " + PLATFORMS.tiktok.delivery)}</div>
+          <ul class="action-checks target-checks" data-checks="tiktok">${checkItems(states.tiktok, p)}</ul>
           <label for="ed-tiktok-title" class="cap-label">Public carousel title (required for TikTok photos)</label>
           <input id="ed-tiktok-title" type="text" name="tiktok_title" maxlength="90" value="${esc(p.tiktok_title ?? "")}" placeholder="The title viewers see, not the internal draft name">
           <div class="cap-row"><label for="ed-tiktok" class="cap-label">Caption</label>
@@ -743,23 +747,21 @@ export function renderDraftEditor(v: EditorView): string {
           <div class="field-meter"></div>
           <input type="hidden" name="tt_copy_fb" id="tt-copy-fb-flag" value="0">
           ${p.images.length ? `<div class="row"><button type="button" id="tt-copy-fb">Use Facebook photos for TikTok</button></div>
-          <p class="hint">Replaces TikTok media with a separate copy of the Facebook gallery. After saving, prepare any linked GitHub photos for TikTok using the action below.</p>` : ""}
+          ${helpTip("Copying Facebook photos to TikTok", "Replaces the TikTok gallery. After saving, prepare any linked GitHub photos for TikTok.")}` : ""}
           ${p.video ? `<div class="row"><button type="button" id="tt-copy-fb-video">Use Facebook video for TikTok</button></div>
-          <p class="hint">Replaces the TikTok gallery with a separate reference to the existing Facebook video. Facebook remains unchanged. Save first, then prepare linked GitHub video privately for TikTok.</p>` : ""}
-          <p class="hint">Drag photos within this gallery to reorder them, or use the arrows.</p>
-          <div class="tiles" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
+          ${helpTip("Copying Facebook video to TikTok", "Replaces the TikTok gallery. Save before preparing linked GitHub video for TikTok.")}` : ""}
+          <div class="tiles" id="gallery-tiktok" tabindex="-1" data-media="tiktok" data-order="order_tt">${ttMedia || empty}</div>
           ${on.tiktok && !ttShared && tt.video && parseGitHubUrl(tt.video) ? `<div class="row"><button type="button" data-prepare-video="tiktok">Prepare TikTok video privately</button></div>` : ""}
           ${p.tiktok_enabled && ttImportIndices.length ? `<div class="row"><button type="button" id="tt-import" data-indices="${esc(JSON.stringify(ttImportIndices))}">Prepare ${ttImportIndices.length} linked photo${ttImportIndices.length === 1 ? "" : "s"} for TikTok</button></div>
-          <p class="hint" id="tt-import-status" role="status" aria-live="polite">Copies only the linked TikTok photos into private storage. Facebook originals stay unchanged. Prepare them close to publication; private copies expire after 45 days.</p>` : ""}
+          ${helpTip("Preparing linked photos", "Private copies expire after 45 days. Prepare them close to publication.")}<p class="hint" id="tt-import-status" role="status" aria-live="polite"></p>` : ""}
           ${!ttShared && !tt.video && tt.images.length > 1 ? `<input type="hidden" name="order_tt" value="${Array.from({ length: tt.images.length }, (_, i) => i).join(",")}">` : ""}
-          <p class="hint">${esc(PLATFORMS.tiktok.delivery)}</p>
         </article>
       </div>
       ${v.checksHtml ? `<h4 class="house-title">House rules</h4><ul class="checks">${v.checksHtml}</ul>` : ""}
     </section>
 
     <section class="ed-card" aria-labelledby="ed-media">
-      <h3 id="ed-media">Add photos and video</h3>
+      <h3 id="ed-media" tabindex="-1">Add photos and video</h3>
       ${v.mediaPanel}
     </section>
 
@@ -769,32 +771,32 @@ export function renderDraftEditor(v: EditorView): string {
       <input id="ed-label" type="text" name="label" maxlength="120" value="${esc(p.label ?? "")}" placeholder="Goblin NPC gallery">
       <label for="ed-release">Release or collection</label>
       <input id="ed-release" type="text" name="release" maxlength="120" value="${esc(p.release ?? "")}">
-      <label for="ed-when">Publish time (${esc(v.tz)})</label>
+      <div class="help-heading"><label for="ed-when">Publish time (${esc(v.tz)})</label>
+        ${helpTip("Choosing publish time", "Post now leaves the time empty. Earliest valid time gives you about ten minutes to edit before approval. Schedule at least 12 minutes ahead, or 30 for Facebook photo posts in the upload queue.", "ed-time-hint")}</div>
       <div class="time-row">
         <input id="ed-when" type="datetime-local" name="when" value="${esc(when)}">
         <button type="button" id="ed-now">Post now</button>
         <button type="button" id="ed-earliest">Earliest valid time</button>
       </div>
-      <p class="hint" id="ed-time-hint">"Post now" leaves the time empty: it goes out when you approve. "Earliest valid time" asks the server for the first time that will still be valid in about ten minutes. At approval a scheduled post must be at least 12 minutes ahead, 30 for Facebook photo posts (they go through the upload queue).</p>
     </section>
 
     <div class="save-bar">
       <button class="primary" type="submit" id="ed-save">Save changes</button>
       <span class="save-state" id="ed-state" role="status" aria-live="polite">All changes saved</span>
-      <span class="hint">Saves automatically.</span>
+      ${helpTip("Draft saving", "Changes save automatically. Approval releases the saved draft separately.")}
     </div>
-    <p class="hint">${esc(v.createdLine)}</p>
+    ${helpTip("Draft details", v.createdLine)}
   </form>
   <aside class="editor-rail" aria-label="Release">
+    ${release}
     ${renderEditorialReview(p)}
     ${v.xCard ?? ""}
-    ${release}
     ${v.tiktokCard}
     ${p.status === "rejected" ? `<form method="post" action="/post/${id}/return-to-drafts" class="ed-card">
       <input type="hidden" name="csrf" value="${esc(v.csrf)}">
       <input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">
       <h3>Return rejected post to drafts</h3>
-      <p class="hint">Keeps the captions and media, changes the status to Draft, and sends nothing. A separate approval is still required.</p>
+      ${helpTip("Returning to drafts", "Keeps the captions and media. Publishing requires a separate approval.")}
       <button type="submit">Return to drafts</button>
     </form>` : `<details class="ed-card"><summary>Reject and send back to the assistant</summary>
       <form method="post" action="/post/${id}/reject">
@@ -928,21 +930,44 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     };
   }
   function checkTarget(r, st) {
-    const errors = [], warnings = [];
+    const findings = [];
+    const error = (field, message) => findings.push({ field, message, level: "e" });
+    const warn = (field, message) => findings.push({ field, message, level: "w" });
     const limit = captionLimit(r, st);
-    if (st.photos && st.video && !r.mixPhotoVideo) errors.push("Photos and a video cannot go in the same post.");
-    if (st.photos > r.maxPhotos) errors.push(st.photos + " photos; " + r.label + " allows " + r.maxPhotos + ".");
-    if (!st.photos && !st.video && !r.textOnly) errors.push(r.label + " needs photos or a video.");
-    if (limit && st.captionLength > limit) errors.push("Caption is " + st.captionLength + " characters; " + r.label + " allows " + limit + ".");
-    if (r.altRequired && st.missingAlt) errors.push(st.missingAlt + (st.missingAlt === 1 ? " description is" : " descriptions are") + " missing.");
-    if (r.id === "tiktok" && st.photos > 0 && st.missingTitle) errors.push("Enter a public TikTok carousel title.");
-    if (r.maxHashtags && (st.hashtags || 0) > r.maxHashtags) errors.push(st.hashtags + " hashtags; " + r.label + " allows " + r.maxHashtags + ".");
-    if (!st.captionLength && r.id !== "tiktok") warnings.push("Caption is empty.");
-    if (st.lowRes) warnings.push(st.lowRes + (st.lowRes === 1 ? " photo is" : " photos are") + " enlarged to fit and may look soft.");
+    if (st.photos && st.video && !r.mixPhotoVideo) error("gallery", "Photos and a video cannot go in the same post.");
+    if (st.photos > r.maxPhotos) error("gallery", st.photos + " photos; " + r.label + " allows " + r.maxPhotos + ".");
+    if (!st.photos && !st.video && !r.textOnly) error("upload", r.label + " needs photos or a video.");
+    if (limit && st.captionLength > limit) error("caption", "Caption is " + st.captionLength + " characters; " + r.label + " allows " + limit + ".");
+    if (r.altRequired && st.missingAlt) error("description", st.missingAlt + (st.missingAlt === 1 ? " description is" : " descriptions are") + " missing.");
+    if (r.id === "tiktok" && st.photos > 0 && st.missingTitle) error("title", "Enter a public TikTok carousel title.");
+    if (r.maxHashtags && (st.hashtags || 0) > r.maxHashtags) error("caption", st.hashtags + " hashtags; " + r.label + " allows " + r.maxHashtags + ".");
+    if (!st.captionLength && r.id !== "tiktok") warn("caption", "Caption is empty.");
+    if (st.lowRes) warn("gallery", st.lowRes + (st.lowRes === 1 ? " photo is" : " photos are") + " enlarged to fit and may look soft.");
     const off = r.framed ? 0 : st.ratios.filter(x => x < r.aspect.min - 0.01 || x > r.aspect.max + 0.01).length;
-    if (off) warnings.push(off + (off === 1 ? " photo is" : " photos are") + " outside " + r.aspect.label + ". " + r.aspect.outside);
-    return { errors, warnings, limit };
+    if (off) warn("gallery", off + (off === 1 ? " photo is" : " photos are") + " outside " + r.aspect.label + ". " + r.aspect.outside);
+    return { findings, limit };
   }
+  function descriptionFields(card) {
+    return [...kept(mediaBox(card)).map(tile => tile.querySelector('[name^="bs_alt_"],[name="bs_video_alt"]')),
+      ...card.querySelectorAll('[name^="bs_add_alt_"]')].filter(Boolean);
+  }
+  function warningTarget(card, field) {
+    if (field === "caption") return card.querySelector("[data-caption]");
+    if (field === "title") return document.getElementById("ed-tiktok-title");
+    if (field === "description") return descriptionFields(card).find(input => !input.value.trim()) || card;
+    if (field === "upload") return document.getElementById("ed-media");
+    return document.getElementById("gallery-" + card.dataset.platform) || card;
+  }
+  document.addEventListener("click", event => {
+    const link = event.target.closest('a.action-warning[href^="#"]');
+    if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const target = document.getElementById(link.hash.slice(1));
+    if (!target) return;
+    for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+      if (parent instanceof HTMLDetailsElement) parent.open = true;
+    }
+    target.focus({ preventScroll: true });
+  });
   function paintBadges(id, card) {
     const r = rules[id];
     const box = mediaBox(card);
@@ -961,36 +986,55 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     form.querySelectorAll(".target[data-platform]").forEach(card => {
       const id = card.dataset.platform, r = rules[id];
       if (!r) return;
-      const st = stateOf(id, card), c = checkTarget(r, st);
+      const st = stateOf(id, card), { findings, limit } = checkTarget(r, st);
+      const finding = findings[0];
+      const invalid = finding?.level === "e";
       const list = card.querySelector("[data-checks]");
-      if (list) {
-        list.replaceChildren(...(c.errors.length || c.warnings.length
-          ? [...c.errors.map(t => [t, "e"]), ...c.warnings.map(t => [t, "w"])]
-          : [["Media checks passed for " + r.label + ". Delivery is checked at release.", "ok"]]).map(([t, k]) => { const li = document.createElement("li"); li.className = k; li.textContent = t; return li; }));
+      for (const field of card.querySelectorAll("[aria-invalid]")) field.removeAttribute("aria-invalid");
+      if (list) list.replaceChildren(...findings.map(({message, level, field}) => {
+        const target = warningTarget(card, field);
+        if (level === "e" && ["caption", "title"].includes(field)) target?.setAttribute("aria-invalid", "true");
+        const li = document.createElement("li");
+        const link = document.createElement("a");
+        link.className = "action-warning " + level;
+        link.textContent = message;
+        link.href = "#" + (target?.id || card.id);
+        li.append(link);
+        return li;
+      }));
+      if (id === "bluesky") for (const field of descriptionFields(card)) {
+        if (!field.value.trim()) field.setAttribute("aria-invalid", "true");
       }
-      card.dataset.state = c.errors.length ? "error" : c.warnings.length ? "warn" : "ok";
+      card.dataset.state = invalid ? "error" : finding ? "warn" : "ok";
       const area = card.querySelector("textarea[data-caption]");
-      if (area && c.limit && id !== "facebook") { area.dataset.max = String(c.limit); meter(area); }
+      if (area && limit && id !== "facebook") { area.dataset.max = String(limit); meter(area); }
       const overview = form.querySelector('[data-overview-platform="' + id + '"]');
       const enabled = !!form.querySelector('[data-platform-toggle="' + id + '"]')?.checked;
       if (overview) {
+        const releaseIssue = overview.dataset.releaseIssue;
+        const blocking = invalid || !!releaseIssue;
+        const clipped = Number(overview.dataset.sourceCount) > r.maxPhotos && st.photos === r.maxPhotos;
+        const problem = invalid ? finding.message : releaseIssue || finding?.message ||
+          (clipped ? "Review the selected photos. This platform allows " + r.maxPhotos + "." : "");
         overview.classList.toggle("is-inactive", !enabled);
-        overview.classList.toggle("has-e", enabled && !!c.errors.length);
+        overview.classList.toggle("has-e", enabled && blocking);
         const edit = overview.querySelector("[data-overview-edit]");
         if (edit) edit.hidden = !enabled;
         const media = overview.querySelector("[data-overview-media]");
         if (media) media.textContent = st.video ? "1 video" : st.photos === 1 ? "1 photo" : st.photos + " photos";
         const issue = overview.querySelector("[data-overview-issue]");
-        if (issue && enabled) issue.textContent = c.errors[0] || overview.dataset.releaseIssue ||
-          c.warnings[0] || "No outstanding media checks.";
+        if (issue) {
+          issue.hidden = !enabled || !problem;
+          issue.textContent = problem;
+          issue.href = invalid || (!releaseIssue && finding) ? "#" + (warningTarget(card, finding.field)?.id || card.id)
+            : releaseIssue ? overview.dataset.releaseHref : "#gallery-" + id;
+          issue.classList.toggle("e", blocking);
+          issue.classList.toggle("w", !blocking);
+        }
+        const status = overview.querySelector("[data-ready]");
+        if (status) status.textContent = !enabled ? "Not selected" : blocking ? "Needs attention"
+          : overview.dataset.manual === "1" ? "Manual download" : problem ? "Review" : "Prepared";
       }
-      const pill = form.querySelector('[data-ready="' + id + '"]');
-      if (pill) pill.textContent = !enabled ? "Not selected"
-        : c.errors.length ? c.errors.length + (c.errors.length === 1 ? " problem" : " problems")
-        : overview?.dataset.releaseIssue ? "Needs setup"
-        : overview?.dataset.manual === "1" ? "Manual"
-        : overview?.dataset.hasSource === "1" && !st.photos && !st.video && id !== "facebook" ? "Review media"
-        : c.warnings.length ? "Prepared, " + c.warnings.length + (c.warnings.length === 1 ? " note" : " notes") : "Prepared";
       paintBadges(id, card);
     });
   }
@@ -1460,7 +1504,7 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
     const label = document.createElement("label");
     label.textContent = "Alternative text for copied photo " + (index + 1);
     const alt = document.createElement("input");
-    alt.type = "text"; alt.maxLength = 1000; alt.name = "bs_add_alt_" + index;
+    alt.type = "text"; alt.maxLength = 1000; alt.name = "bs_add_alt_" + index; alt.id = "bs-add-alt-" + index;
     alt.placeholder = "Describe what this image shows";
     label.append(alt);
     const remove = document.createElement("button");
