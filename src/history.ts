@@ -32,7 +32,7 @@ const pattern = (s: string) => "%" + normalizedSearch(s).toLowerCase()
   .replace(/[\\%_]/g, (char) => "\\" + char) + "%";
 const postFields = [
   "p.id", "p.label", "p.release", "p.message", "p.tiktok_caption",
-  "p.tiktok_title", "b.caption", "i.caption",
+  "p.tiktok_title", "b.caption", "i.caption", "t.caption",
 ];
 const escLike = " ESCAPE '\\'";
 const postSearch = "(" + postFields.map((x) =>
@@ -46,7 +46,9 @@ const tiktokOnly = (post: "posts" | "p") => `
   ${post}.tiktok_enabled=1 AND ${post}.facebook_enabled=0 AND ${post}.fb_post_id IS NULL
   AND NOT EXISTS (SELECT 1 FROM bluesky_targets b WHERE b.post_id=${post}.id AND b.status<>'disabled')
   AND NOT EXISTS (SELECT 1 FROM instagram_targets i WHERE i.post_id=${post}.id AND i.status<>'disabled')
-  AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id=${post}.id AND j.status<>'cancelled')`;
+  AND NOT EXISTS (SELECT 1 FROM instagram_jobs j WHERE j.post_id=${post}.id AND j.status<>'cancelled')
+  AND NOT EXISTS (SELECT 1 FROM threads_targets t WHERE t.post_id=${post}.id AND t.status<>'disabled')
+  AND NOT EXISTS (SELECT 1 FROM threads_jobs j WHERE j.post_id=${post}.id AND j.status<>'cancelled')`;
 const transferExists = (post: "posts" | "p", condition = "") =>
   `EXISTS (SELECT 1 FROM tiktok_inbox_transfers t WHERE t.post_id=${post}.id ${condition})`;
 const creatorConfirmed = "AND t.status='published_by_creator'";
@@ -70,7 +72,7 @@ export async function searchPosts(
   await ensureSchema(db);
   await ensureTikTokInboxSchema(db);
   const joins = " FROM posts p LEFT JOIN bluesky_targets b ON p.id=b.post_id" +
-    " LEFT JOIN instagram_targets i ON p.id=i.post_id";
+    " LEFT JOIN instagram_targets i ON p.id=i.post_id LEFT JOIN threads_targets t ON p.id=t.post_id";
   const where = " WHERE " + STATUS_WHERE[section] + " AND " + postSearch;
   const binds = postFields.map(() => pattern(search));
   const n = await db.prepare("SELECT COUNT(*) AS total" + joins + where)
