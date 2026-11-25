@@ -30,7 +30,7 @@ export type PostStatus =
   | "failed"
   | "cancelled";
 
-import type { InstagramDraft } from "./instagram.ts";
+import { defaultItem, INSTAGRAM_MAX_ITEMS, type InstagramDraft } from "./instagram.ts";
 
 export interface Post {
   id: string;
@@ -265,6 +265,7 @@ export interface NewPost {
   release?: string | null;
   created_by: string;
   bluesky?: BlueskyDraft | null;
+  instagram?: Pick<InstagramDraft, "caption" | "frame"> | null;
   facebook_enabled?: boolean;
   tiktok_enabled?: boolean;
 }
@@ -283,6 +284,9 @@ export async function createPost(db: D1Database, p: NewPost): Promise<Post> {
     .bind(id, p.bluesky.caption, JSON.stringify(p.bluesky.images),
       p.bluesky.video ? JSON.stringify(p.bluesky.video) : null,
       p.bluesky.patreon ? JSON.stringify(p.bluesky.patreon) : null, p.facebook_enabled === false ? 0 : 1));
+  if (p.instagram) inserts.push(db.prepare(`INSERT INTO instagram_targets
+      (post_id, caption, frame) VALUES (?, ?, ?)`)
+    .bind(id, p.instagram.caption, p.instagram.frame));
   await db.batch(inserts);
   return (await getPost(db, id))!;
 }
@@ -438,12 +442,12 @@ export async function attachDraftVideo(
   const mutations=[update];
   if(bluesky)mutations.push(db.prepare(
     "UPDATE bluesky_targets SET video=json_object('url',?,'alt',?) WHERE post_id=? "+
-    "AND status='draft' AND json_array_length(images)=0 "+
+    "AND changes()=1 AND status='draft' AND json_array_length(images)=0 "+
     "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
   ).bind(reference,alt.trim(),id,id,version));
   if(instagram)mutations.push(db.prepare(
     "UPDATE instagram_targets SET video=? WHERE post_id=? "+
-    "AND status='draft' AND json_array_length(items)=0 "+
+    "AND changes()=1 AND status='draft' AND json_array_length(items)=0 "+
     "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
   ).bind(reference,id,id,version));
   const result=await db.batch(mutations);
@@ -493,31 +497,42 @@ export async function replacePreparedVideoReference(
 /** Append a photo only to each selected platform's gallery, preserving order. */
 export async function attachDraftImage(
   db:D1Database,id:string,reference:string,alt:string,
-  facebook:boolean,bluesky:boolean,expectedVersion:string,tiktok=false,
+  facebook:boolean,bluesky:boolean,expectedVersion:string,tiktok=false,instagram=false,
 ):Promise<string|null> {
   await ensureSchema(db);
-  if(!facebook&&!bluesky&&!tiktok)throw Error("Select at least one platform.");
+  if(!facebook&&!bluesky&&!tiktok&&!instagram)throw Error("Select at least one platform.");
   if(bluesky&&!alt.trim())throw Error("Alternative text is required for Bluesky.");
   const next=new Date(Math.max(Date.now(),Date.parse(expectedVersion)+1)).toISOString();
   const blueGuard=bluesky?" AND EXISTS(SELECT 1 FROM bluesky_targets b WHERE b.post_id=posts.id AND b.status='draft' AND b.video IS NULL AND json_array_length(b.images)<4)":"";
   const mainGuard=facebook?" AND facebook_enabled=1 AND video IS NULL AND json_array_length(images)<80":"";
   const ttGuard=tiktok?" AND tiktok_enabled=1 AND ((tiktok_images IS NULL AND video IS NULL AND json_array_length(images)<35) "+
     "OR (tiktok_images IS NOT NULL AND tiktok_video IS NULL AND json_array_length(tiktok_images)<35))":"";
+  const igReady = `status='draft' AND video IS NULL AND json_array_length(items)<${INSTAGRAM_MAX_ITEMS}
+    AND NOT EXISTS (SELECT 1 FROM json_each(items) WHERE json_extract(value,'$.url')=?)`;
+  const igGuard = instagram
+    ? ` AND EXISTS (SELECT 1 FROM instagram_targets WHERE post_id=posts.id AND ${igReady})`
+    : "";
   const postUpdate=db.prepare(
     "UPDATE posts SET images=CASE WHEN ? OR (? AND tiktok_images IS NULL) THEN json_insert(images,'$[#]',?) ELSE images END, "+
     "tiktok_images=CASE WHEN ? AND tiktok_images IS NOT NULL THEN json_insert(tiktok_images,'$[#]',?) ELSE tiktok_images END, updated_at=? "+
     "WHERE id=? AND updated_at=? AND status IN ('draft','rejected') AND approved_at IS NULL "+
-    mainGuard+ttGuard+blueGuard+
-    ((!facebook&&!tiktok)?" AND EXISTS (SELECT 1 FROM bluesky_targets WHERE post_id=posts.id AND status='draft')":"")
-  ).bind(facebook?1:0,tiktok?1:0,reference,tiktok?1:0,reference,next,id,expectedVersion);
+    mainGuard+ttGuard+blueGuard+igGuard
+  ).bind(facebook?1:0,tiktok?1:0,reference,tiktok?1:0,reference,next,id,expectedVersion,
+    ...(instagram ? [reference] : []));
   const mutations=[postUpdate];
+  // A concurrent winner can generate the same millisecond version. The first
+  // target write must follow a successful version update, as must later writes.
   if(bluesky)mutations.push(db.prepare(
     "UPDATE bluesky_targets SET images=json_insert(images,'$[#]',json_object('url',?, 'alt',?)) "+
-    "WHERE post_id=? AND status='draft' AND video IS NULL AND json_array_length(images)<4 "+
+    "WHERE post_id=? AND changes()=1 AND status='draft' AND video IS NULL AND json_array_length(images)<4 "+
     "AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)"
   ).bind(reference,alt.trim(),id,id,next));
+  if(instagram)mutations.push(db.prepare(`UPDATE instagram_targets SET items=json_insert(items,'$[#]',json(?))
+    WHERE post_id=? AND changes()=1 AND ${igReady}
+    AND EXISTS(SELECT 1 FROM posts WHERE id=? AND updated_at=? AND approved_at IS NULL)`)
+    .bind(JSON.stringify(defaultItem(reference, "pad")),id,reference,id,next));
   const result=await db.batch(mutations);
-  return result[0].meta.changes===1&&(!bluesky||result[1].meta.changes===1)?next:null;
+  return result.every(r=>r.meta.changes===1)?next:null;
 }
 
 type Patch = Partial<Omit<Post, "id" | "created_at">>;

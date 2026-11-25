@@ -20,9 +20,12 @@ export function draftMediaPanel(post: Post, csrf: string): string {
 </style>
 <div class="adders" id="draft-media-panel" data-post="${esc(post.id)}" data-csrf="${esc(csrf)}"
  data-version="${esc(post.updated_at)}" data-facebook="${post.facebook_enabled ? "1" : "0"}"
- data-bluesky="${post.bluesky ? "1" : "0"}" data-tiktok="${post.tiktok_enabled ? "1" : "0"}" data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}" data-tiktok-images="${tt.images.length}">
+ data-bluesky="${post.bluesky ? "1" : "0"}" data-tiktok="${post.tiktok_enabled ? "1" : "0"}"
+ data-instagram="${post.instagram && !post.instagram.video ? "1" : "0"}"
+ data-facebook-images="${post.images.length}" data-bluesky-images="${post.bluesky?.images.length ?? 0}"
+ data-tiktok-images="${tt.images.length}" data-instagram-images="${post.instagram?.items.length ?? 0}">
   <details class="adder" id="add-photos"><summary>+ Add photos</summary>
-  ${helpTip("Photo upload limits", `JPG, PNG or GIF, up to 10 MB each. Choose destinations per photo. Limits are ${PLATFORMS.bluesky.maxPhotos} for Bluesky, ${PLATFORMS.tiktok.maxPhotos} for TikTok and ${PLATFORMS.facebook.maxPhotos} for Facebook. Bluesky needs a photo description. Private uploads expire after 45 days.`)}
+  ${helpTip("Photo upload limits", `JPG, PNG or GIF, up to 10 MB each. Choose destinations per photo. Limits are ${PLATFORMS.bluesky.maxPhotos} for Bluesky, ${PLATFORMS.tiktok.maxPhotos} for TikTok, ${PLATFORMS.facebook.maxPhotos} for Facebook and ${PLATFORMS.instagram.maxPhotos} for Instagram. Bluesky needs a photo description. Private uploads expire after 45 days.`)}
   <div id="media-drop" class="media-drop" tabindex="0" role="button" aria-label="Select or drop images">
     Drop images here, or click to choose
     <input type="file" id="media-files" accept=".jpg,.jpeg,.png,.gif,image/jpeg,image/png,image/gif" multiple hidden>
@@ -43,7 +46,7 @@ export function draftMediaPanel(post: Post, csrf: string): string {
     <label><input type="checkbox" id="video-facebook" ${post.facebook_enabled && !post.images.length ? "checked" : "disabled"}>Facebook</label>
     <label><input type="checkbox" id="video-bluesky" ${post.bluesky && !post.bluesky.images.length ? "checked" : "disabled"}>Bluesky</label>
     <label><input type="checkbox" id="video-tiktok" ${post.tiktok_enabled && !tt.images.length ? "checked" : "disabled"}>TikTok inbox</label>
-    <label><input type="checkbox" id="video-instagram" ${post.instagram && !post.instagram.items.length ? "checked" : "disabled"}>Instagram Reel download</label>
+    <label><input type="checkbox" id="video-instagram" ${post.instagram && !post.instagram.items.length ? "checked" : "disabled"}>Instagram Reel</label>
   </div>
   <label for="video-alt">Bluesky video alternative text</label>
   <input type="text" id="video-alt" maxlength="1000" placeholder="Describe the visible action in this video">
@@ -122,7 +125,7 @@ export const DRAFT_MEDIA_JS = `
         status.textContent = "Only JPG, PNG or GIF files between 1 byte and 10 MB can be uploaded.";
         continue;
       }
-      const record = { file, node: null, alt: null, facebook: null, bluesky: null, tiktok: null, result: null };
+      const record = { file, node: null, alt: null, facebook: null, bluesky: null, tiktok: null, instagram: null, result: null };
       const item = document.createElement("div");
       item.className = "media-upload-item";
       const preview = document.createElement("img");
@@ -134,23 +137,21 @@ export const DRAFT_MEDIA_JS = `
       name.textContent = file.name + " (" + (file.size/1048576).toFixed(1) + " MB)";
       const targets = document.createElement("div");
       targets.className = "media-targets";
-      for (const [kind, enabled, label] of [
-        ["facebook",panel.dataset.facebook==="1","Facebook"],
-        ["bluesky",panel.dataset.bluesky==="1","Bluesky"],
-        ["tiktok",panel.dataset.tiktok==="1","TikTok carousel"]
+      for (const [kind, label, limit] of [
+        ["facebook","Facebook",${PLATFORMS.facebook.maxPhotos}],
+        ["bluesky","Bluesky",${PLATFORMS.bluesky.maxPhotos}],
+        ["tiktok","TikTok carousel",${PLATFORMS.tiktok.maxPhotos}],
+        ["instagram","Instagram",${PLATFORMS.instagram.maxPhotos}]
       ]) {
-        if (!enabled) continue;
+        if (panel.dataset[kind] !== "1") continue;
         const text = document.createElement("label");
         const box = document.createElement("input");
         box.type = "checkbox";
         const base=Number(panel.dataset[kind+"Images"]||0);
         const selected=files.filter(x=>!!x[kind]?.checked).length;
-        const limit=kind==="bluesky"?${PLATFORMS.bluesky.maxPhotos}:kind==="tiktok"?${PLATFORMS.tiktok.maxPhotos}:${PLATFORMS.facebook.maxPhotos};
         box.checked=base+selected<limit;
         if(!box.checked)text.title="Platform gallery already has its maximum number of images.";
-        if (kind === "facebook") record.facebook = box;
-        else if (kind === "bluesky") record.bluesky = box;
-        else record.tiktok = box;
+        record[kind] = box;
         text.append(box, document.createTextNode(label)); targets.append(text);
       }
       const altLabel = document.createElement("label");
@@ -304,14 +305,16 @@ export const DRAFT_MEDIA_JS = `
     if (unsaved()) {status.textContent = "Save your text changes first, then add photos.";return;}
     running = window.gsMediaBusy = true;submit.disabled = true;status.textContent = "";
     let completed = 0;
+    let auditWarning = "";
     for (const item of files) {
       if (item.result.textContent === "Attached") continue;
       try {
         const facebook = !!item.facebook?.checked;
         const bluesky = !!item.bluesky?.checked;
         const tiktok = !!item.tiktok?.checked;
+        const instagram = !!item.instagram?.checked;
         const alt = item.alt.value.trim();
-        if (!facebook && !bluesky && !tiktok) throw new Error("Choose at least one platform.");
+        if (!facebook && !bluesky && !tiktok && !instagram) throw new Error("Choose at least one platform.");
         if (bluesky && !alt) throw new Error("Bluesky needs image alternative text.");
         item.result.textContent = "Creating private upload...";
         const grant = await api("upload-link", {filename:item.file.name});
@@ -320,8 +323,11 @@ export const DRAFT_MEDIA_JS = `
         const uploadedBody = await uploaded.json().catch(() => ({}));
         if (!uploaded.ok || !uploadedBody.ok) throw new Error(uploadedBody.error || "Upload transfer failed.");
         item.result.textContent = "Attaching to draft...";
-        const result = await api("attach-image", {reference:uploadedBody.reference, alt,facebook,bluesky,tiktok,expected_updated_at:panel.dataset.version});
+        const result = await api("attach-image", {
+          reference:uploadedBody.reference, alt,facebook,bluesky,tiktok,instagram,expected_updated_at:panel.dataset.version
+        });
         panel.dataset.version = result.updated_at;
+        auditWarning = result.audit_warning || auditWarning;
         item.result.textContent = "Attached";
         completed++;
       } catch (error) {
@@ -332,7 +338,8 @@ export const DRAFT_MEDIA_JS = `
       }
     }
     running = window.gsMediaBusy = false;submit.disabled = false;
-    if (completed && files.every(x=>x.result.textContent === "Attached")) {
+    if (auditWarning) status.textContent += " " + auditWarning + " Reload the draft to review the attached photos.";
+    else if (completed && files.every(x=>x.result.textContent === "Attached")) {
       status.textContent = "All images attached. Refreshing post preview...";
       location.reload();
     }

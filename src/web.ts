@@ -508,6 +508,7 @@ async function newDraftPage(req: Request,env:Env,session:Session):Promise<Respon
   const fields:NewDraftFields={
     label:str("label"),release:str("release"),message:str("message"),
     tiktokCaption:str("tiktok_caption"),bsCaption:str("bs_caption"),facebook:form.get("facebook")==="1",
+    instagram:form.get("instagram")==="1",instagramCaption:str("ig_caption"),
     bluesky:form.get("bluesky")==="1",tiktok:form.get("tiktok")==="1",when:form.get("asap")==="1" ? soonestDraftTime(env.TIMEZONE) : str("when"),
     contentKind:str("content_kind") as NewDraftFields["contentKind"],
   };
@@ -939,8 +940,10 @@ async function draftImageAction(
       const bluesky = input.bluesky === true;
       const tiktok = input.tiktok === true;
       const expected = String(input.expected_updated_at || "");
-      if (!facebook && !bluesky && !tiktok) return fail("Select Facebook, Bluesky or TikTok.");
+      const instagram = input.instagram === true;
+      if (!facebook && !bluesky && !tiktok && !instagram) return fail("Select at least one photo target.");
       if (tiktok && !current.tiktok_enabled) return fail("TikTok is not a selected draft target.");
+      if (instagram && !current.instagram) return fail("Instagram is not a selected draft target.");
       if (facebook && !current.facebook_enabled) return fail("Facebook is not a selected draft target.");
       if (bluesky && !current.bluesky) return fail("Bluesky is not a selected draft target.");
       if (alt.length > 1000) return fail("Alternative text exceeds 1,000 characters.");
@@ -948,11 +951,14 @@ async function draftImageAction(
       if (!expected || expected !== current.updated_at) return fail("Draft changed. Reload before attaching.",409);
       if (!(await isStoredOwnerUpload(env.DB,reference,session.login)))
         return fail("The private image is missing, incomplete, or belongs to a different session.", 400);
-      const updated = await attachDraftImage(env.DB,id,reference,alt,facebook,bluesky,expected,tiktok);
-      if (!updated) return fail("Draft changed or image limit exceeded. Reload.",409);
-      await audit(env.DB,session.login,"draft-media-attached",id,
-        (facebook?"facebook ":"")+(bluesky?"bluesky":""));
-      return Response.json({ok:true,updated_at:updated},{headers:{"Cache-Control":"no-store"}});
+      const updated = await attachDraftImage(env.DB,id,reference,alt,facebook,bluesky,expected,tiktok,instagram);
+      if (!updated) return fail("The draft changed or a destination already has this photo, a video, or a full gallery. Reload to review.",409);
+      const logged = await audit(env.DB,session.login,"draft-media-attached",id,
+        [facebook?"facebook":"",bluesky?"bluesky":"",tiktok?"tiktok":"",instagram?"instagram":""]
+          .filter(Boolean).join(" ")).then(()=>true,()=>false);
+      return Response.json({ok:true,updated_at:updated,
+        ...(logged?{}:{audit_warning:"Image attached, but the activity log could not be recorded."}),
+      },{headers:{"Cache-Control":"no-store"}});
     }
     return fail("Unknown media action.",404);
   } catch(error) {

@@ -53,7 +53,7 @@ test("new draft form escapes content and never includes approval or PIN controls
 });
 
 test("invalid target, caption, stale times and oversized text cannot be saved",()=>{
-  assert.throws(()=>parseNewDraft({...blankNewDraft(),facebook:false,bluesky:false},zone,"reviewer",now),/Select Facebook/);
+  assert.throws(()=>parseNewDraft({...blankNewDraft(),facebook:false,bluesky:false},zone,"reviewer",now),/Select at least one destination/);
   assert.throws(()=>parseNewDraft({...blankNewDraft(),bsCaption:"Z".repeat(301)},zone,"reviewer",now),/300-character/);
   assert.throws(()=>parseNewDraft({...blankNewDraft(),when:"2026-10-28T13:30"},zone,"reviewer",now),/12 minutes/);
   assert.throws(()=>parseNewDraft({...blankNewDraft(),label:"X".repeat(121)},zone,"reviewer",now),/120 characters/);
@@ -92,7 +92,7 @@ test("client creates an unapproved draft before private media upload and recover
   assert.match(NEW_DRAFT_JS,/created = \{id:body.id,version:body.updated_at\}/);
   assert.match(NEW_DRAFT_JS,/Your draft is saved/);
   assert.match(NEW_DRAFT_JS,/if \(asap.value === "1"\) time.value = soonestTime\(\)/);
-  assert.match(NEW_DRAFT_JS,/form\.querySelectorAll\('input\[name="content_kind"\]/);
+  assert.match(NEW_DRAFT_JS,/choices\.forEach\(el => el\.disabled = true\)/);
   assert.doesNotMatch(NEW_DRAFT_JS,/\/approve|\/publish/);
 });
 

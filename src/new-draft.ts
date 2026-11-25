@@ -3,15 +3,18 @@ import { esc, helpTip } from "./html.ts";
 import { checkWhen, APPROVE_MIN_LEAD_MS } from "./validate.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 import { textLength } from "./bluesky.ts";
+import { INSTAGRAM_CAPTION_MAX, INSTAGRAM_MAX_ITEMS, instagramSaveErrors, type InstagramDraft } from "./instagram.ts";
 import type { NewPost } from "./db.ts";
 
 export interface NewDraftFields {
   label: string; release: string; message: string; bsCaption: string; tiktokCaption?:string;
-  facebook: boolean; bluesky: boolean; tiktok?: boolean; when: string;
+  instagramCaption?: string;
+  facebook: boolean; bluesky: boolean; tiktok?: boolean; instagram?: boolean; when: string;
   contentKind?: "text" | "images" | "video";
 }
 export function blankNewDraft(when = ""): NewDraftFields {
-  return {label:"",release:"",message:"",bsCaption:"",tiktokCaption:"",facebook:true,bluesky:true,tiktok:false,when,contentKind:"text"};
+  return {label:"",release:"",message:"",bsCaption:"",tiktokCaption:"",instagramCaption:"",
+    facebook:true,bluesky:true,tiktok:false,instagram:false,when,contentKind:"text"};
 }
 
 /** Explicit presets only, selected through GET links. No preset approves or publishes. */
@@ -48,9 +51,12 @@ export function newDraftPrefill(value: string | null, zone: string, now = new Da
 export function parseNewDraft(
   fields: NewDraftFields, zone: string, actor: string, now = new Date(),
 ): NewPost {
-  if (!fields.facebook && !fields.bluesky && !fields.tiktok) throw new Error("Select Facebook, Bluesky, or TikTok.");
-  if(fields.tiktok && !["images","video"].includes(fields.contentKind||"")) throw new Error("TikTok supports videos and photo carousels. Select Images or Video.");
+  if (!fields.facebook && !fields.bluesky && !fields.tiktok && !fields.instagram)
+    throw new Error("Select at least one destination.");
   if (fields.contentKind && !["text","images","video"].includes(fields.contentKind)) throw new Error("Choose a supported content type.");
+  const hasMedia = fields.contentKind === "images" || fields.contentKind === "video";
+  if (fields.tiktok && !hasMedia) throw new Error("TikTok supports videos and photo carousels. Select Images or Video.");
+  if (fields.instagram && !hasMedia) throw new Error("Instagram needs photos or a Reel. Select Images or Video.");
   if(fields.label.length>120 || fields.release.length>120)
     throw new Error("Name and release must each be 120 characters or fewer.");
   if(fields.message.length>63_206)
@@ -59,6 +65,13 @@ export function parseNewDraft(
     throw new Error("TikTok caption exceeds the limit for this format.");
   if(textLength(fields.bsCaption)>300 || new TextEncoder().encode(fields.bsCaption).length>3000)
     throw new Error("Bluesky caption exceeds its 300-character limit.");
+  let instagram: NewPost["instagram"] = null;
+  if (fields.instagram) {
+    const draft: InstagramDraft = { caption: fields.instagramCaption ?? "", frame: "4:5", items: [] };
+    const errors = instagramSaveErrors(draft, new Set());
+    if (errors.length) throw new Error(errors.join(" "));
+    instagram = { caption: draft.caption, frame: draft.frame };
+  }
   const scheduledAt=newDraftTime(fields.when,zone,now);
   return {
     message: fields.message, tiktok_caption:fields.tiktok && fields.tiktokCaption?.trim()?fields.tiktokCaption.trim():null,
@@ -69,6 +82,7 @@ export function parseNewDraft(
     facebook_enabled:fields.facebook,
     tiktok_enabled:fields.tiktok===true,
     bluesky:fields.bluesky ? {caption:fields.bsCaption,images:[],video:null,patreon:null} : null,
+    instagram,
     created_by:"GS Poster web (via "+actor+")",
   };
 }
@@ -79,7 +93,6 @@ export function parseNewDraft(
  * they are never submitted and parseNewDraft never sees them.
  */
 export const UPCOMING_DESTINATIONS: ReadonlyArray<{ id: string; label: string; note: string }> = [
-  { id: "instagram", label: "Instagram", note: "Add on the draft page after saving" },
   { id: "threads", label: "Threads", note: "Coming soon" },
   { id: "youtube", label: "YouTube", note: "Coming soon" },
   { id: "x", label: "X", note: "Open in X button on the draft page" },
@@ -154,6 +167,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <label class="choice-tile"><input type="checkbox" name="facebook" value="1" ${fields.facebook?"checked":""}> Facebook</label>
           <label class="choice-tile"><input type="checkbox" name="bluesky" value="1" ${fields.bluesky?"checked":""}> Bluesky</label>
           <label class="choice-tile"><input type="checkbox" name="tiktok" value="1" ${fields.tiktok?"checked":""}> TikTok</label>
+          <label class="choice-tile"><input type="checkbox" name="instagram" value="1" ${fields.instagram?"checked":""}> Instagram</label>
           ${UPCOMING_DESTINATIONS.map(upcomingTile).join("")}
         </div>
       </section>
@@ -166,7 +180,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <label class="choice-tile"><input type="radio" name="content_kind" value="text" ${kind==="text"?"checked":""}> Text only</label>
         </div>
         <section id="new-images-panel" ${kind!=="images"?"hidden":""}>
-          ${helpTip("Image selection", "Choose destinations per photo. Facebook allows 80 photos, TikTok 35 and Bluesky 4. Drag to reorder, or use the arrow buttons.", "new-image-guidance")}
+          ${helpTip("Image selection", `Choose destinations per photo. Facebook allows 80 photos, TikTok 35, Instagram ${INSTAGRAM_MAX_ITEMS} and Bluesky 4. Drag to reorder, or use the arrow buttons.`, "new-image-guidance")}
           <div id="new-images-drop" class="new-drop" tabindex="0" role="button" aria-label="Choose or drop images">
             <strong>Drop your artwork here</strong>
             <span>Or select JPG, PNG or GIF files, up to 10 MB each</span>
@@ -211,6 +225,12 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <textarea id="new-bs" name="bs_caption" maxlength="300" placeholder="A shorter companion caption...">${v(fields.bsCaption)}</textarea>
           <div class="field-meter" id="new-bs-count">0 / 300</div>
         </section>
+        <section id="new-instagram-panel" class="platform-editor" ${fields.instagram?"":"hidden"}>
+          <div class="help-heading"><h3>Instagram</h3>${helpTip("Instagram caption guidance", `Up to ${INSTAGRAM_CAPTION_MAX.toLocaleString("en-US")} characters. Adjust the photo framing in Studio after saving.`)}</div>
+          <label for="new-ig">Caption and hashtags</label>
+          <textarea id="new-ig" name="ig_caption" maxlength="${INSTAGRAM_CAPTION_MAX}">${v(fields.instagramCaption ?? "")}</textarea>
+          <div class="field-meter" id="new-ig-count">0 / ${INSTAGRAM_CAPTION_MAX}</div>
+        </section>
         </div>
       </section>
 
@@ -227,7 +247,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <button id="new-asap-button" type="button" aria-pressed="false">As soon as possible (+12 min)</button>
           <button id="new-clear-time" type="button">Clear time</button>
         </div>
-        ${helpTip("Proposed calendar time", "Facebook and Bluesky require separate approval with your PIN. The calendar does not send TikTok inbox transfers.")}
+        ${helpTip("Proposed calendar time", "Facebook, Bluesky and Instagram require separate approval with your PIN. The calendar does not send TikTok inbox transfers.")}
       </section>
     </div>
     <aside class="workspace-rail" aria-label="Draft overview">
@@ -244,7 +264,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
         <button class="primary" type="submit" id="new-draft-submit" style="width:100%;margin-top:17px">Save draft and media</button>
         <p id="new-draft-status" role="status" aria-live="polite" class="form-info"></p>
         <a href="/" class="btn" style="display:block;text-align:center;margin-top:10px">Back to planner</a>
-        <noscript><p class="action-warning">Save creates a text draft. Attach media on the review page.</p></noscript>
+        <noscript><p class="action-warning">Save creates a draft. Attach media in Studio.</p></noscript>
       </div>
     </aside>
   </form>
