@@ -11,9 +11,7 @@ import { buildServer } from "./mcp.ts";
 import { handleWeb } from "./web.ts";
 import { handleUploadPut } from "./upload.ts";
 import { browserUploadPage } from "./chat-upload.ts";
-import { publishDueBluesky } from "./publish.ts";
-import { processFacebookUploadBatch } from "./facebook-queue.ts";
-import { processInstagramBatch } from "./instagram-publish.ts";
+import { processScheduledWork } from "./cron.ts";
 
 const providers = new Map<string, OAuthProvider<Env>>();
 
@@ -48,15 +46,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
 
 export default {
   async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    // One platform failure must not prevent the other approved queue from running.
-    let failed = false;
-    try { await processFacebookUploadBatch(env); }
-    catch { failed = true; console.error("Facebook upload batch failed."); }
-    try { await publishDueBluesky(env); }
-    catch { failed = true; console.error("Bluesky scheduled batch failed."); }
-    try { await processInstagramBatch(env); }
-    catch { failed = true; console.error("Instagram scheduled batch failed."); }
-    if (failed) throw new Error("One or more scheduled publication batches failed.");
+    await processScheduledWork(env);
   },
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response {
     const origin = new URL(request.url).origin;

@@ -500,7 +500,7 @@ test("authenticated planner routes switch between week and month without changin
   assert.match(html,/calendar-month-grid/);
   assert.match(html,/aria-current="page">Month/);
   assert.match(html,new RegExp('href="/post/'+p.id+'"'));
-  assert.match(html,new RegExp('src="/media/'+p.id+'/0\\?thumb=1&amp;platform=facebook"'));
+  assert.match(html,new RegExp('src="/media/'+p.id+'/0\\?thumb=1(?:&amp;|&#38;)platform=facebook"'));
   assert.doesNotMatch(html,/class="calendar-slot"/,"month has no time slots");
   const week=await get("/calendar?view=week&week="+target+"-01");
   assert.equal(week.status,200);

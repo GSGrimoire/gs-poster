@@ -294,6 +294,17 @@ export async function serveInstagramMedia(req: Request, env: Env): Promise<Respo
 
 // ---------------------------------------------------------------- cron
 
+const INSTAGRAM_LEASE_EXPIRED = "(lease_until IS NULL OR lease_until < ?)";
+const INSTAGRAM_JOB_READY = "((status = 'scheduled' AND due_at <= ?) OR status IN ('preparing','processing'))";
+const INSTAGRAM_CLAIMABLE = INSTAGRAM_JOB_READY + " AND " + INSTAGRAM_LEASE_EXPIRED;
+const INSTAGRAM_INTERRUPTED_SEND = "status = 'sending' AND " + INSTAGRAM_LEASE_EXPIRED;
+const INSTAGRAM_ORPHAN = `status IN ('scheduled','preparing','processing') AND ${INSTAGRAM_LEASE_EXPIRED}
+  AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.id = instagram_jobs.post_id)`;
+// Recovery can be due even if there is no job eligible for a normal claim.
+export const INSTAGRAM_WORK_EXISTS = `EXISTS (SELECT 1 FROM instagram_jobs WHERE ${INSTAGRAM_CLAIMABLE})
+  OR EXISTS (SELECT 1 FROM instagram_jobs WHERE ${INSTAGRAM_INTERRUPTED_SEND})
+  OR EXISTS (SELECT 1 FROM instagram_jobs WHERE ${INSTAGRAM_ORPHAN})`;
+
 async function claimDue(db: D1Database, now: Date): Promise<InstagramJob | null> {
   await ensureInstagramJobs(db);
   const iso = now.toISOString();
@@ -301,23 +312,20 @@ async function claimDue(db: D1Database, now: Date): Promise<InstagramJob | null>
   // becomes an unclear result for the owner. It is never sent again.
   await db.prepare(`UPDATE instagram_jobs SET status = 'failed', ambiguous = 1, lease_until = NULL, updated_at = ?,
       error = 'The final Instagram publish request was interrupted before GS Poster recorded its answer. It may or may not be on Instagram. Check the GS Grimoire Instagram; nothing will be resent automatically.'
-    WHERE status = 'sending' AND (lease_until IS NULL OR lease_until < ?)`).bind(iso, iso).run();
+    WHERE ${INSTAGRAM_INTERRUPTED_SEND}`).bind(iso, iso).run();
   // Legacy safety net: a post deleted before deletion was guarded takes its unsent job with it. A job already past
   // the sending barrier is left alone: it may exist on Instagram.
   await db.prepare(`UPDATE instagram_jobs SET status = 'cancelled', lease_until = NULL, updated_at = ?,
       error = 'The post was deleted before it reached Instagram. Nothing was sent.'
-    WHERE status IN ('scheduled','preparing','processing') AND (lease_until IS NULL OR lease_until < ?)
-      AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.id = instagram_jobs.post_id)`).bind(iso, iso).run();
+    WHERE ${INSTAGRAM_ORPHAN}`).bind(iso, iso).run();
   const row = await db.prepare(`SELECT * FROM instagram_jobs
-    WHERE ((status = 'scheduled' AND due_at <= ?) OR status IN ('preparing','processing'))
-      AND (lease_until IS NULL OR lease_until < ?)
+    WHERE ${INSTAGRAM_CLAIMABLE}
     ORDER BY due_at LIMIT 1`).bind(iso, iso).first<Row>();
   if (!row) return null;
   const lease = new Date(now.getTime() + INSTAGRAM_CLAIM_MS).toISOString();
   const claim = await db.prepare(`UPDATE instagram_jobs SET lease_until = ?,
       status = CASE WHEN status = 'scheduled' THEN 'preparing' ELSE status END, updated_at = ?
-    WHERE post_id = ? AND status = ? AND lease_until IS ? AND
-      ((status = 'scheduled' AND due_at <= ?) OR status IN ('preparing','processing'))`)
+    WHERE post_id = ? AND status = ? AND lease_until IS ? AND ${INSTAGRAM_JOB_READY}`)
     .bind(lease, iso, row.post_id, row.status, row.lease_until, iso).run();
   if ((claim.meta.changes ?? 0) !== 1) return null;
   return fromRow({ ...row, lease_until: lease, status: row.status === "scheduled" ? "preparing" : row.status });

@@ -28,7 +28,8 @@ import { renderInstagram } from "./instagram.ts";
 import { createUpload, isStoredOwnerUpload, isStoredOwnerVideo } from "./upload.ts";
 import { importTikTokLinkedImage, TikTokImportError } from "./tiktok-import.ts";
 import { prepareLinkedVideo, VideoPrepareError, type VideoPrepareTarget } from "./video-import.ts";
-import { fetchImage } from "./media.ts";
+import { fetchImage, openImageStream } from "./media.ts";
+import { imagePreviewUrl, imageVersion, linkedThumbnail } from "./image-preview.ts";
 import { fetchVideo } from "./video.ts";
 import { assertFacebookVideoSize } from "./facebook.ts";
 import {
@@ -165,7 +166,7 @@ export async function handleWeb(req: Request, env: Env): Promise<Response> {
   const igPhoto = /^\/instagram\/(p_[a-z0-9]+)\/(\d+)\.jpg$/.exec(path);
   if (igPhoto && req.method === "GET") return instagramPhoto(env, igPhoto[1], Number(igPhoto[2]));
   const media = /^\/media\/(p_[a-z0-9]+)\/(\d+)$/.exec(path);
-  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1",url.searchParams.get("platform"));
+  if (media && req.method === "GET") return mediaProxy(env, media[1], Number(media[2]), url.searchParams.get("thumb") === "1", url.searchParams.get("platform"), url.searchParams.get("v"));
 
   return html(page("Not found", `<p class="empty">Nothing here.</p>`, { login: session.login }), { status: 404 });
 }
@@ -342,12 +343,16 @@ function shortTime(env: Env, iso: string): string {
   return new Intl.DateTimeFormat("en-GB", { timeZone: env.TIMEZONE, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 }
 
+function photoGrid(photos: string[]): string {
+  return photos.length ? `<div class="thumbs">${photos.join("")}</div>` : "";
+}
+
 function postCard(env: Env, p: HistoryPost, csrf?: string): string {
   const tiktokOnly = p.tiktokHistoryState !== null;
   const gallery = tiktokOnly ? tiktokMedia(p).images : p.images;
-  const source = tiktokOnly ? "?platform=tiktok" : "?platform=facebook";
+  const platform = tiktokOnly ? "tiktok" : "facebook";
   const thumbs = gallery.length
-    ? `<div class="thumbs">${gallery.slice(0,6).map((_, i) => `<img src="/media/${p.id}/${i}${source}" alt="" loading="lazy">`).join("")}</div>`
+    ? `<div class="thumbs">${gallery.slice(0,6).map((source, i) => `<img src="${esc(imagePreviewUrl(p.id, i, source, platform, true))}" alt="" loading="lazy">`).join("")}</div>`
     : "";
   const live = p.permalink ? ` | <a href="${esc(p.permalink)}" rel="noreferrer">view on Facebook</a>` : "";
   const bsky = p.bluesky?.permalink ? ` | <a href="${esc(p.bluesky.permalink)}" rel="noreferrer">view on Bluesky</a>` : "";
@@ -560,17 +565,12 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
     ...(bsChecks?.errors ?? []).map((e) => `<li class="e">Bluesky: ${esc(e)}</li>`),
     ...(bsChecks?.warnings ?? []).map((w) => `<li class="w">Bluesky: ${esc(w)}</li>`),
   ].join("");
-  const thumbs = p.images.length ? `<div class="thumbs">${p.images.slice(0, 12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i}" alt="Photo ${i + 1}">`).join("")}</div>${p.images.length > 12 ? `<details class="card"><summary>Review remaining ${p.images.length - 12} photos in order</summary><div class="thumbs">${p.images.slice(12).map((_, i) => `<img loading="lazy" src="/media/${p.id}/${i + 12}" alt="Photo ${i + 13}">`).join("")}</div></details>` : ""}` : "";
   const videoPreview = (target:"facebook"|"bluesky"|"tiktok"|"instagram") =>
     '<video controls playsinline preload="metadata" style="max-width:100%;max-height:440px;border-radius:8px" src="/video/' +
     esc(p.id) + '/' + target + '"></video>';
   const whenValue = state.when ?? (p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), env.TIMEZONE) : "");
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="expected_updated_at" value="${esc(p.updated_at)}">`;
   const bs = p.bluesky;
-  const ttThumbs=ttMedia.images.length?'<div class="thumbs">'+ttMedia.images.map((_,i)=>
-    '<img loading="lazy" src="/media/'+p.id+'/'+i+'?platform=tiktok" alt="TikTok image '+(i+1)+'">').join("")+'</div>':"";
-  const bsThumbs=bs?.images.length?'<div class="thumbs">'+bs.images.map((_,i)=>
-    '<img loading="lazy" src="/media/'+p.id+'/'+i+'?platform=bluesky" alt="Bluesky image '+(i+1)+'">').join("")+'</div>':"";
   const bsMedia = bs?.images ?? p.images.slice(0, 4).map((url) => ({ url, alt: "" }));
   const bsMediaFields = Array.from({ length: 4 }, (_, i) => {
     const item = bsMedia[i];
@@ -797,6 +797,16 @@ async function postPage(env: Env, session: Session, id: string, state: PageState
       <label><input type="checkbox" name="confirmed_no_facebook" value="1" required> I checked Facebook and confirm this post does not exist.</label>
       <div class="row"><button>Move back to drafts</button></div></form>`;
   }
+
+  const facebookPhotos = p.images.map((source, i) =>
+    linkedThumbnail(imagePreviewUrl(p.id, i, source, "facebook"), "Photo " + (i + 1)));
+  const thumbs = photoGrid(facebookPhotos.slice(0, 12)) + (facebookPhotos.length > 12
+    ? `<details class="card"><summary>Review remaining ${facebookPhotos.length - 12} photos in order</summary>${photoGrid(facebookPhotos.slice(12))}</details>`
+    : "");
+  const ttThumbs = photoGrid(ttMedia.images.map((source, i) =>
+    linkedThumbnail(imagePreviewUrl(p.id, i, source, "tiktok"), "TikTok image " + (i + 1))));
+  const bsThumbs = photoGrid((bs?.images ?? []).map(({ url }, i) =>
+    linkedThumbnail(imagePreviewUrl(p.id, i, url, "bluesky"), "Bluesky image " + (i + 1))));
 
   const body = `
     <p><a href="/">← All posts and calendar</a></p>
@@ -1454,7 +1464,9 @@ async function instagramPhoto(env: Env, id: string, n: number): Promise<Response
   }
 }
 
-async function mediaProxy(env: Env, id: string, n: number, thumbnail = false, platform:string|null=null): Promise<Response> {
+async function mediaProxy(
+  env: Env, id: string, n: number, thumbnail: boolean, platform: string | null, version: string | null,
+): Promise<Response> {
   const p = await getPost(env.DB, id);
   const url = platform==="pool"?(p?postPhotos(p)[n]:null):
     platform==="instagram"?p?.instagram?.items[n]?.url:
@@ -1462,23 +1474,38 @@ async function mediaProxy(env: Env, id: string, n: number, thumbnail = false, pl
     platform==="bluesky"?(p?.bluesky ?? p?.bluesky_paused)?.images[n]?.url:
     platform==="facebook"?p?.images[n]:
     p?.images[n] ?? p?.bluesky?.images[n]?.url ?? (p?tiktokMedia(p).images[n]:null);
-  if (!url) return new Response("Not found", { status: 404 });
+  // A version can only validate the image attached to this slot. A reorder
+  // must never cache a replacement under the old image's immutable URL.
+  if (!url || (version !== null && version !== imageVersion(url))) {
+    return new Response("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  }
+  const headers = {
+    "Cache-Control": version ? "private, max-age=86400, immutable" : "private, max-age=300",
+    "Vary": "Cookie",
+    "X-Content-Type-Options": "nosniff",
+  };
+  const original = () => redirect(imagePreviewUrl(id, n, url, platform));
+  if (thumbnail && !env.IMAGES) return original();
   try {
-    const img = await fetchImage(env, url);
-    if (thumbnail) {
-      if (!env.IMAGES) return new Response("Thumbnail transformer unavailable", { status: 503 });
-      const reduced = await env.IMAGES.input(new Blob([img.bytes]).stream())
-        .transform({ width: 112, height: 112, fit: "cover" })
-        .output({ format: "image/webp", quality: 58, anim: false });
-      const response = await reduced.response();
-      return new Response(response.body, {
-        headers: { "Content-Type": "image/webp", "Cache-Control": "private, max-age=3600",
-          "X-Content-Type-Options": "nosniff" },
-      });
+    const img = await openImageStream(env, url);
+    if (thumbnail && env.IMAGES) {
+      try {
+        const reduced = await env.IMAGES.input(img.body)
+          .transform({ width: 112, height: 112, fit: "scale-down" })
+          .output({ format: "image/webp", quality: 58, anim: false });
+        const response = await reduced.response();
+        if (response.ok && response.body) {
+          return new Response(response.body, { headers: { ...headers, "Content-Type": "image/webp" } });
+        }
+        await response.body?.cancel().catch(() => undefined);
+      } catch {
+        // On transform exhaustion or failure, serve the original through the
+        // same authenticated route. Do not cache the redirect as a thumbnail.
+      }
+      await img.body.cancel().catch(() => undefined);
+      return original();
     }
-    return new Response(img.bytes, {
-      headers: { "Content-Type": img.type, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" },
-    });
+    return new Response(img.body, { headers: { ...headers, "Content-Type": img.type } });
   } catch (e) {
     return new Response(e instanceof Error ? e.message : "Could not load image", { status: 502 });
   }

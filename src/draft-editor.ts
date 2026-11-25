@@ -5,6 +5,7 @@
  * can only remove media or change Bluesky alternative text.
  */
 import { actionWarning, esc, helpTip } from "./html.ts";
+import { imagePreviewUrl, linkedThumbnail } from "./image-preview.ts";
 import { renderEditorialReview } from "./preflight.ts";
 import { tiktokMedia, type BlueskyDraft, type EditorDraft, type Post } from "./db.ts";
 import { BSKY_TEXT_LIMIT, textLength } from "./bluesky.ts";
@@ -278,7 +279,7 @@ function tile(src: string, alt: string, removeName: string, extra = "", index?: 
   const moves = index === undefined ? "" : `<div class="tile-move"><span class="tile-pos" aria-hidden="true">${index + 1}</span>
       <button type="button" data-move="-1" aria-label="Move ${esc(alt)} earlier">&#8249;</button>
       <button type="button" data-move="1" aria-label="Move ${esc(alt)} later">&#8250;</button></div>`;
-  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}" draggable="true"`}${copyIndex === undefined ? "" : ` data-copy-index="${copyIndex}"`}><div class="tile-frame"><img loading="lazy" src="${esc(src)}" alt="${esc(alt)}">
+  return `<figure class="tile" data-tile="photo"${index === undefined ? "" : ` data-index="${index}" draggable="true"`}${copyIndex === undefined ? "" : ` data-copy-index="${copyIndex}"`}><div class="tile-frame">${linkedThumbnail(src, alt)}
     <span class="tile-ratio" data-ratio-badge hidden></span></div>${moves}
     <label class="tile-remove"><input type="checkbox" name="${esc(removeName)}" value="1"> Remove</label>${extra}</figure>`;
 }
@@ -409,6 +410,7 @@ export function renderDraftEditor(v: EditorView): string {
   const on: Record<PlatformId, boolean> = { facebook: p.facebook_enabled, bluesky: !!p.bluesky, tiktok: !!p.tiktok_enabled, instagram: !!p.instagram };
   const ig = p.instagram ?? p.instagram_paused ?? null;
   const pool = postPhotos(p);
+  const poolImages = pool.map((url, i) => ({ url, src: imagePreviewUrl(p.id, i, url, "pool") }));
   const igItems = ig?.items ?? [];
   const igVideo=ig?.video??null;
   const availableVideos=postVideos(p);
@@ -416,17 +418,17 @@ export function renderDraftEditor(v: EditorView): string {
   const states = targetStates(p);
   const fbMedia = p.video
     ? video(`/video/${p.id}/facebook`, "remove_fb_video")
-    : p.images.map((url, i) => tile(`/media/${p.id}/${i}`, `Facebook photo ${i + 1}`, "remove_fb_" + i, "", p.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
+    : p.images.map((url, i) => tile(imagePreviewUrl(p.id, i, url, "facebook"), `Facebook photo ${i + 1}`, "remove_fb_" + i, "", p.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
   const bsMedia = bs?.video
     ? video(`/video/${p.id}/bluesky`, "remove_bs_video",
       `<label>Describe the video<input id="bs-video-alt" type="text" name="bs_video_alt" maxlength="${MAX_ALT}" value="${esc(bs.video.alt)}"></label>`)
-    : (bs?.images ?? []).map((img, i) => tile(`/media/${p.id}/${i}?platform=bluesky`, `Bluesky photo ${i + 1}`, "remove_bs_" + i,
+    : (bs?.images ?? []).map((img, i) => tile(imagePreviewUrl(p.id, i, img.url, "bluesky"), `Bluesky photo ${i + 1}`, "remove_bs_" + i,
       `<label>Describe the image<input id="bs-alt-${i}" type="text" name="bs_alt_${i}" maxlength="${MAX_ALT}" value="${esc(img.alt)}" placeholder="Required by Bluesky"></label>`, (bs?.images.length ?? 0) > 1 ? i : undefined, pool.indexOf(img.url))).join("");
   const ttMedia = ttShared
     ? `<span class="hint shared-note">Using Facebook media</span>`
     : tt.video
       ? video(`/video/${p.id}/tiktok`, "remove_tt_video")
-      : tt.images.map((url, i) => tile(`/media/${p.id}/${i}?platform=tiktok`, `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
+      : tt.images.map((url, i) => tile(imagePreviewUrl(p.id, i, url, "tiktok"), `TikTok photo ${i + 1}`, "remove_tt_" + i, "", tt.images.length > 1 ? i : undefined, pool.indexOf(url))).join("");
   const empty = '<p class="hint">Nothing yet.</p>';
   const when = p.scheduled_at ? toLocalInput(new Date(p.scheduled_at), v.tz) : "";
   const releaseTargets = [
@@ -449,7 +451,7 @@ export function renderDraftEditor(v: EditorView): string {
   const scheduledOthers = fbBs && p.scheduled_at;
   const ttPreview = ttOk ? (ttOk.type === "VIDEO"
     ? `<video class="tt-video" controls playsinline preload="metadata" src="/video/${id}/tiktok"></video>`
-    : `<div class="tt-strip">${Array.from({ length: Math.min(ttOk.count, 12) }, (_, i) => `<img loading="lazy" src="/media/${id}/${i}?platform=tiktok" alt="TikTok photo ${i + 1}">`).join("")}${ttOk.count > 12 ? `<span class="tt-more">+${ttOk.count - 12}</span>` : ""}</div>`) : "";
+    : `<div class="tt-strip">${tt.images.slice(0, 12).map((source, i) => linkedThumbnail(imagePreviewUrl(p.id, i, source, "tiktok"), "TikTok photo " + (i + 1))).join("")}${ttOk.count > 12 ? `<span class="tt-more">+${ttOk.count - 12}</span>` : ""}</div>`) : "";
   const ttBlock = ttOk ? `
       <fieldset class="tt-release">
         <legend class="sr-only">TikTok</legend>
@@ -524,6 +526,7 @@ export function renderDraftEditor(v: EditorView): string {
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px}
 .tile{margin:0;border:1px solid var(--line);border-radius:10px;padding:6px;background:var(--bg);display:grid;gap:6px}
 .tile-frame{position:relative;aspect-ratio:1;border-radius:6px;overflow:hidden;background:repeating-conic-gradient(color-mix(in srgb,var(--line) 55%,transparent) 0 25%,transparent 0 50%) 0 0/14px 14px}
+.tile-frame>a{display:block;width:100%;height:100%}
 .tile img{width:100%;height:100%;object-fit:contain;display:block}
 .tile-ratio{position:absolute;left:5px;bottom:5px;font:600 11px system-ui,sans-serif;padding:2px 6px;border-radius:99px;background:#000b;color:#fff}
 .tile-ratio.off{background:var(--warn);color:#1a1307}
@@ -690,13 +693,13 @@ export function renderDraftEditor(v: EditorView): string {
           </div>
           <input type="hidden" name="ig_items" id="ig-items-field" value="${esc(JSON.stringify(igItems))}">
           <ol class="ig-items" id="ig-items" data-media="instagram" data-post="${id}" data-saved="${esc(JSON.stringify(igItems))}"
-            data-pool="${esc(JSON.stringify(pool.map((url, i) => ({ url, src: `/media/${p.id}/${i}?platform=pool` }))))}"
+            data-pool="${esc(JSON.stringify(poolImages))}"
             data-max="${INSTAGRAM_MAX_ITEMS}" data-max-zoom="${INSTAGRAM_MAX_ZOOM}" data-bgs="${esc(JSON.stringify(INSTAGRAM_BACKGROUNDS))}">
-            ${igItems.map((it, n) => `<li class="ig-item"><img src="/media/${p.id}/${pool.indexOf(it.url)}?platform=pool" alt="Instagram photo ${n + 1}">
+            ${igItems.map((it, n) => `<li class="ig-item">${linkedThumbnail(imagePreviewUrl(p.id, pool.indexOf(it.url), it.url, "pool"), "Instagram photo " + (n + 1))}
               <span>${it.mode === "crop" ? "Cropped" : "Padded"} | <a href="/instagram/${p.id}/${n}.jpg" download>Download</a></span></li>`).join("")}
           </ol>
           ${pool.length ? `<details class="ig-picker" id="ig-picker"${igItems.length ? "" : " open"}><summary>Add photos from this post</summary>
-            <div class="tiles ig-pool" id="ig-pool">${pool.map((url, i) => `<button type="button" class="ig-add" data-url="${esc(url)}"><img loading="lazy" src="/media/${p.id}/${i}?platform=pool" alt="Add photo ${i + 1}"><span>Add</span></button>`).join("")}</div>
+            <div class="tiles ig-pool" id="ig-pool">${pool.map((url, i) => `<button type="button" class="ig-add" data-url="${esc(url)}"><img loading="lazy" src="${esc(imagePreviewUrl(p.id, i, url, "pool", true))}" alt="Add photo ${i + 1}"><span>Add</span></button>`).join("")}</div>
             <button type="button" id="ig-add-all">Add all, in this order</button>
           </details>` : `<p class="hint">Add photos to the post first; Instagram picks from them.</p>`}
           ${on.instagram && igVideo && parseGitHubUrl(igVideo) ? `<div class="row"><button type="button" data-prepare-video="instagram">Prepare Instagram video privately</button></div>` : ""}
@@ -717,7 +720,7 @@ export function renderDraftEditor(v: EditorView): string {
             <div id="bs-copy-drop" class="bs-copy-drop" tabindex="0">Drop an existing photo here to copy it into Bluesky</div>
             <div class="bs-source-pool" id="bs-source-pool">
               ${pool.map((url,i)=>`<div class="bs-source-item" draggable="true" data-pool-index="${i}">
-                <img src="/media/${p.id}/${i}?platform=pool" loading="lazy" alt="Existing photo ${i+1}">
+                ${linkedThumbnail(poolImages[i].src, "Existing photo " + (i + 1))}
                 <button type="button" data-copy-bs="${i}">Copy photo ${i+1}</button></div>`).join("")}
             </div>
             <input type="hidden" id="bs-add-photos" name="bs_add_photos" value="">
@@ -1158,6 +1161,8 @@ export const DRAFT_EDITOR_JS = INSTAGRAM_PLAN_JS + String.raw`
         li.querySelector('[data-act="reset"]').hidden = it.mode !== "crop";
         li.querySelector('[data-act="up"]').disabled = n === 0;
         li.querySelector('[data-act="down"]').disabled = n === items.length - 1;
+        const original = el("a", { href: srcOf(it.url), target: "_blank", rel: "noopener" }, "Open original");
+        li.querySelector(".ig-controls").append(original);
         igList.append(li);
         draw(li);
       });

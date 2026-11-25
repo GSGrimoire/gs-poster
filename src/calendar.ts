@@ -1,6 +1,7 @@
 import type { Env } from "./env.ts";
 import type { Post } from "./db.ts";
 import { esc, helpTip } from "./html.ts";
+import { imagePreviewUrl } from "./image-preview.ts";
 import { localToUtc, toLocalInput } from "./time.ts";
 
 export function dayPlus(day: string, offset: number): string {
@@ -245,6 +246,17 @@ export const CALENDAR_JS = `
 })();
 `;
 
+function calendarThumbnail(p: Post, includeInstagram = false): string | null {
+  const imageTarget = p.facebook_enabled && p.images.length ? "facebook" :
+    p.tiktok_enabled && (p.tiktok_images ?? p.images).length ? "tiktok" :
+    p.bluesky?.images.length ? "bluesky" :
+    includeInstagram && p.instagram?.items.length ? "instagram" : null;
+  const source = imageTarget === "facebook" ? p.images[0] :
+    imageTarget === "tiktok" ? (p.tiktok_images ?? p.images)[0] :
+    imageTarget === "bluesky" ? p.bluesky?.images[0]?.url : p.instagram?.items[0]?.url;
+  return imageTarget && source ? imagePreviewUrl(p.id, 0, source, imageTarget, true) : null;
+}
+
 export function renderCalendar(env: Env, posts: Post[], csrf: string, week: string, now = new Date()): string {
   const start = weekStart(week);
   const today = toLocalInput(now, env.TIMEZONE).slice(0, 10);
@@ -285,10 +297,7 @@ export function renderCalendar(env: Env, posts: Post[], csrf: string, week: stri
       const platforms = (p.facebook_enabled ? '<span class="platform-icon" title="Facebook" aria-label="Facebook">f</span>' : '') +
         (p.bluesky ? '<span class="platform-icon sky" title="Bluesky" aria-label="Bluesky">🦋</span>' : '') +
         (p.tiktok_enabled ? '<span class="platform-icon tiktok" title="TikTok, manual transfer" aria-label="TikTok">♪</span>' : '');
-      const imageTarget=p.facebook_enabled&&p.images.length?"facebook":
-        p.tiktok_enabled&&(p.tiktok_images??p.images).length?"tiktok":
-        p.bluesky?.images.length?"bluesky":null;
-      const url = imageTarget?'/media/'+p.id+'/0?thumb=1&platform='+imageTarget:null;
+      const url = calendarThumbnail(p);
       const thumb = url ? '<img class="cal-thumb" src="' + esc(url) + '" alt="" loading="lazy">' : '';
       const tip = '<span class="cal-tooltip"><strong>' + esc(title) + '</strong><br>' + esc(p.status) +
         ' | ' + esc(local.replace('T',' ')) + '<br>Created by ' + esc(p.created_by || "unknown") +
@@ -401,12 +410,9 @@ export function renderMonthCalendar(
     const entries = (postsByDay.get(day) ?? []).map(({p}) => {
       const caption = p.facebook_enabled ? p.message : p.tiktok_enabled ? (p.tiktok_caption??p.message) : p.bluesky?.caption || p.instagram?.caption || p.message;
       const title = p.label || p.release || caption.slice(0,50) || "Untitled post";
-      const imageTarget = p.facebook_enabled&&p.images.length ? "facebook" :
-        p.tiktok_enabled&&(p.tiktok_images??p.images).length ? "tiktok" :
-        p.bluesky?.images.length ? "bluesky" :
-        p.instagram?.items.length ? "instagram" : null;
-      const thumb = imageTarget
-        ? '<img class="calendar-month-thumb" loading="lazy" alt="" src="/media/'+esc(p.id)+'/0?thumb=1&amp;platform='+imageTarget+'">'
+      const url = calendarThumbnail(p, true);
+      const thumb = url
+        ? '<img class="calendar-month-thumb" loading="lazy" alt="" src="'+esc(url)+'">'
         : (p.video || p.tiktok_video || p.bluesky?.video || p.instagram?.video)
           ? '<span class="calendar-month-video" aria-hidden="true">Video</span>' : "";
       const platforms = (p.facebook_enabled ? '<span class="platform-icon" title="Facebook" aria-label="Facebook">f</span>' : '') +

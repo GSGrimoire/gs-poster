@@ -345,6 +345,143 @@ export async function checkUploadForEditor(env:Env,login:string,reference:string
     fail("Upload not found or not owned by this account.");
 }
 
+// Only definitions are shared across requests. The server and handlers are request-local.
+const toolDefinitions = {
+  import_chatgpt_files: {
+    title:"Import ChatGPT attachments privately into GS Poster",
+    description:"Transfer up to 35 original user-selected ChatGPT image or MP4 attachments directly into private GS Poster storage, preserving order and returning upload:// references. This uses ChatGPT's fileParams attachment adapter, not text base64 or GitHub staging. Files may not be available on every ChatGPT client. If import fails and an unapproved draft already exists, open its review_url and use Add video or Add photos there to upload and attach in one signed-in page. Use request_uploads only if there is no accessible draft editor. Imports never create or publish a post.",
+    inputSchema:z.object({
+      files:z.array(z.object({
+        download_url:z.string().min(1),
+        file_id:z.string().min(1),
+        mime_type:z.string().optional(),
+        file_name:z.string().optional(),
+      }).strict()).min(1).max(CHAT_BATCH_MAX_FILES),
+    }),
+    _meta:{"openai/fileParams":["files"]},
+    annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
+  },
+  import_github_blob: {
+    title: "Copy a private GitHub binary blob into GS Poster storage",
+    description: "Import an already-created private GitHub binary blob by SHA into GS Poster's private R2, returning a verified upload:// reference for later drafting. The source repository is fixed by server configuration and is never selected by the chat client. Use GitHub create_blob with encoding base64 only if you truly have the original attachment bytes; a picture description is not binary data. Optionally supply original-file SHA-256 to confirm exact bytes. This operation does not draft or publish. If binary access is unavailable, use request_upload and its private browser handoff.",
+    inputSchema: z.object({
+      filename: z.string().min(1).max(200).describe("Original filename ending in JPG, JPEG, PNG, GIF or MP4."),
+      blob_sha: z.string().regex(/^[a-f0-9]{40}$/i).describe("GitHub SHA-1 blob object ID returned by create_blob in the configured private staging repository."),
+      expected_sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional()
+        .describe("Optional SHA-256 of the actual original file bytes, for end-to-end integrity verification."),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  request_upload: {
+    title: "Get a private one-time file upload link",
+    description: "Create a one-time private JPG, PNG, GIF (up to 10 MB) or MP4 (up to 50 MB) upload link, valid for 10 minutes. Return upload_page_url to the editor: it opens a drag-and-drop uploader from Claude or ChatGPT, with no GitHub staging. If the assistant has direct access to file bytes in a code tool, it may PUT the original file to upload_url. Then check_upload before drafting. No publishing.",
+    inputSchema: z.object({
+      filename: z.string().min(1).max(200).describe("File name with extension. Only extension is retained."),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  check_upload: {
+    title:"Check a private chat media upload",
+    description:"After request_upload, check whether a JPG, PNG, GIF or MP4 upload actually arrived in private storage. Only the editor who requested the upload can inspect it. A stored upload:// reference can be passed to draft_post or update_draft. This does not publish.",
+    inputSchema:z.object({
+      reference:z.string().describe("The upload:// reference returned by request_upload."),
+    }),
+    annotations:{readOnlyHint:true,openWorldHint:false},
+  },
+  request_uploads: {
+    title:"Prepare multiple private media uploads for a carousel or reel",
+    description:"Request up to 35 private, one-time image or MP4 upload pages in a single call, retaining the order for TikTok carousels. Use this only when no accessible draft editor exists: an existing unapproved draft already has Add photos and Add video to upload and attach in one signed-in page. Otherwise use upload_page_url for each original file, or transfer bytes directly with upload_url if available. Call check_uploads afterwards. No GitHub staging and no publishing.",
+    inputSchema:z.object({
+      filenames:z.array(z.string().min(1).max(200)).min(1).max(CHAT_BATCH_MAX_FILES)
+        .describe("Ordered list of JPG, JPEG, PNG, GIF, or MP4 filenames. One upload grant per file."),
+    }),
+    annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
+  },
+  check_uploads: {
+    title:"Verify a batch of chat media files in original carousel order",
+    description:"Read-only check of up to 80 upload:// image or video references. Reports whether each file was actually stored and belongs to this authenticated editor. Use only ready files in a GS Poster draft. TikTok supports at most 35 carousel images, Bluesky at most four, and Facebook at most 80.",
+    inputSchema:z.object({
+      references:z.array(z.string().min(1)).min(1).max(CHAT_BATCH_CHECK_MAX)
+        .describe("Private upload:// references in intended carousel order."),
+    }),
+    annotations:{readOnlyHint:true,openWorldHint:false},
+  },
+  check_upload_usage: {
+    title: "Check private R2 upload budget",
+    description: "Read how many bytes GS Poster has stored or reserved, the remaining 3 GiB upload allowance, and the hourly link quota. This is NOT account-wide Cloudflare billing data.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  draft_post: {
+    title: "Draft a GS Poster post",
+    description:
+      "Save a Facebook, Bluesky, TikTok or combined GS Grimoire DRAFT for approval. To prepare an Instagram carousel (crop or pad per photo), call update_draft with instagram after this. Nothing is published until Gus approves the target(s) on the review page with his PIN. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
+    inputSchema: z.object({
+      message: z.string().max(63206).describe("Facebook caption or shared descriptive caption. Text and hashtags are supported."),
+      tiktok_caption:z.string().max(4000).optional().describe("Independent TikTok caption and hashtags. For videos use at most 2,200 characters, for photo carousels at most 4,000. Falls back to message if omitted."),
+      tiktok_title:z.string().max(90).optional().describe("Public TikTok photo-carousel title, separate from the internal GS Poster draft label. Required before TikTok photo transfer."),
+      facebook_enabled: z.boolean().default(true).describe("Select Facebook target. False is allowed when Bluesky or TikTok is selected."),
+      tiktok_enabled: z.boolean().default(false).describe("Select TikTok as an independent draft target. Upload or direct publication on TikTok is a separate explicit PIN-approved web action. GS Poster does not automatically schedule TikTok releases."),
+      bluesky: blueskySchema.optional().describe("Optional Bluesky target with its own caption, image alt descriptions and free Patreon link card."),
+      images: imageList.optional(),
+      tiktok_images:imageList.optional().describe("Independent TikTok carousel (up to 35). Omitted means legacy shared Facebook gallery."),
+      tiktok_video:z.string().optional().describe("Independent TikTok MP4; cannot combine with TikTok images."),
+      video: z.string().optional().describe("Facebook MP4 GitHub URL or private upload:// reference (50 MB maximum). Cannot be combined with Facebook images."),
+      link: z.string().url().optional().describe("Optional link preview. Only used when the post has no images."),
+      publish_at: z.string().optional().describe("When to publish. Copenhagen time (2026-10-16T19:00) or ISO 8601 with offset. 30 minutes to 30 days ahead."),
+      label: z.string().max(120).optional().describe('Short name shown to Gus, e.g. "Day 1 creature reveal".'),
+      release: z.string().max(120).optional().describe('Which product or release this belongs to, e.g. "Corvane Reckoning".'),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  update_draft: {
+    title: "Revise a draft",
+    description:
+      "Change a draft or a rejected post. A rejected post goes back to draft for Gus to review again; read gus_note first to see what he asked for. Only the fields you pass are changed. Pass expected_updated_at from your last read so a newer edit is never overwritten; the reply returns the new updated_at and the saved post, which is exactly what Gus will review. Pass publish_at as an empty string to post on approval instead of at a set time.",
+    inputSchema: updateDraftSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  delete_draft: {
+    title: "Delete a draft",
+    description: "Delete a draft or rejected post that should not go out. Cannot touch anything already approved.",
+    inputSchema: z.object({ id: z.string() }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  list_posts: {
+    title: "List posts",
+    description:
+      "List posts in GS Poster, newest first: drafts waiting for Gus, rejected ones (with his note), scheduled, published and failed. Use it to check what is already queued before drafting a release.",
+    inputSchema: z.object({
+      status: z.enum(STATUSES).optional(),
+      release: z.string().optional().describe("Only posts for this release."),
+      limit: z.number().int().min(1).max(100).optional(),
+    }),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  get_post: {
+    title: "Get one post",
+    description: "Full details of one post, including Gus's note if he rejected it and the Facebook error if it failed.",
+    inputSchema: z.object({ id: z.string() }),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  list_page_posts: {
+    title: "Read the Facebook Page",
+    description:
+      "What is actually on the GS Grimoire Facebook Page: recent published posts with reactions, comments and shares, or the posts on Facebook's schedule (including ones Gus scheduled by hand). Read-only.",
+    inputSchema: z.object({
+      kind: z.enum(["published", "scheduled"]).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+    }),
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  check_setup: {
+    title: "Check the connection",
+    description: "Report which settings are missing, whether the Facebook Page token works and whether the linked Instagram account is reachable. Use it first, or when something fails.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+} as const;
+
 export function buildServer(env: Env, origin: string): McpServer {
   const server = new McpServer({ name: "gs-poster", version: "0.1.0" });
 
@@ -359,20 +496,7 @@ export function buildServer(env: Env, origin: string): McpServer {
   // Other chat clients may not support it; the browser upload fallback remains.
   server.registerTool(
     "import_chatgpt_files",
-    {
-      title:"Import ChatGPT attachments privately into GS Poster",
-      description:"Transfer up to 35 original user-selected ChatGPT image or MP4 attachments directly into private GS Poster storage, preserving order and returning upload:// references. This uses ChatGPT's fileParams attachment adapter, not text base64 or GitHub staging. Files may not be available on every ChatGPT client. If import fails and an unapproved draft already exists, open its review_url and use Add video or Add photos there to upload and attach in one signed-in page. Use request_uploads only if there is no accessible draft editor. Imports never create or publish a post.",
-      inputSchema:z.object({
-        files:z.array(z.object({
-          download_url:z.string().min(1),
-          file_id:z.string().min(1),
-          mime_type:z.string().optional(),
-          file_name:z.string().optional(),
-        }).strict()).min(1).max(CHAT_BATCH_MAX_FILES),
-      }),
-      _meta:{"openai/fileParams":["files"]},
-      annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
-    },
+    toolDefinitions.import_chatgpt_files,
     async ({files})=>{
       const login=currentOwner(env);
       if(!login)return fail("Authenticated editor identity unavailable. Reconnect GS Poster.");
@@ -392,17 +516,7 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "import_github_blob",
-    {
-      title: "Copy a private GitHub binary blob into GS Poster storage",
-      description: "Import an already-created private GitHub binary blob by SHA into GS Poster's private R2, returning a verified upload:// reference for later drafting. The source repository is fixed by server configuration and is never selected by the chat client. Use GitHub create_blob with encoding base64 only if you truly have the original attachment bytes; a picture description is not binary data. Optionally supply original-file SHA-256 to confirm exact bytes. This operation does not draft or publish. If binary access is unavailable, use request_upload and its private browser handoff.",
-      inputSchema: z.object({
-        filename: z.string().min(1).max(200).describe("Original filename ending in JPG, JPEG, PNG, GIF or MP4."),
-        blob_sha: z.string().regex(/^[a-f0-9]{40}$/i).describe("GitHub SHA-1 blob object ID returned by create_blob in the configured private staging repository."),
-        expected_sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional()
-          .describe("Optional SHA-256 of the actual original file bytes, for end-to-end integrity verification."),
-      }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    },
+    toolDefinitions.import_github_blob,
     async (input) => {
       const login = currentOwner(env);
       if (!login) return fail("Account identity unavailable. Reconnect GS Poster.");
@@ -421,14 +535,7 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "request_upload",
-    {
-      title: "Get a private one-time file upload link",
-      description: "Create a one-time private JPG, PNG, GIF (up to 10 MB) or MP4 (up to 50 MB) upload link, valid for 10 minutes. Return upload_page_url to the editor: it opens a drag-and-drop uploader from Claude or ChatGPT, with no GitHub staging. If the assistant has direct access to file bytes in a code tool, it may PUT the original file to upload_url. Then check_upload before drafting. No publishing.",
-      inputSchema: z.object({
-        filename: z.string().min(1).max(200).describe("File name with extension. Only extension is retained."),
-      }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    },
+    toolDefinitions.request_upload,
     async ({ filename }) => {
       try {
         // Upload ownership must use the authenticated GitHub login, not the
@@ -451,29 +558,14 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "check_upload",
-    {
-      title:"Check a private chat media upload",
-      description:"After request_upload, check whether a JPG, PNG, GIF or MP4 upload actually arrived in private storage. Only the editor who requested the upload can inspect it. A stored upload:// reference can be passed to draft_post or update_draft. This does not publish.",
-      inputSchema:z.object({
-        reference:z.string().describe("The upload:// reference returned by request_upload."),
-      }),
-      annotations:{readOnlyHint:true,openWorldHint:false},
-    },
+    toolDefinitions.check_upload,
     async ({reference})=>checkUploadForEditor(env,currentOwner(env),reference),
   );
 
 
   server.registerTool(
     "request_uploads",
-    {
-      title:"Prepare multiple private media uploads for a carousel or reel",
-      description:"Request up to 35 private, one-time image or MP4 upload pages in a single call, retaining the order for TikTok carousels. Use this only when no accessible draft editor exists: an existing unapproved draft already has Add photos and Add video to upload and attach in one signed-in page. Otherwise use upload_page_url for each original file, or transfer bytes directly with upload_url if available. Call check_uploads afterwards. No GitHub staging and no publishing.",
-      inputSchema:z.object({
-        filenames:z.array(z.string().min(1).max(200)).min(1).max(CHAT_BATCH_MAX_FILES)
-          .describe("Ordered list of JPG, JPEG, PNG, GIF, or MP4 filenames. One upload grant per file."),
-      }),
-      annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
-    },
+    toolDefinitions.request_uploads,
     async ({filenames})=>{
       const login=currentOwner(env);
       if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
@@ -487,15 +579,7 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "check_uploads",
-    {
-      title:"Verify a batch of chat media files in original carousel order",
-      description:"Read-only check of up to 80 upload:// image or video references. Reports whether each file was actually stored and belongs to this authenticated editor. Use only ready files in a GS Poster draft. TikTok supports at most 35 carousel images, Bluesky at most four, and Facebook at most 80.",
-      inputSchema:z.object({
-        references:z.array(z.string().min(1)).min(1).max(CHAT_BATCH_CHECK_MAX)
-          .describe("Private upload:// references in intended carousel order."),
-      }),
-      annotations:{readOnlyHint:true,openWorldHint:false},
-    },
+    toolDefinitions.check_uploads,
     async ({references})=>{
       const login=currentOwner(env);
       if(!login)return fail("Account identity unavailable. Reconnect GS Poster.");
@@ -506,12 +590,7 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "check_upload_usage",
-    {
-      title: "Check private R2 upload budget",
-      description: "Read how many bytes GS Poster has stored or reserved, the remaining 3 GiB upload allowance, and the hourly link quota. This is NOT account-wide Cloudflare billing data.",
-      inputSchema: z.object({}),
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
+    toolDefinitions.check_upload_usage,
     async () => {
       if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       if (!env.UPLOADS) return fail("Private uploads are disabled (R2 storage is not bound).");
@@ -522,28 +601,7 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "draft_post",
-    {
-      title: "Draft a GS Poster post",
-      description:
-        "Save a Facebook, Bluesky, TikTok or combined GS Grimoire DRAFT for approval. To prepare an Instagram carousel (crop or pad per photo), call update_draft with instagram after this. Nothing is published until Gus approves the target(s) on the review page with his PIN. Captions must follow the house rules (no em dashes, no prices, no Suno/Midjourney, current tier names); drafts that break them are refused with the reasons. Give publish_at in Copenhagen time like 2026-10-16T19:00, or full ISO 8601; omit it to post when Gus approves.",
-      inputSchema: z.object({
-        message: z.string().max(63206).describe("Facebook caption or shared descriptive caption. Text and hashtags are supported."),
-        tiktok_caption:z.string().max(4000).optional().describe("Independent TikTok caption and hashtags. For videos use at most 2,200 characters, for photo carousels at most 4,000. Falls back to message if omitted."),
-        tiktok_title:z.string().max(90).optional().describe("Public TikTok photo-carousel title, separate from the internal GS Poster draft label. Required before TikTok photo transfer."),
-        facebook_enabled: z.boolean().default(true).describe("Select Facebook target. False is allowed when Bluesky or TikTok is selected."),
-        tiktok_enabled: z.boolean().default(false).describe("Select TikTok as an independent draft target. Upload or direct publication on TikTok is a separate explicit PIN-approved web action. GS Poster does not automatically schedule TikTok releases."),
-        bluesky: blueskySchema.optional().describe("Optional Bluesky target with its own caption, image alt descriptions and free Patreon link card."),
-        images: imageList.optional(),
-        tiktok_images:imageList.optional().describe("Independent TikTok carousel (up to 35). Omitted means legacy shared Facebook gallery."),
-        tiktok_video:z.string().optional().describe("Independent TikTok MP4; cannot combine with TikTok images."),
-        video: z.string().optional().describe("Facebook MP4 GitHub URL or private upload:// reference (50 MB maximum). Cannot be combined with Facebook images."),
-        link: z.string().url().optional().describe("Optional link preview. Only used when the post has no images."),
-        publish_at: z.string().optional().describe("When to publish. Copenhagen time (2026-10-16T19:00) or ISO 8601 with offset. 30 minutes to 30 days ahead."),
-        label: z.string().max(120).optional().describe('Short name shown to Gus, e.g. "Day 1 creature reveal".'),
-        release: z.string().max(120).optional().describe('Which product or release this belongs to, e.g. "Corvane Reckoning".'),
-      }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    },
+    toolDefinitions.draft_post,
     async ({ message, tiktok_caption, tiktok_title, images = [], tiktok_images,tiktok_video,video, link, publish_at, label, release, facebook_enabled, tiktok_enabled, bluesky }) => {
       const login=currentOwner(env);
       if(!login)return fail("Editor access is no longer authorized.");
@@ -603,66 +661,31 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "update_draft",
-    {
-      title: "Revise a draft",
-      description:
-        "Change a draft or a rejected post. A rejected post goes back to draft for Gus to review again; read gus_note first to see what he asked for. Only the fields you pass are changed. Pass expected_updated_at from your last read so a newer edit is never overwritten; the reply returns the new updated_at and the saved post, which is exactly what Gus will review. Pass publish_at as an empty string to post on approval instead of at a set time.",
-      inputSchema: updateDraftSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    },
+    toolDefinitions.update_draft,
     async input => handleUpdateDraft(env,origin,currentOwner(env),input),
   );
 
   server.registerTool(
     "delete_draft",
-    {
-      title: "Delete a draft",
-      description: "Delete a draft or rejected post that should not go out. Cannot touch anything already approved.",
-      inputSchema: z.object({ id: z.string() }),
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    },
+    toolDefinitions.delete_draft,
     async ({ id }) => handleDeleteDraft(env,currentOwner(env),id),
   );
 
   server.registerTool(
     "list_posts",
-    {
-      title: "List posts",
-      description:
-        "List posts in GS Poster, newest first: drafts waiting for Gus, rejected ones (with his note), scheduled, published and failed. Use it to check what is already queued before drafting a release.",
-      inputSchema: z.object({
-        status: z.enum(STATUSES).optional(),
-        release: z.string().optional().describe("Only posts for this release."),
-        limit: z.number().int().min(1).max(100).optional(),
-      }),
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
+    toolDefinitions.list_posts,
     async input => handleListPosts(env,origin,currentOwner(env),input),
   );
 
   server.registerTool(
     "get_post",
-    {
-      title: "Get one post",
-      description: "Full details of one post, including Gus's note if he rejected it and the Facebook error if it failed.",
-      inputSchema: z.object({ id: z.string() }),
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
+    toolDefinitions.get_post,
     async ({ id }) => handleGetPost(env,origin,currentOwner(env),id),
   );
 
   server.registerTool(
     "list_page_posts",
-    {
-      title: "Read the Facebook Page",
-      description:
-        "What is actually on the GS Grimoire Facebook Page: recent published posts with reactions, comments and shares, or the posts on Facebook's schedule (including ones Gus scheduled by hand). Read-only.",
-      inputSchema: z.object({
-        kind: z.enum(["published", "scheduled"]).optional(),
-        limit: z.number().int().min(1).max(50).optional(),
-      }),
-      annotations: { readOnlyHint: true, openWorldHint: true },
-    },
+    toolDefinitions.list_page_posts,
     async ({ kind, limit }) => {
       if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       try {
@@ -683,12 +706,7 @@ export function buildServer(env: Env, origin: string): McpServer {
 
   server.registerTool(
     "check_setup",
-    {
-      title: "Check the connection",
-      description: "Report which settings are missing, whether the Facebook Page token works and whether the linked Instagram account is reachable. Use it first, or when something fails.",
-      inputSchema: z.object({}),
-      annotations: { readOnlyHint: true, openWorldHint: true },
-    },
+    toolDefinitions.check_setup,
     async () => {
       if(!currentOwner(env))return fail("Editor access is no longer authorized.");
       const missing = missingSecrets(env);
