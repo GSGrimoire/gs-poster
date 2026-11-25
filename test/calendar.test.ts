@@ -156,9 +156,9 @@ test("month planner shows all day posts with thumbnails, statuses, and no hourly
   assert.match(html,/data-day="2026-12-02"/);
   for(const id of ["p_one","p_two","p_three","p_tiktok","p_sky","p_draft","p_outside"])
     assert.match(html,new RegExp('href="/post/'+id+'"'));
-  assert.match(html,/src="\/media\/p_one\/0\?thumb=1&amp;platform=facebook"/);
-  assert.match(html,/src="\/media\/p_tiktok\/0\?thumb=1&amp;platform=tiktok"/);
-  assert.match(html,/src="\/media\/p_sky\/0\?thumb=1&amp;platform=bluesky"/);
+  assert.match(html,/src="\/media\/p_one\/0\?thumb=1(?:&amp;|&#38;)platform=facebook"/);
+  assert.match(html,/src="\/media\/p_tiktok\/0\?thumb=1(?:&amp;|&#38;)platform=tiktok"/);
+  assert.match(html,/src="\/media\/p_sky\/0\?thumb=1(?:&amp;|&#38;)platform=bluesky"/);
   assert.match(html,/Unscheduled/);
   assert.match(html,/data-status="published"/);
   assert.match(html,/view=week&amp;week=2026-11-09/);

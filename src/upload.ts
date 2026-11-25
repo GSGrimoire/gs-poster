@@ -460,9 +460,13 @@ export async function isStoredOwnerVideo(db: D1Database, reference: string, logi
 }
 
 /** Raw private object access for internal preflight, review preview and approved publication. */
-export async function readUpload(env: Env, ref: UploadRef): Promise<ArrayBuffer> {
+export async function openUpload(env: Env, ref: UploadRef): Promise<R2ObjectBody> {
   if (!env.UPLOADS) throw new Error("File uploads are not set up on this server.");
   const object = await env.UPLOADS.get(key(ref));
   if (!object) throw new Error("Upload " + formatUploadRef(ref) + " was not found or has expired.");
-  return object.arrayBuffer();
+  return object;
+}
+
+export async function readUpload(env: Env, ref: UploadRef): Promise<ArrayBuffer> {
+  return (await openUpload(env, ref)).arrayBuffer();
 }

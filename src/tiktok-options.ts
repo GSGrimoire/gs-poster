@@ -6,6 +6,7 @@ import {getPost,tiktokMedia} from "./db.ts";
 import {tiktokConnection,getTikTokCreatorOptions,type TikTokCreatorOptions} from "./tiktok.ts";
 import {canRetryTikTokTransfer,getTikTokInboxTransfer} from "./tiktok-inbox.ts";
 import {esc,helpTip,html,page} from "./html.ts";
+import {imagePreviewUrl,linkedThumbnail} from "./image-preview.ts";
 import {TIKTOK_MEDIA_PREFIX} from "./tiktok-media.ts";
 
 /**
@@ -45,8 +46,9 @@ export async function tiktokOptionsPage(env:Env,session:Session,postId:string):P
   const title=(p.tiktok_title??"").trim();
   const caption=(p.tiktok_caption ?? p.message).slice(0,type==="PHOTO"?4000:2200);
   const preview=type==="PHOTO"?
-    '<div class="tiktok-carousel-preview">'+media.images.slice(0,35).map((_,i)=>
-      '<figure class="tiktok-slide"><img src="/media/'+esc(p.id)+'/'+i+'?platform=tiktok" alt="Carousel image '+(i+1)+'" loading="lazy"><figcaption>'+String(i+1)+' / '+String(media.images.length)+'</figcaption></figure>').join("")+'</div>':
+    '<div class="tiktok-carousel-preview">'+media.images.slice(0,35).map((source,i)=>
+      '<figure class="tiktok-slide">'+linkedThumbnail(imagePreviewUrl(p.id,i,source,"tiktok"),"Carousel image "+(i+1))+
+      '<figcaption>'+String(i+1)+' / '+String(media.images.length)+'</figcaption></figure>').join("")+'</div>':
     '<video controls playsinline preload="metadata" style="width:100%;max-height:420px;border-radius:12px" src="/video/'+esc(p.id)+'/tiktok"></video>';
   function fields(mode:"MEDIA_UPLOAD"|"DIRECT_POST") {
     return `

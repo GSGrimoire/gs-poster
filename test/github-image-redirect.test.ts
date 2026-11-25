@@ -1,7 +1,7 @@
 /** GitHub-only image downloader: protect read tokens and bound remote media. */
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {fetchImage,parseGitHubUrl,MAX_IMAGE_BYTES} from "../src/media.ts";
+import {fetchImage,openImageStream,parseGitHubUrl,MAX_IMAGE_BYTES} from "../src/media.ts";
 import type {Env} from "../src/env.ts";
 
 const LINK="https://github.com/GSGrimoire/Assets/blob/main/leaf.png";
@@ -84,4 +84,80 @@ test("streamed image limit enforced without content-length on authenticated fall
     await assert.rejects(fetchImage(env,LINK),/over 10 MB/);
   });
   assert.deepEqual(seen.map(x=>x.url),[RAW,API]);
+});
+
+test("preview streams the first chunk before the full image is available", async () => {
+  let finish!: () => void;
+  const lastChunk = new Promise<void>(resolve => { finish = resolve; });
+  const seen: Request[] = [];
+  await withFetch(req => {
+    seen.push(req);
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(png);
+        return lastChunk.then(() => controller.close());
+      },
+    }), { headers: { "Content-Type": "text/plain" } });
+  }, async () => {
+    try {
+      const image = await openImageStream(env, LINK);
+      assert.equal(image.type, "image/png");
+      const reader = image.body.getReader();
+      assert.deepEqual((await reader.read()).value, png);
+      finish();
+      assert.equal((await reader.read()).done, true);
+    } finally { finish(); }
+  });
+  assert.deepEqual(seen.map(req => req.url), [RAW]);
+  assert.equal(seen[0].headers.get("Authorization"), null);
+  assert.equal(seen[0].redirect, "manual");
+});
+
+test("preview refuses an oversized declared length before reading the image", async () => {
+  let cancelled = false;
+  await withFetch(() => new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+    headers: { "Content-Length": String(MAX_IMAGE_BYTES + 1) },
+  }), async () => {
+    await assert.rejects(openImageStream(env, LINK), /limit is 10 MB/);
+  });
+  assert.equal(cancelled, true);
+});
+
+for (const length of [null, "8"]) {
+  test(`preview bounds GitHub response bytes when Content-Length is ${length ?? "missing"}`, async () => {
+    const seen: Request[] = [];
+    await withFetch(req => {
+      seen.push(req);
+      if (req.url === RAW) return new Response(null, { status: 404 });
+      const chunks = [new Uint8Array(MAX_IMAGE_BYTES), new Uint8Array(1)];
+      return new Response(new ReadableStream({
+        pull(controller) {
+          controller.enqueue(chunks.shift()!);
+          if (!chunks.length) controller.close();
+        },
+      }), { headers: length ? { "Content-Length": length } : {} });
+    }, async () => {
+      const image = await openImageStream(env, LINK);
+      const reader = image.body.getReader();
+      assert.equal((await reader.read()).value?.byteLength, MAX_IMAGE_BYTES);
+      await assert.rejects(reader.read(), /over 10 MB/);
+    });
+    assert.deepEqual(seen.map(req => req.url), [RAW, API]);
+    assert.equal(seen[0].headers.get("Authorization"), null);
+    assert.equal(seen[1].headers.get("Authorization"), "Bearer " + TOKEN);
+    assert.equal(seen[1].redirect, "manual");
+  });
+}
+
+test("preview rejects an authenticated redirect without another request", async () => {
+  const seen: Request[] = [];
+  await withFetch(req => {
+    seen.push(req);
+    return req.url === RAW ? new Response(null, { status: 404 }) :
+      new Response(null, { status: 302, headers: { Location: "https://untrusted.example/other" } });
+  }, async () => {
+    await assert.rejects(openImageStream(env, LINK), /HTTP 302/);
+  });
+  assert.deepEqual(seen.map(req => req.url), [RAW, API]);
+  assert.equal(seen[1].redirect, "manual");
 });

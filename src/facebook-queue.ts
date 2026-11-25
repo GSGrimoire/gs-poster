@@ -81,23 +81,27 @@ export async function enqueueFacebookUpload(env: Env, postId: string): Promise<v
   if ((res.meta.changes ?? 0) !== 1) throw new Error("Could not enqueue the approved Facebook upload.");
 }
 
-async function claimedJob(db: D1Database, now: string): Promise<Job | null> {
+const FACEBOOK_APPROVED_POST = "p.status = 'publishing' AND p.approved_at IS NOT NULL";
+const FACEBOOK_CLAIMABLE_JOB = "(f.status = 'uploading' OR (f.status = 'busy' AND f.started_at < ?))";
+export const FACEBOOK_DUE_FROM = `FROM facebook_upload_jobs f JOIN posts p ON p.id = f.post_id
+  WHERE ${FACEBOOK_APPROVED_POST} AND ${FACEBOOK_CLAIMABLE_JOB}`;
+export const facebookClaimCutoff = (now: Date): string => new Date(now.getTime() - 2 * 60_000).toISOString();
+
+async function claimedJob(db: D1Database, now: Date): Promise<Job | null> {
   await ensureFacebookQueue(db);
   // A network request can outlive the lease. Every subsequent write is fenced
   // by started_at so a replaced worker cannot change the new owner's progress.
-  const stale = new Date(Date.parse(now) - 2 * 60_000).toISOString();
-  const row = await db.prepare(`SELECT f.* FROM facebook_upload_jobs f
-    JOIN posts p ON p.id = f.post_id
-    WHERE p.status = 'publishing' AND p.approved_at IS NOT NULL
-      AND (f.status = 'uploading' OR (f.status = 'busy' AND f.started_at < ?))
+  const iso = now.toISOString();
+  const stale = facebookClaimCutoff(now);
+  const row = await db.prepare(`SELECT f.* ${FACEBOOK_DUE_FROM}
     ORDER BY p.approved_at LIMIT 1`).bind(stale).first<Job>();
   if (!row) return null;
-  const claim = await db.prepare(`UPDATE facebook_upload_jobs SET status = 'busy', started_at = ?, error = NULL
-    WHERE post_id = ? AND status = ? AND started_at IS ? AND next_index = ?
-      AND (status = 'uploading' OR (status = 'busy' AND started_at < ?))
-      AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND status = 'publishing' AND approved_at IS NOT NULL)`)
-    .bind(now, row.post_id, row.status, row.started_at, row.next_index, stale, row.post_id).run();
-  return (claim.meta.changes ?? 0) === 1 ? { ...row, status: "busy", started_at: now } : null;
+  const claim = await db.prepare(`UPDATE facebook_upload_jobs AS f SET status = 'busy', started_at = ?, error = NULL
+    WHERE f.post_id = ? AND f.status = ? AND f.started_at IS ? AND f.next_index = ?
+      AND ${FACEBOOK_CLAIMABLE_JOB}
+      AND EXISTS (SELECT 1 FROM posts p WHERE p.id = f.post_id AND ${FACEBOOK_APPROVED_POST})`)
+    .bind(iso, row.post_id, row.status, row.started_at, row.next_index, stale).run();
+  return (claim.meta.changes ?? 0) === 1 ? { ...row, status: "busy", started_at: iso } : null;
 }
 
 /**
@@ -105,7 +109,7 @@ async function claimedJob(db: D1Database, now: string): Promise<Job | null> {
  * within the free plan's 50 outgoing-request allowance.
  */
 export async function processFacebookUploadBatch(env: Env): Promise<void> {
-  const job = await claimedJob(env.DB, new Date().toISOString());
+  const job = await claimedJob(env.DB, new Date());
   if (!job) return;
   const post = await getPost(env.DB, job.post_id);
   if (!post || !post.facebook_enabled || !post.approved_at || post.fb_post_id) return;

@@ -4,7 +4,7 @@
  * cannot be pointed at arbitrary URLs.
  */
 import type { Env } from "./env.ts";
-import { isUploadRef, parseUploadRef, readUpload } from "./upload.ts";
+import { isUploadRef, openUpload, parseUploadRef, readUpload } from "./upload.ts";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const ALLOWED_TYPES: Record<string, string> = {
@@ -50,7 +50,7 @@ export function parseGitHubUrl(input: string): GitHubRef | null {
 
 export function imageType(path: string): string | null {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  return ALLOWED_TYPES[ext] ?? null;
+  return Object.hasOwn(ALLOWED_TYPES, ext) ? ALLOWED_TYPES[ext] : null;
 }
 
 export function checkImageUrl(url: string): string | null {
@@ -72,15 +72,7 @@ export interface ImageBytes {
   name: string;
 }
 
-export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
-  if (isUploadRef(url)) {
-    const ref = parseUploadRef(url);
-    const type = ref ? imageType(ref.ext) : null;
-    if (!ref || !type) throw new Error("Invalid image upload reference.");
-    const bytes = await readUpload(env, ref);
-    if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("Uploaded image exceeds 10 MB.");
-    return { bytes, type, name: ref.id + "." + ref.ext };
-  }
+async function openGitHubImage(env: Env, url: string) {
   const ref = parseGitHubUrl(url);
   if (!ref) throw new Error(`Not a GitHub file URL: ${url}`);
   const type = imageType(ref.path);
@@ -96,6 +88,7 @@ export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
   // Private files: only the fixed GitHub API host receives the read token.
   // A redirect is rejected, never followed with Authorization headers.
   if (!res.ok && env.GITHUB_READ_TOKEN) {
+    await res.body?.cancel().catch(() => undefined);
     res = await fetch(
       `https://api.github.com/repos/${ref.owner}/${ref.repo}/contents/${encPath}?ref=${encodeURIComponent(ref.ref)}`,
       {
@@ -110,15 +103,59 @@ export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
     );
   }
   if (!res.ok) {
+    await res.body?.cancel().catch(() => undefined);
     const hint = env.GITHUB_READ_TOKEN ? "" : " If the repo is private, add the GITHUB_READ_TOKEN secret.";
     throw new Error(`Could not fetch ${ref.owner}/${ref.repo}/${ref.path} (HTTP ${res.status}).${hint}`);
   }
   const len = Number(res.headers.get("content-length") || 0);
-  if (len > MAX_IMAGE_BYTES) throw new Error(`${name} is ${(len / 1048576).toFixed(1)} MB; the limit is 10 MB.`);
+  if (len > MAX_IMAGE_BYTES) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`${name} is ${(len / 1048576).toFixed(1)} MB; the limit is 10 MB.`);
+  }
+  if (!res.body) throw new Error(`No image body returned for ${name}.`);
+  return { body: res.body, type, name };
+}
+
+/** For authenticated previews. Publishing callers still use fetchImage. */
+export async function openImageStream(env: Env, url: string): Promise<{ body: ReadableStream<Uint8Array>; type: string }> {
+  if (isUploadRef(url)) {
+    const ref = parseUploadRef(url);
+    const type = ref ? imageType(ref.ext) : null;
+    if (!ref || !type) throw new Error("Invalid image upload reference.");
+    const object = await openUpload(env, ref);
+    if (object.size > MAX_IMAGE_BYTES) {
+      await object.body.cancel().catch(() => undefined);
+      throw new Error("Uploaded image exceeds 10 MB.");
+    }
+    return { body: object.body, type };
+  }
+  const image = await openGitHubImage(env, url);
+  // Count decoded bytes even if a Content-Length was supplied. It can be
+  // absent, incorrect or describe the encoded rather than the decoded body.
+  let size = 0;
+  const body = image.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      size += chunk.byteLength;
+      if (size > MAX_IMAGE_BYTES) throw new Error(`${image.name} is over 10 MB.`);
+      controller.enqueue(chunk);
+    },
+  }));
+  return { body, type: image.type };
+}
+
+export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
+  if (isUploadRef(url)) {
+    const ref = parseUploadRef(url);
+    const type = ref ? imageType(ref.ext) : null;
+    if (!ref || !type) throw new Error("Invalid image upload reference.");
+    const bytes = await readUpload(env, ref);
+    if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("Uploaded image exceeds 10 MB.");
+    return { bytes, type, name: ref.id + "." + ref.ext };
+  }
+  const { body, type, name } = await openGitHubImage(env, url);
   // A remote server may omit or lie about Content-Length. Bound the stream
   // before allocating, rather than buffering an unlimited remote response.
-  if (!res.body) throw new Error(`No image body returned for ${name}.`);
-  const reader = res.body.getReader();
+  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
