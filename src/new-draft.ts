@@ -73,6 +73,25 @@ export function parseNewDraft(
   };
 }
 
+/**
+ * Platforms shown on the Destinations row but not selectable here, so the
+ * pipeline is visible. Display only: the inputs are disabled and unnamed, so
+ * they are never submitted and parseNewDraft never sees them.
+ */
+export const UPCOMING_DESTINATIONS: ReadonlyArray<{ id: string; label: string; note: string }> = [
+  { id: "instagram", label: "Instagram", note: "Add on the draft page after saving" },
+  { id: "threads", label: "Threads", note: "Coming soon" },
+  { id: "youtube", label: "YouTube", note: "Coming soon" },
+  { id: "x", label: "X", note: "Open in X button on the draft page" },
+];
+
+function upcomingTile(d: { id: string; label: string; note: string }): string {
+  const noteId = `upcoming-${d.id}-note`;
+  return `<label class="choice-tile choice-tile-upcoming" data-upcoming="${esc(d.id)}" aria-disabled="true">`
+    + `<input type="checkbox" disabled aria-describedby="${noteId}"> ${esc(d.label)}`
+    + `<span class="upcoming-note" id="${noteId}">${esc(d.note)}</span></label>`;
+}
+
 export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,error?:string):string {
   const v=(s:string)=>esc(s);
   const kind=fields.contentKind ?? "text";
@@ -120,6 +139,8 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
   #new-video-preview{width:100%;max-height:340px;border-radius:10px;margin-top:8px}
   #new-draft-form .step-card label{margin-top:9px}
   #new-draft-form .choice-tile{margin:0!important}
+  #new-draft-form .choice-tile-upcoming{opacity:.55;cursor:not-allowed;border-style:dashed;flex-wrap:wrap}
+  #new-draft-form .choice-tile-upcoming .upcoming-note{flex-basis:100%;font:12px system-ui,sans-serif;color:var(--muted);margin-top:2px}
   #new-draft-form .step-card textarea{min-height:210px}
   #new-draft-status:not(:empty){margin:12px 0 0;padding:12px;border-radius:9px;background:var(--surface2)}
   #new-asap-button[aria-pressed=true]{background:var(--surface2);border-color:var(--accent2)}
@@ -133,6 +154,7 @@ export function renderNewDraft(fields:NewDraftFields,csrf:string,zone:string,err
           <label class="choice-tile"><input type="checkbox" name="facebook" value="1" ${fields.facebook?"checked":""}> Facebook</label>
           <label class="choice-tile"><input type="checkbox" name="bluesky" value="1" ${fields.bluesky?"checked":""}> Bluesky</label>
           <label class="choice-tile"><input type="checkbox" name="tiktok" value="1" ${fields.tiktok?"checked":""}> TikTok</label>
+          ${UPCOMING_DESTINATIONS.map(upcomingTile).join("")}
         </div>
       </section>
 
