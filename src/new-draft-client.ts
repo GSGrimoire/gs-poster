@@ -1,6 +1,12 @@
 /** Progressive enhancement for creating a post and uploading its media in one flow.
  * A failed transfer retains the unapproved draft and permits resuming uploads.
  */
+import { INSTAGRAM_CAPTION_MAX } from "./instagram.ts";
+import { PLATFORMS } from "./platforms.ts";
+
+const destinations = Object.fromEntries(Object.values(PLATFORMS).map(({id,label,maxPhotos,textOnly}) =>
+  [id, {label,maxPhotos,textOnly}]));
+
 export const NEW_DRAFT_JS = String.raw`
 (() => {
   const form = document.getElementById("new-draft-form");
@@ -13,12 +19,29 @@ export const NEW_DRAFT_JS = String.raw`
   let images = [], video = null, videoUrl = null, busy = false, created = null, videoAttached = false;
   const csrf = form.querySelector('input[name="csrf"]').value;
   const summary = id => $(id);
-  const mainCaption = $("new-message"), bsCaption = $("new-bs"),ttCaption=$("new-tiktok-caption");
-  const platformLimits={facebook:80,tiktok:35,bluesky:4};
+  const mainCaption = $("new-message"), bsCaption = $("new-bs"), ttCaption = $("new-tiktok-caption");
+  const igCaption = $("new-ig"), igCaptionMax = ${INSTAGRAM_CAPTION_MAX};
+  const destinations = ${JSON.stringify(destinations)};
+  const platforms = Object.keys(destinations);
+  const choices = form.querySelectorAll(['input[name="content_kind"]',
+    ...platforms.map(name=>'input[name="'+name+'"]')].join(","));
+  const selectedPlatforms = () => platforms.filter(target);
+  const mediaOnlyPlatform = () => selectedPlatforms().find(name => !destinations[name].textOnly);
   const selectedCount=name=>images.filter(item=>target(name)&&item.targets?.[name]?.checked).length;
-  const mediaTargets=item=>["facebook","tiktok","bluesky"].filter(name=>target(name)&&item.targets?.[name]?.checked);
-  const platformTotals=()=>["facebook","tiktok","bluesky"].filter(target).map(name=>
-    name[0].toUpperCase()+name.slice(1)+" "+selectedCount(name)+"/"+platformLimits[name]).join(" | ");
+  const mediaTargets=item=>selectedPlatforms().filter(name=>item.targets[name].checked);
+  const destinationFlags = names => Object.fromEntries(names.map(name=>[name,true]));
+  const platformTotals=()=>selectedPlatforms().map(name=>
+    destinations[name].label+" "+selectedCount(name)+"/"+destinations[name].maxPhotos).join(" | ");
+  function galleryIssue() {
+    for (const name of selectedPlatforms()) {
+      const {label,maxPhotos,textOnly} = destinations[name];
+      const count = selectedCount(name);
+      if (count > maxPhotos) return label+" allows up to "+maxPhotos+" photos.";
+      const hasText = (name==="facebook" && mainCaption.value.trim()) || (name==="bluesky" && bsCaption.value.trim());
+      if (!count && !hasText) return "Choose a photo"+(textOnly?" or write a caption":"")+" for "+label+".";
+    }
+    return "";
+  }
   function updateProgress(done,total) {
     const pct=total ? Math.round(done/total*100) : 0;
     summary("new-upload-progress").setAttribute("aria-valuenow",String(pct));
@@ -29,7 +52,7 @@ export const NEW_DRAFT_JS = String.raw`
   }
   function mediaCount(){
     const count=images.length;
-    const warning=["facebook","tiktok","bluesky"].some(name=>target(name)&&selectedCount(name)>platformLimits[name]);
+    const warning=selectedPlatforms().some(name=>selectedCount(name)>destinations[name].maxPhotos);
     $("new-image-count").textContent=count?
       count+" file"+(count!==1?"s":"")+" | "+platformTotals() :
       "No images selected | choose destination(s) per image";
@@ -38,9 +61,9 @@ export const NEW_DRAFT_JS = String.raw`
       kind()==="video"?"The selected video will be attached only to chosen destinations":"Text-only";
   }
   function updateSummary() {
-    const k=kind(),tt=target("tiktok"),bs=target("bluesky");
-    const platforms=["facebook","bluesky","tiktok"].filter(target).map(x=>x==="facebook"?"Facebook":x==="bluesky"?"Bluesky":"TikTok");
-    summary("summary-platforms").textContent=platforms.length ? platforms.join(" | ") : "None selected";
+    const k=kind(),tt=target("tiktok"),bs=target("bluesky"),ig=target("instagram");
+    const labels=selectedPlatforms().map(name=>destinations[name].label);
+    summary("summary-platforms").textContent=labels.length ? labels.join(" | ") : "None selected";
     summary("summary-format").textContent=k==="images"?"Photos":k==="video"?"Video":"Text only";
     summary("summary-media").textContent=k==="images" ? images.length+" source images" :
       k==="video" ? (video ? video.name : "No video selected") : "Text only";
@@ -48,14 +71,12 @@ export const NEW_DRAFT_JS = String.raw`
       time.value ? time.value.replace("T"," ") : "Unscheduled";
     let warning="", field="draft-content-title";
     const missingDescription = images.find(x=>x.targets?.bluesky?.checked&&!x.alt?.value.trim());
-    if(!platforms.length){warning="Select a destination";field="draft-platform-title";}
-    else if(tt&&k==="text")warning="Choose images or video for TikTok";
+    const galleryWarning = k==="images" && galleryIssue();
+    if(!labels.length){warning="Select a destination";field="draft-platform-title";}
     else if(tt&&(ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000)){warning="Shorten TikTok caption";field="new-tiktok-caption";}
+    else if(ig&&igCaption.value.length>igCaptionMax){warning="Shorten Instagram caption";field="new-ig";}
     else if(k==="images"&&!images.length)warning="Add artwork";
-    else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&selectedCount(name)>platformLimits[name])) warning="Reduce images for the highlighted destination";
-    else if(k==="images"&&["facebook","tiktok","bluesky"].some(name=>target(name)&&!selectedCount(name)&&
-      !(name==="facebook"&&mainCaption.value.trim())&&!(name==="bluesky"&&bsCaption.value.trim())))
-      warning="Assign media or write a text-only caption for each destination";
+    else if(galleryWarning)warning=galleryWarning;
     else if(k==="images"&&bs&&missingDescription){warning="Describe the first highlighted Bluesky image";field=missingDescription.alt.id;}
     else if(k==="video"&&!video)warning="Add an MP4";
     else if(k==="video"&&bs&&!$("new-video-alt").value.trim()){warning="Describe Bluesky video";field="new-video-alt";}
@@ -73,6 +94,7 @@ export const NEW_DRAFT_JS = String.raw`
       $("new-video-alt").setAttribute("aria-invalid", "true");
     } else $("new-video-alt").removeAttribute("aria-invalid");
     summary("new-tiktok-panel").hidden=!tt;
+    summary("new-instagram-panel").hidden=!ig;
     summary("new-facebook-panel").hidden=!target("facebook");
     const max=63206;
     summary("new-main-count").textContent=mainCaption.value.length+" / "+max;
@@ -80,6 +102,8 @@ export const NEW_DRAFT_JS = String.raw`
     summary("new-bs-count").textContent=bsCaption.value.length+" / 300";
     summary("new-tiktok-count").textContent=(ttCaption.value.trim()||mainCaption.value).length+" / "+(k==="video"?2200:4000);
     summary("new-tiktok-count").classList.toggle("media-error",tt && (ttCaption.value.trim()||mainCaption.value).length>(k==="video"?2200:4000));
+    summary("new-ig-count").textContent=igCaption.value.length+" / "+igCaptionMax;
+    summary("new-ig-count").classList.toggle("media-error",ig && igCaption.value.length>igCaptionMax);
     mediaCount();
   }
   $("summary-readiness").addEventListener("click", event => {
@@ -180,14 +204,14 @@ export const NEW_DRAFT_JS = String.raw`
     asapButton.setAttribute("aria-pressed","false");
     updateSummary();
   });
-  [mainCaption,bsCaption,ttCaption,$("new-video-alt")].forEach(input=>input.addEventListener("input",updateSummary));
+  [mainCaption,bsCaption,ttCaption,igCaption,$("new-video-alt")].forEach(input=>input.addEventListener("input",updateSummary));
   function visible() {
     let k=kind();
-    const tt=target("tiktok"),fb=target("facebook"),bs=target("bluesky");
-    if(tt&&k==="text") {
+    const fb=target("facebook"),bs=target("bluesky"),mediaOnly=mediaOnlyPlatform();
+    if(mediaOnly&&k==="text") {
       form.querySelector('input[name="content_kind"][value="images"]').checked=true;
       k="images";
-      statusText("TikTok needs images or video. Add photos selected.");
+      statusText(destinations[mediaOnly].label+" needs photos or video. Add photos selected.");
     }
     $("new-images-panel").hidden=k!=="images";
     $("new-video-panel").hidden=k!=="video";
@@ -202,8 +226,7 @@ export const NEW_DRAFT_JS = String.raw`
     $("new-video-alt").required=bs&&k==="video";
     updateSummary();
   }
-  form.querySelectorAll('input[name="content_kind"],input[name="facebook"],input[name="bluesky"],input[name="tiktok"]')
-    .forEach(el => el.addEventListener("change", visible));
+  choices.forEach(el => el.addEventListener("change", visible));
   visible();
 
   function chooseImages(files) {
@@ -245,18 +268,18 @@ export const NEW_DRAFT_JS = String.raw`
       };
       const up=action("Move up",-1),down=action("Move down",1);
       action("Remove",null);
-      const destinations=document.createElement("div");
-      destinations.className="new-target-choices";
-      destinations.setAttribute("role","group");
-      destinations.setAttribute("aria-label","Destinations for "+item.file.name);
-      item.targetContainer=destinations;
+      const targetChoices=document.createElement("div");
+      targetChoices.className="new-target-choices";
+      targetChoices.setAttribute("role","group");
+      targetChoices.setAttribute("aria-label","Destinations for "+item.file.name);
+      item.targetContainer=targetChoices;
       item.targetLabels={};
-      for(const [name,title] of [["facebook","Facebook"],["tiktok","TikTok"],["bluesky","Bluesky"]]){
+      for(const [name,{label:title,maxPhotos}] of Object.entries(destinations)){
         const platformLabel=document.createElement("label");
         platformLabel.hidden=!target(name);
         const check=document.createElement("input");
         check.type="checkbox";
-        check.checked=target(name)&&(name==="bluesky"?item.order<4:name==="tiktok"?item.order<35:true);
+        check.checked=(target(name)||name==="instagram")&&item.order<maxPhotos;
         check.setAttribute("aria-label",title+" for "+item.file.name);
         check.addEventListener("change",()=>{
           item.alt.required=target("bluesky")&&!!item.targets.bluesky.checked;
@@ -264,7 +287,7 @@ export const NEW_DRAFT_JS = String.raw`
           updateSummary();
         });
         platformLabel.append(check,document.createTextNode(title));
-        destinations.append(platformLabel);
+        targetChoices.append(platformLabel);
         item.targets[name]=check;item.targetLabels[name]=platformLabel;
       }
       const label=document.createElement("label");
@@ -275,7 +298,7 @@ export const NEW_DRAFT_JS = String.raw`
       alt.required=target("bluesky");
       alt.addEventListener("input",updateSummary);
       label.append(alt);
-      wrap.append(img,title,destinations,controls,label);
+      wrap.append(img,title,targetChoices,controls,label);
       label.hidden=!item.targets.bluesky.checked;
       item.alt=alt;item.wrap=wrap;item.number=number;item.label=label;
       item.up=up;item.down=down;
@@ -311,20 +334,11 @@ export const NEW_DRAFT_JS = String.raw`
   videoInput.addEventListener("change", () => chooseVideo(videoInput.files?.[0]));
 
   function verify(k,bs) {
-    if (!target("facebook") && !bs && !target("tiktok")) throw new Error("Select Facebook, Bluesky, or TikTok.");
-    if(target("tiktok") && !["video","images"].includes(k)) throw new Error("TikTok requires video or images.");
+    if (!selectedPlatforms().length) throw new Error("Select at least one destination.");
     if (k === "images") {
       if (!images.length) throw new Error("Choose at least one image.");
-      for(const name of ["facebook","tiktok","bluesky"]){
-        if(!target(name))continue;
-        const count=selectedCount(name);
-        if(!count){
-          if(name==="facebook"&&mainCaption.value.trim())continue;
-          if(name==="bluesky"&&bsCaption.value.trim())continue;
-          throw new Error("Choose an image or provide a text-only caption for "+name+".");
-        }
-        if(count>platformLimits[name])throw new Error(name+" supports up to "+platformLimits[name]+" images.");
-      }
+      const warning = galleryIssue();
+      if (warning) throw new Error(warning);
       for(const [i,item] of images.entries()){
         if(!/\.(jpe?g|png|gif)$/i.test(item.file.name)||item.file.size<=0||item.file.size>10*1024*1024)
           throw new Error("Each image must be JPG, PNG or GIF and no more than 10 MB.");
@@ -356,7 +370,7 @@ export const NEW_DRAFT_JS = String.raw`
     if (!res.ok || response.error) throw new Error(response.error || "Upload request failed ("+res.status+").");
     return response;
   }
-  async function upload(file, mediaKind, alt, fb, bs, tt=false) {
+  async function upload(file, mediaKind, alt, targets) {
     const grant = await api(mediaKind === "video" ? "video-link" : "upload-link", {filename:file.name});
     const transfer = await fetch(grant.upload_url, {
       method:"PUT",credentials:"same-origin",body:file
@@ -364,10 +378,11 @@ export const NEW_DRAFT_JS = String.raw`
     const stored = await transfer.json().catch(() => ({}));
     if (!transfer.ok || !stored.ok) throw new Error(stored.error || "Private file transfer failed.");
     const attached = await api(mediaKind === "video" ? "attach-video" : "attach-image", {
-      reference:stored.reference,alt,facebook:fb,bluesky:bs,tiktok:tt,
+      reference:stored.reference,alt,...targets,
       expected_updated_at:created.version
     });
     created.version = attached.updated_at;
+    return attached.audit_warning;
   }
 
   form.addEventListener("submit", async event => {
@@ -376,16 +391,21 @@ export const NEW_DRAFT_JS = String.raw`
     if (kind() === "text" && !created) return;
     event.preventDefault();
     if (busy) return;
-    const k = kind(),fb = target("facebook"),bs = target("bluesky");
-    try { verify(k,bs); }
+    const k = kind();
+    try { verify(k,target("bluesky")); }
     catch(error) { statusText(error.message);return; }
     busy = true; save.disabled = true;
-    updateProgress(0,k==="images"?images.length:k==="video"?1:0);
+    const mediaInputs = form.querySelectorAll("#new-images-preview input, #new-video-alt");
+    mediaInputs.forEach(el => el.disabled = true);
+    updateProgress(k==="images"?images.filter(item=>item.attached).length:Number(videoAttached),
+      k==="images"?images.length:1);
+    let auditWarning = "";
     try {
       if (!created) {
         statusText("Creating unapproved draft...");
         const formBody = new FormData(form);
         formBody.set("content_kind",k);
+        choices.forEach(el => el.disabled = true);
         const res = await fetch("/new", {
           method:"POST",credentials:"same-origin",
           headers:{"Accept":"application/json"},body:formBody
@@ -393,8 +413,6 @@ export const NEW_DRAFT_JS = String.raw`
         const body = await res.json().catch(() => ({}));
         if (!res.ok || !body.id) throw new Error(body.error || "Could not create the draft.");
         created = {id:body.id,version:body.updated_at};
-        form.querySelectorAll('input[name="content_kind"],input[name="facebook"],input[name="bluesky"],input[name="tiktok"]')
-          .forEach(el => el.disabled = true);
         statusText("Draft saved. Attaching its media now. To edit captions or scheduling after a failed upload, open the saved draft.");
         updateSummary();
       }
@@ -402,22 +420,35 @@ export const NEW_DRAFT_JS = String.raw`
         for (const [i,item] of images.entries()) {
           if (item.attached) continue;
           statusText("Uploading image "+(i+1)+" of "+images.length+"...");
-          await upload(item.file,"images",item.alt.value.trim(),fb&&item.targets.facebook.checked,bs&&item.targets.bluesky.checked,target("tiktok")&&item.targets.tiktok.checked);
+          const warning = await upload(item.file,"images",item.alt.value.trim(),destinationFlags(mediaTargets(item)));
+          auditWarning = warning || auditWarning;
           item.attached = true;
           updateProgress(images.filter(x=>x.attached).length,images.length);
         }
       } else if (k === "video" && !videoAttached) {
         statusText("Uploading and attaching video...");
-        await upload(video,"video",$("new-video-alt").value.trim(),fb,bs,target("tiktok"));
+        auditWarning = await upload(video,"video",$("new-video-alt").value.trim(),destinationFlags(selectedPlatforms()));
         videoAttached = true;
         updateProgress(1,1);
       }
-      window.location.assign("/post/" + encodeURIComponent(created.id));
+      if (auditWarning) {
+        statusText("Media attached, but the activity log could not be recorded.");
+        recoveryLink();
+      } else window.location.assign("/post/" + encodeURIComponent(created.id));
     } catch(error) {
       statusText((error instanceof Error ? error.message : String(error)) +
         (created ? " Your draft is saved. You can retry or open it to finish uploading." : ""));
       recoveryLink();
-    } finally {busy=false;save.disabled=false;updateSummary();}
+    } finally {
+      busy=false; save.disabled=false;
+      if (!created) choices.forEach(el => el.disabled = false);
+      $("new-video-alt").disabled = videoAttached;
+      for (const item of images) {
+        item.alt.disabled = item.attached;
+        Object.values(item.targets).forEach(input => input.disabled = item.attached);
+      }
+      updateSummary();
+    }
   });
 })();
 `;

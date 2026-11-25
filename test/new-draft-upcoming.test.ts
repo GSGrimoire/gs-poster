@@ -12,7 +12,7 @@ test("new draft shows the upcoming platforms as disabled tiles with a note", () 
     assert.match(tile[0], /<input type="checkbox" disabled/);
     assert.ok(tile[0].includes(d.note), `${d.label} carries its note`);
   }
-  assert.deepEqual(UPCOMING_DESTINATIONS.map(d => d.label), ["Instagram", "Threads", "YouTube", "X"]);
+  assert.deepEqual(UPCOMING_DESTINATIONS.map(d => d.label), ["Threads", "YouTube", "X"]);
 });
 
 test("upcoming tiles are never submitted with the form", () => {
@@ -21,7 +21,7 @@ test("upcoming tiles are never submitted with the form", () => {
   for (const t of tiles) assert.doesNotMatch(t, /\sname=/);
 });
 
-test("the three selectable destinations are unchanged", () => {
-  for (const n of ["facebook", "bluesky", "tiktok"])
+test("Instagram is a selectable destination", () => {
+  for (const n of ["facebook", "bluesky", "tiktok", "instagram"])
     assert.match(html, new RegExp(`<input type="checkbox" name="${n}" value="1"`));
 });

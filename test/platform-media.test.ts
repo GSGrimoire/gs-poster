@@ -73,19 +73,17 @@ test("Legacy TikTok records still fall back to the historical shared media",asyn
   assert.equal(p.tiktok_images,null);
   assert.deepEqual(tiktokMedia(p).images,[ref(2)]);
 });
-test("New composer renders three accessible caption columns and destination controls",()=>{
-  const fields={...blankNewDraft(),facebook:true,bluesky:true,tiktok:true,contentKind:"images" as const};
+test("New composer renders four accessible caption editors and destination controls",()=>{
+  const fields={...blankNewDraft(),facebook:true,bluesky:true,tiktok:true,instagram:true,contentKind:"images" as const};
   const html=renderNewDraft(fields,"csrf","Europe/Copenhagen");
   assert.match(html,/platform-editor-grid/);
   assert.match(html,/aria-label="Platform-specific captions"/);
-  for(const id of ["new-facebook-panel","new-tiktok-panel","new-bluesky-panel","new-platform-counts"])
+  for(const id of ["new-facebook-panel","new-tiktok-panel","new-bluesky-panel","new-instagram-panel","new-platform-counts"])
     assert.match(html,new RegExp('id="'+id+'"'));
   assert.match(NEW_DRAFT_JS,/item\.targets\[name\]=check/);
-  assert.match(NEW_DRAFT_JS,/item\.order<4/);
-  assert.match(NEW_DRAFT_JS,/item\.order<35/);
-  assert.match(NEW_DRAFT_JS,/fb&&item\.targets\.facebook\.checked/);
-  assert.match(NEW_DRAFT_JS,/bs&&item\.targets\.bluesky\.checked/);
-  assert.match(NEW_DRAFT_JS,/target\("tiktok"\)&&item\.targets\.tiktok\.checked/);
+  assert.match(html,/label for="new-ig"/);
+  assert.match(NEW_DRAFT_JS,/item\.order<maxPhotos/);
+  assert.match(NEW_DRAFT_JS,/destinationFlags\(mediaTargets\(item\)\)/);
   assert.doesNotMatch(html,/action="[^"]*\/approve"/);
   const input=parseNewDraft(fields,"Europe/Copenhagen","test");
   assert.deepEqual(input.tiktok_images,[]);
