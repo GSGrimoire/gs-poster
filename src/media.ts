@@ -29,23 +29,32 @@ export function parseGitHubUrl(input: string): GitHubRef | null {
   } catch {
     return null;
   }
-  if (u.protocol !== "https:") return null;
+  if (u.protocol !== "https:" || u.username || u.password || u.port) return null;
   let seg: string[];
   try { seg = u.pathname.split("/").filter(Boolean).map(decodeURIComponent); }
   catch { return null; }
+  const [owner, repo] = seg;
+  if (!owner || !repo || !/^[a-z0-9_-]+$/i.test(owner) || !/^[a-z0-9_.-]+$/i.test(repo) ||
+      repo === "." || repo === "..") return null;
+  let revisionIndex: number;
   if (u.hostname === "raw.githubusercontent.com") {
-    if (seg.length < 4) return null;
-    const [owner, repo] = seg;
-    if (seg[2] === "refs" && (seg[3] === "heads" || seg[3] === "tags") && seg.length >= 6) {
-      return { owner, repo, ref: seg[4], path: seg.slice(5).join("/") };
-    }
-    return { owner, repo, ref: seg[2], path: seg.slice(3).join("/") };
-  }
-  if (u.hostname === "github.com") {
-    if (seg.length < 5 || (seg[2] !== "blob" && seg[2] !== "raw")) return null;
-    return { owner: seg[0], repo: seg[1], ref: seg[3], path: seg.slice(4).join("/") };
-  }
-  return null;
+    revisionIndex = seg[2] === "refs" && (seg[3] === "heads" || seg[3] === "tags") && seg.length >= 6 ? 4 : 2;
+  } else if (u.hostname === "github.com" && (seg[2] === "blob" || seg[2] === "raw")) {
+    revisionIndex = 3;
+  } else return null;
+  const ref = seg[revisionIndex];
+  const path = seg.slice(revisionIndex + 1);
+  const invalidSegment = (part: string) => !part || part === "." || part === ".." || /[\\\x00-\x1f\x7f]/.test(part);
+  if (!ref || invalidSegment(ref) || !path.length || path.some(part => invalidSegment(part) || part.includes("/")))
+    return null;
+  return { owner, repo, ref, path: path.join("/") };
+}
+
+/** An authenticated fallback can only read repositories explicitly configured on the Worker. */
+export function allowsPrivateGitHubMedia(env: Env, ref: GitHubRef): boolean {
+  const requested = (ref.owner + "/" + ref.repo).toLowerCase();
+  return [env.GITHUB_STAGING_REPO, ...(env.GITHUB_READ_REPOS ?? "").split(",")]
+    .some(repo => repo?.trim().toLowerCase() === requested);
 }
 
 export function imageType(path: string): string | null {
@@ -95,7 +104,8 @@ export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
   });
   // Private files: only the fixed GitHub API host receives the read token.
   // A redirect is rejected, never followed with Authorization headers.
-  if (!res.ok && env.GITHUB_READ_TOKEN) {
+  if (!res.ok && env.GITHUB_READ_TOKEN && allowsPrivateGitHubMedia(env, ref)) {
+    await res.body?.cancel();
     res = await fetch(
       `https://api.github.com/repos/${ref.owner}/${ref.repo}/contents/${encPath}?ref=${encodeURIComponent(ref.ref)}`,
       {
@@ -110,7 +120,8 @@ export async function fetchImage(env: Env, url: string): Promise<ImageBytes> {
     );
   }
   if (!res.ok) {
-    const hint = env.GITHUB_READ_TOKEN ? "" : " If the repo is private, add the GITHUB_READ_TOKEN secret.";
+    await res.body?.cancel();
+    const hint = " Private media needs a configured repository and read-only token.";
     throw new Error(`Could not fetch ${ref.owner}/${ref.repo}/${ref.path} (HTTP ${res.status}).${hint}`);
   }
   const len = Number(res.headers.get("content-length") || 0);
