@@ -545,3 +545,124 @@ test("F4: the database refuses a frozen-field change even when a caller skips th
   await db.prepare("UPDATE instagram_jobs SET status = 'published' WHERE post_id = ?").bind(p.id).run();
   assert.ok(await save(db, p.id, cur.updated_at, { ...base, scheduled_at: new Date(Date.now() + 86400_000).toISOString() }, null));
 });
+
+// ---------------------------------------------------------------- issue #86: approved account binding
+
+const IG_OTHER = "17841400000000002";
+
+test("#86: approval records the Instagram account it was approved for", async () => {
+  const p = await draft(CAROUSEL);
+  const job = await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
+  assert.equal(job.ig_user_id, IG_ID);
+  // A replacement after cancel records the account configured at that approval.
+  assert.equal(await cancelInstagramJob(env(), p.id, "gsgrimoire"), true);
+  const again = (await getPost(db, p.id))!;
+  const replaced = await queueInstagramOnApproval(env({ IG_USER_ID: IG_OTHER }), p.id, again.updated_at, due, "gsgrimoire");
+  assert.equal(replaced.ig_user_id, IG_OTHER);
+});
+
+test("#86: account A approved, IG_USER_ID changed to B before the due time: nothing is sent anywhere", async () => {
+  const p = await draft({ ...CAROUSEL, items: [defaultItem(IMG(1))] });
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
+  await processInstagramBatch(env({ IG_USER_ID: IG_OTHER }));
+  assert.equal(calls.length, 0, "no Graph request to either account");
+  const job = (await getInstagramJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false, "nothing was sent, so the result is not unclear");
+  assert.match(job.error ?? "", /different Instagram account/);
+  assert.equal(job.ig_user_id, IG_ID, "the approved account is never rewritten");
+  // Retrying with the PIN while B is still configured fails the same way.
+  assert.equal(await retryInstagramJob(env(), p.id, "gsgrimoire"), true);
+  await processInstagramBatch(env({ IG_USER_ID: IG_OTHER }));
+  assert.equal(calls.length, 0);
+  assert.equal((await getInstagramJob(db, p.id))!.status, "failed");
+  // With A restored, a PIN retry publishes to A only.
+  assert.equal(await retryInstagramJob(env(), p.id, "gsgrimoire"), true);
+  await processInstagramBatch(env());
+  await processInstagramBatch(env());
+  assert.equal(publishes().length, 1);
+  assert.ok(calls.every((c) => !c.path.startsWith(IG_OTHER)), "account B is never called");
+  assert.equal((await getInstagramJob(db, p.id))!.status, "published");
+});
+
+test("#86: re-saving the same account (A to A) does not disturb a job", async () => {
+  const p = await draft({ ...CAROUSEL, items: [defaultItem(IMG(1))] });
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
+  await processInstagramBatch(env({ IG_USER_ID: String(IG_ID) }));
+  await processInstagramBatch(env({ IG_USER_ID: String(IG_ID) }));
+  assert.equal(publishes().length, 1);
+  assert.equal(publishes()[0].path, `${IG_ID}/media_publish`);
+});
+
+test("#86: an account change during preparation stops the carousel before more containers or a publish", async () => {
+  const ten = Array.from({ length: 10 }, (_, i) => defaultItem(IMG(i + 1)));
+  const p = await draft({ ...CAROUSEL, items: ten });
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
+  await processInstagramBatch(env());
+  const prepared = mediaPosts().length;
+  assert.ok(prepared > 0 && prepared < 10, "first run prepares part of the carousel");
+  assert.equal((await getInstagramJob(db, p.id))!.status, "preparing");
+  await processInstagramBatch(env({ IG_USER_ID: IG_OTHER }), new Date(Date.now() + 61_000));
+  assert.equal(mediaPosts().length, prepared, "no further container on any account");
+  assert.equal(publishes().length, 0);
+  const job = (await getInstagramJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false);
+  const res = await serveInstagramMedia(new Request("https://gs-poster.goofyspook.workers.dev" +
+    new URL(mediaPosts()[0].body.get("image_url")!).pathname), env());
+  assert.equal(res.status, 404, "media links stop working once the job has failed");
+});
+
+test("#86: an account change while Meta is processing stops the job before the final send", async () => {
+  const p = await draft({ ...CAROUSEL, items: [defaultItem(IMG(1))] });
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
+  await processInstagramBatch(env());
+  assert.equal((await getInstagramJob(db, p.id))!.status, "processing");
+  const before = calls.length;
+  await processInstagramBatch(env({ IG_USER_ID: IG_OTHER }), new Date(Date.now() + 61_000));
+  assert.equal(calls.length, before, "not even the status read is sent");
+  assert.equal(publishes().length, 0);
+  const job = (await getInstagramJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false);
+});
+
+test("#86: a job from before the account was recorded is never sent, and can be stopped and re-approved", async () => {
+  const p = await draft({ ...CAROUSEL, items: [defaultItem(IMG(1))] });
+  await queueInstagramOnApproval(env(), p.id, p.updated_at, due, "gsgrimoire");
+  await db.prepare("UPDATE instagram_jobs SET ig_user_id = NULL WHERE post_id = ?").bind(p.id).run();
+  await processInstagramBatch(env());
+  assert.equal(calls.length, 0);
+  const job = (await getInstagramJob(db, p.id))!;
+  assert.equal(job.status, "failed");
+  assert.equal(job.ambiguous, false);
+  assert.match(job.error ?? "", /before GS Poster recorded which Instagram account/);
+  assert.equal(await cancelInstagramJob(env(), p.id, "gsgrimoire"), true, "the owner can stop it with the PIN path");
+  const again = (await getPost(db, p.id))!;
+  const fresh = await queueInstagramOnApproval(env(), p.id, again.updated_at, due, "gsgrimoire");
+  assert.equal(fresh.ig_user_id, IG_ID);
+});
+
+test("#86: an existing instagram_jobs table without the column is migrated, keeping its rows", async () => {
+  const old = new Miniflare(convertV4MiniflareOptions({ modules: true, cf: false,
+    script: "export default { fetch() { return new Response('migration'); } };",
+    compatibilityDate: "2026-09-01", d1Databases: ["DB"] }));
+  try {
+    const odb = await old.getD1Database("DB") as unknown as D1Database;
+    await odb.prepare(`CREATE TABLE instagram_jobs (
+      post_id TEXT PRIMARY KEY, status TEXT NOT NULL, kind TEXT NOT NULL, due_at TEXT NOT NULL, caption TEXT NOT NULL,
+      frame TEXT NOT NULL, items TEXT NOT NULL DEFAULT '[]', video TEXT, children TEXT NOT NULL DEFAULT '[]',
+      container_id TEXT, processing_since TEXT, media_id TEXT, permalink TEXT, error TEXT,
+      ambiguous INTEGER NOT NULL DEFAULT 0, lease_until TEXT, created_by TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+    await odb.prepare(`INSERT INTO instagram_jobs (post_id, status, kind, due_at, caption, frame, created_by, updated_at)
+      VALUES ('legacy', 'scheduled', 'IMAGE', '2026-01-01T00:00:00.000Z', 'c', '4:5', 'gsgrimoire', '2026-01-01T00:00:00.000Z')`).run();
+    // A fresh module instance, so its one-time schema check runs against this database.
+    const fresh = await import("../src/db.ts?issue-86-migration") as typeof import("../src/db.ts");
+    await fresh.ensureSchema(odb);
+    const cols = await odb.prepare("PRAGMA table_info(instagram_jobs)").all<{ name: string }>();
+    assert.ok(cols.results.some((c) => c.name === "ig_user_id"));
+    const row = await odb.prepare("SELECT status, ig_user_id FROM instagram_jobs WHERE post_id = 'legacy'")
+      .first<{ status: string; ig_user_id: string | null }>();
+    assert.deepEqual({ ...row }, { status: "scheduled", ig_user_id: null });
+  } finally { await old.dispose(); }
+});

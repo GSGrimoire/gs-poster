@@ -14,6 +14,10 @@
  *   or unclear answer leaves the job failed and marked ambiguous: it is never
  *   resent automatically, and a human retry needs an explicit "I checked
  *   Instagram" confirmation as well as the PIN.
+ * - The job records the Instagram account it was approved for, and every
+ *   outbound call goes to that account. If IG_USER_ID now names another account
+ *   (or the job predates this record), cron sends nothing and fails the job with
+ *   a reason for the owner; it is never moved to the new account automatically.
  * - Meta fetches each JPEG or MP4 from a short-lived, unguessable, individually
  *   hashed link that works only while its job is being prepared or sent. The
  *   private R2 objects and GitHub sources are never exposed.
@@ -70,6 +74,8 @@ export interface InstagramJob {
   lease_until: string | null;
   created_by: string;
   updated_at: string;
+  /** The Instagram account the owner approved this job for. NULL only on rows from before issue #86. */
+  ig_user_id: string | null;
 }
 
 interface Row extends Omit<InstagramJob, "items" | "children" | "ambiguous"> {
@@ -104,6 +110,18 @@ export async function ensureInstagramJobs(db: D1Database): Promise<void> {
     db.prepare("CREATE INDEX IF NOT EXISTS instagram_media_grants_post ON instagram_media_grants(post_id)"),
   ]);
   schemaReady = true;
+}
+
+/**
+ * Why cron must not send this job to the currently configured account, or null
+ * when the configured account is the one the owner approved. Sends nothing.
+ */
+export function instagramAccountProblem(env: Env, job: Pick<InstagramJob, "ig_user_id">): string | null {
+  if (!job.ig_user_id)
+    return "This Instagram approval was made before GS Poster recorded which Instagram account it was for, so nothing was sent. Stop it with your PIN and approve the post again.";
+  if (job.ig_user_id !== env.IG_USER_ID)
+    return "This post was approved for a different Instagram account than the one GS Poster is connected to now, so nothing was sent. Reconnect the approved account and try again with your PIN, or stop it with your PIN and approve the post again.";
+  return null;
 }
 
 /** An approved job that may still publish or whose result is unclear (see db.ts IG_PENDING). */
@@ -174,20 +192,20 @@ export async function queueInstagramOnApproval(
   const ig = post.instagram!;
   const now = new Date().toISOString();
   const res = await env.DB.prepare(`INSERT INTO instagram_jobs
-      (post_id, status, kind, due_at, caption, frame, items, video, created_by, updated_at)
-    SELECT ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ? FROM posts
+      (post_id, status, kind, due_at, caption, frame, items, video, created_by, updated_at, ig_user_id)
+    SELECT ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ? FROM posts
       WHERE id = ? AND updated_at = ? AND status = 'draft' AND approved_at IS NULL
         AND EXISTS (SELECT 1 FROM instagram_targets i WHERE i.post_id = posts.id AND i.status = 'draft')
     ON CONFLICT(post_id) DO UPDATE SET status = 'scheduled', kind = excluded.kind, due_at = excluded.due_at,
       caption = excluded.caption, frame = excluded.frame, items = excluded.items, video = excluded.video,
       children = '[]', container_id = NULL, processing_since = NULL, media_id = NULL, permalink = NULL,
       error = NULL, ambiguous = 0, lease_until = NULL, created_by = excluded.created_by,
-      updated_at = excluded.updated_at
+      updated_at = excluded.updated_at, ig_user_id = excluded.ig_user_id
     WHERE instagram_jobs.status = 'cancelled'`)
     .bind(postId, plan.kind, dueAt.toISOString(), ig.caption, ig.frame,
-      JSON.stringify(ig.video ? [] : ig.items), ig.video ?? null, actor, now, postId, expectedVersion).run();
+      JSON.stringify(ig.video ? [] : ig.items), ig.video ?? null, actor, now, env.IG_USER_ID!, postId, expectedVersion).run();
   if ((res.meta.changes ?? 0) !== 1) throw new Error("Instagram could not be queued: the draft changed or a job already exists. Reload.");
-  await audit(env.DB, actor, "instagram-queued", postId, plan.kind + " at " + dueAt.toISOString());
+  await audit(env.DB, actor, "instagram-queued", postId, plan.kind + " at " + dueAt.toISOString() + " for account " + env.IG_USER_ID);
   return (await getInstagramJob(env.DB, postId))!;
 }
 
@@ -332,8 +350,9 @@ async function write(db: D1Database, job: InstagramJob, sets: Record<string, unk
   return (res.meta.changes ?? 0) === 1;
 }
 
-async function createContainer(env: Env, fields: Record<string, string>): Promise<string> {
-  const res = await graphPost(env, `${env.IG_USER_ID}/media`, new URLSearchParams(fields));
+/** `account` is always the job's approved account, checked against IG_USER_ID by the caller. */
+async function createContainer(env: Env, account: string, fields: Record<string, string>): Promise<string> {
+  const res = await graphPost(env, `${account}/media`, new URLSearchParams(fields));
   if (!res?.id) throw new Error("Instagram accepted the media but returned no container id.");
   return String(res.id);
 }
@@ -350,6 +369,12 @@ export async function processInstagramBatch(env: Env, now = new Date()): Promise
     await write(env.DB, job, { status: "failed", error: message, ambiguous: ambiguous ? 1 : 0, lease_until: null }, from);
     await audit(env.DB, "cron", ambiguous ? "instagram-ambiguous" : "instagram-failed", job.post_id, message);
   };
+  // Destination fence (issue #86): the account is fixed at approval. A changed
+  // or unknown account stops the job before any outside request. Not ambiguous:
+  // nothing has been sent to the final publish step by this run.
+  const accountProblem = instagramAccountProblem(env, job);
+  if (accountProblem) return await fail(accountProblem, false, [job.status]);
+  const account = job.ig_user_id!;
   let sent = false;
   let remoteId: string | null = null;
   try {
@@ -358,7 +383,7 @@ export async function processInstagramBatch(env: Env, now = new Date()): Promise
       if (job.kind === "CAROUSEL") {
         const stop = Math.min(job.items.length, children.length + INSTAGRAM_CHILDREN_PER_RUN);
         for (let i = children.length; i < stop; i++) {
-          const id = await createContainer(env, { image_url: await createGrant(env, job.post_id, "photo", i), is_carousel_item: "true" });
+          const id = await createContainer(env, account, { image_url: await createGrant(env, job.post_id, "photo", i), is_carousel_item: "true" });
           children.push(id);
           // Checkpoint each child: a crash never loses the order or count.
           if (!(await write(env.DB, job, { children: JSON.stringify(children) }, ["preparing"])))
@@ -374,7 +399,7 @@ export async function processInstagramBatch(env: Env, now = new Date()): Promise
       if (job.kind === "CAROUSEL") { fields.media_type = "CAROUSEL"; fields.children = children.join(","); }
       else if (job.kind === "REELS") { fields.media_type = "REELS"; fields.video_url = await createGrant(env, job.post_id, "video", 0); fields.share_to_feed = "true"; }
       else fields.image_url = await createGrant(env, job.post_id, "photo", 0);
-      const container = await createContainer(env, fields);
+      const container = await createContainer(env, account, fields);
       if (!(await write(env.DB, job, { status: "processing", container_id: container, processing_since: now.toISOString(), lease_until: null }, ["preparing"])))
         throw new Error("Instagram preparation lost its claim; nothing was published.");
       return;
@@ -401,7 +426,7 @@ export async function processInstagramBatch(env: Env, now = new Date()): Promise
     sent = true;
     let mediaId: string;
     try {
-      const res = await graphPost(env, `${env.IG_USER_ID}/media_publish`, new URLSearchParams({ creation_id: String(job.container_id) }));
+      const res = await graphPost(env, `${account}/media_publish`, new URLSearchParams({ creation_id: String(job.container_id) }));
       if (!res?.id) throw new Error("no media id returned");
       mediaId = String(res.id);
       remoteId = mediaId;
